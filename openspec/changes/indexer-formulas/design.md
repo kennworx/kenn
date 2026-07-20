@@ -51,18 +51,51 @@ The cost is real and accepted: a CLI-only patch release rebuilds and
 republishes all three sidecars. That is CI time, not user cost, and it keeps
 "which sidecar goes with which kenn" from ever being a question.
 
-### D3 — `kenn-swift` is macOS-only for now
+### D3 — `kenn-swift` has a toolchain dependency on EVERY platform
 
-It links `libswiftCore`. macOS ships the Swift runtime; Linux does not — which
-is why the Docker image is `swift:*-noble-slim` based rather than plain noble.
-A Linux formula would need `depends_on "swift"`, pulling an entire toolchain to
-support a 17 MB binary.
+Measured, not assumed — `otool -L` on a release build:
 
-Linux users have two working paths already: `runtime = "docker"`, or building
-from source with a Swift toolchain they must have anyway. Revisit when someone
-actually wants it.
+```
+/usr/lib/swift/libswiftCore.dylib      ← macOS ships this
+@rpath/libIndexStore.dylib             ← it does NOT
+rpath includes /Applications/Xcode.app/Contents/Developer/…/usr/lib
+```
 
-`kenn-ts` and `kenn-dotnet` are self-contained and ship for both platforms.
+`libIndexStore` is not part of the OS on either platform. On macOS it lives in
+Xcode or the Command Line Tools; on Linux the Docker image copies
+`libIndexStore.so` out of the vendor image for exactly this reason. A binary
+built where Xcode is installed bakes an absolute `/Applications/Xcode.app` rpath
+and breaks on a machine with only the Command Line Tools.
+
+The first version of this design said "macOS ships the Swift runtime, so macOS
+is the easy case". That is true of `libswiftCore` and false of the library that
+actually matters here.
+
+Three ways out, to be decided in implementation:
+
+1. **Vendor `libIndexStore` into the formula** and rewrite the rpath with
+   `install_name_tool` so it loads from the Cellar. Self-contained, and the
+   formula owns a copy of a toolchain library — including its licensing and its
+   version drift against the user's Swift.
+2. **`depends_on xcode:`** and rely on the toolchain path. Honest about the
+   requirement, but Homebrew's `xcode` dependency does not accept a
+   Command-Line-Tools-only install, so it demands the full Xcode from users who
+   may only need the CLT.
+3. **Build against the Command Line Tools path** so the rpath targets
+   `/Library/Developer/CommandLineTools/usr/lib`, which is the more common
+   install. Smallest change; still a hard dependency, just a cheaper one.
+
+Option 1 is the only one that makes `brew install kenn-swift` work with no
+further setup, and is the default recommendation — but the licensing of
+redistributing a toolchain library has to be checked before committing to it.
+That check is a task, not an assumption.
+
+Linux stays out of scope regardless: it needs the runtime *and* the index-store
+library, and `runtime = "docker"` already delivers both.
+
+`kenn-ts` and `kenn-dotnet` are genuinely self-contained and ship for both
+platforms — `kenn-dotnet` is published `--self-contained`, and `kenn-ts` is a
+`bun --compile` binary with the runtime inside it.
 
 ### D4 — A separate workflow on the same tag, uploading to the same release
 

@@ -6,19 +6,24 @@ in the tarball, so a Homebrew user gets a tool that indexes none of the
 languages kenn implements itself, and finds out at `kenn init` time.
 
 Bundling all three into the single `kenn` formula is the obvious move and the
-wrong one. Measured:
+wrong one. Measured compressed, which is what a user downloads:
 
-| binary | size | built by |
-|---|---:|---|
-| `kenn` (release, xz) | 5 MB | cargo |
-| `kenn-ts` | 69 MB | `bun build --compile` |
-| `kenn-dotnet` | 45 MB | `dotnet publish` self-contained |
-| `kenn-swift` | 17 MB | `swift build` |
+| binary | compressed | raw | built by |
+|---|---:|---:|---|
+| `kenn` | 5.4 MB | — | cargo |
+| `kenn-dotnet` | 37.1 MB | 45 MB | `dotnet publish` self-contained |
+| `kenn-ts` | 15.4 MB | 69 MB | `bun build --compile` |
+| `kenn-swift` | 2.2 MB | 17 MB | `swift build` |
 
-The sidecars are **~26× the size of the CLI**. One fat formula charges every
-user ~130 MB for languages they may not use, forces every release to install
-three foreign toolchains on the runners, and makes the whole release fail when
-any one of them breaks.
+One fat formula is ~60 MB against 5.4 MB — an **11× download for every user**,
+whichever languages they index, plus three foreign toolchains on every release
+runner and a release that fails whenever any one of them breaks.
+
+Note what the numbers do NOT say. `kenn-dotnet` is 68% of that weight on its
+own, and `kenn-swift` compresses smaller than the CLI — so size alone would
+justify splitting out C# and little else. The stronger argument is that the
+three have genuinely different platform constraints (below), which a single
+formula cannot express.
 
 **One formula per indexer instead.** `brew install kennworx/tap/kenn` stays
 5 MB; a C# user adds `kennworx/tap/kenn-dotnet`. Each formula carries its own
@@ -43,11 +48,29 @@ platform, attaches the archives to the release, and pushes a generated formula
 to the tap — the same shape as `dist`'s homebrew publish, for artifacts `dist`
 cannot see.
 
-**`kenn-swift` is macOS-only initially.** It links `libswiftCore`, which macOS
-ships and Linux does not — this is exactly why the Docker image is
-`swift:*-noble-slim` based rather than plain noble. A Linux formula would need
-`depends_on "swift"` pulling a full toolchain for a 17 MB binary. Deferred with
-that reasoning recorded, not silently skipped.
+**`kenn-swift` needs a Swift toolchain on EVERY platform, macOS included.**
+Measured with `otool -L` rather than assumed:
+
+```
+/usr/lib/swift/libswiftCore.dylib          ← macOS ships this
+@rpath/libIndexStore.dylib                 ← it does NOT
+rpath: /Applications/Xcode.app/Contents/Developer/Toolchains/…/usr/lib
+```
+
+`libIndexStore` is absent from `/usr/lib/swift`; it lives inside Xcode or the
+Command Line Tools. A binary built on a machine with Xcode carries a **hardcoded
+rpath into `/Applications/Xcode.app`** and fails on a machine that has only the
+Command Line Tools — or Xcode elsewhere.
+
+This is the same hazard `docker/kenn-swift/Dockerfile` already documents for
+Linux ("kenn-swift LINKS the toolchain's index-store library, which the slim
+base does not ship… exits 127, naming neither the library nor the reason"). It
+applies on macOS too, and the first draft of this proposal missed it by
+reasoning about `libswiftCore` alone.
+
+So `kenn-swift` is not simply "the macOS-only one". It is the one whose formula
+has an unresolved dependency question on every platform — bundle the library and
+rewrite the rpath, or declare a toolchain dependency. See the design.
 
 **Third-party indexers stay out.** `rust-analyzer`, `scip-go` and
 `scip-python` are separately maintained; kenn calls them rather than vendoring

@@ -64,15 +64,27 @@ is missing or empty. A formula MUST NOT be published with an absent or empty
 - **THEN** each `sha256` in it equals the checksum of the archive at the
   corresponding URL
 
-### Requirement: Indexer platform support is declared, not implied
+### Requirement: An installed indexer runs without further setup
 
-Each indexer formula SHALL declare the platforms it supports, and SHALL be
-absent for platforms where its binary cannot run.
+An indexer installed from a formula SHALL execute on a clean machine of that
+platform, resolving every library it links, with no toolchain the formula does
+not declare or provide.
 
-`kenn-swift` SHALL be macOS-only: it links the Swift runtime, which macOS
-provides and Linux does not. Publishing a Linux `kenn-swift` that cannot exec
-is worse than publishing none, because the failure appears at index time rather
-than install time.
+A formula SHALL NOT be published for a platform where its binary cannot resolve
+its libraries. `kenn-swift` links `libIndexStore`, which is part of the Swift
+toolchain rather than the OS on both macOS and Linux, so it either vendors that
+library with a corrected load path or declares the toolchain as a dependency.
+
+An unresolved library is the failure this requirement exists to prevent: the
+binary installs successfully and dies at index time naming neither the missing
+library nor the reason.
+
+#### Scenario: Swift indexer on a machine without Xcode
+
+- **WHEN** `kenn-swift` is installed from the tap on macOS with only the
+  Command Line Tools present
+- **THEN** the binary executes and reports its version
+- **AND** it does not fail resolving `libIndexStore`
 
 #### Scenario: Swift indexer on Linux
 
@@ -80,6 +92,11 @@ than install time.
 - **THEN** Homebrew reports the formula is unavailable for that platform
 - **AND** the message names the docker runtime and building from source as the
   supported routes
+
+#### Scenario: A self-contained indexer needs no runtime
+
+- **WHEN** `kenn-dotnet` is installed on a machine with no .NET SDK
+- **THEN** it executes and reports its version
 
 ### Requirement: Indexers are versioned with the CLI
 

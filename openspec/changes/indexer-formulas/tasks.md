@@ -18,8 +18,17 @@
   binary reports the right architecture.
 - [ ] 2.2 `kenn-dotnet` per RID (`osx-arm64`, `linux-x64`, `linux-arm64`),
   self-contained. → verify: runs on a machine with no .NET SDK installed.
-- [ ] 2.3 `kenn-swift` for macOS arm64 only (D3). → verify: `otool -L` shows
-  it links the OS-provided Swift runtime, and it runs on a clean macOS.
+- [ ] 2.3 `kenn-swift` for macOS arm64 only (D3). Resolve `libIndexStore`
+  FIRST — it is not part of the OS, and a build made where Xcode is installed
+  bakes an absolute `/Applications/Xcode.app` rpath. Decide between vendoring
+  the library with an `install_name_tool` rewrite, `depends_on xcode:`, or
+  building against the Command Line Tools path. → verify: `otool -L` and
+  `otool -l | grep -A2 LC_RPATH` on the SHIPPED binary, then run it on a
+  machine with only the Command Line Tools — the developer machine has Xcode
+  and therefore cannot detect this failure.
+- [ ] 2.3a If vendoring `libIndexStore`, confirm its license permits
+  redistribution before shipping it in a formula. → verify: the license is
+  named in the change record, not assumed.
 - [ ] 2.4 Each job independent, `fail-fast: false`, none depending on another
   sidecar (D5). → verify: force one job to fail and confirm the others and
   the `kenn` release still publish.
