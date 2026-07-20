@@ -7,17 +7,28 @@ which nulls stdout, stderr and stdin and returns a bool. A failure becomes
 `Availability::Degraded { command, hint }`, where `hint` is a constant from
 `SPECS` in `detect.rs`. Nothing the indexer said survives.
 
-**Index time.** The driver spawns the indexer with a piped stderr,
-`spawn_stderr_capture` drains it in the background (so the child cannot block
-on a full pipe), and `error_reason` extracts a line for the run report. That
-function already prefers the first line beginning with `error` over the last
-non-empty line, with a comment explaining why: rust-analyzer and cargo end with
-a panic backtrace, so `lines().last()` returns `6: __pthread_cond_wait` and
-discards the actual cause.
+**Index time.** Every driver pipes stderr, and `spawn_stderr_capture` drains it
+in the background so the child cannot block on a full pipe. What happens next
+splits by driver family:
 
-So the extraction convention already exists and is already relied upon. What is
-missing is that no indexer is *required* to produce a line in that shape, and
-probe time ignores stderr entirely.
+- **rust, go, python** — `error_reason` extracts one line, preferring the first
+  beginning with `error` over the last non-empty one, with a comment explaining
+  that cargo and rust-analyzer end in a backtrace so `lines().last()` returns
+  `6: __pthread_cond_wait` and discards the cause.
+- **typescript, dotnet, swift** — no extraction.
+  `record_jsonl_exit_status` appends the whole 8 KB tail to the failure message
+  verbatim.
+
+The extraction convention is therefore already proven, and wired exclusively to
+the three indexers that cannot be made to follow a kenn convention. The three
+that could are the ones dumping raw output.
+
+`kenn-dotnet` shows the message quality this change wants everywhere.
+`MsBuildBootstrap.LocatorAdvice` refuses the default "install the SDK" advice
+when the SDK *is* installed and a `global.json` pin is unsatisfiable, naming
+the pin, its `rollForward`, and three concrete fixes. It is exactly right —
+and carries no `error:` prefix, so the extraction convention would not select
+it. Good message, outside the contract.
 
 ## Goals / Non-Goals
 
@@ -82,7 +93,19 @@ it said*.
 The current report line — `degraded → text fallback (<command> not runnable)` —
 is accurate for both but useful for neither.
 
-### D4 — `just probe-smoke` asserts the message, not just the exit code
+### D4 — The sidecar path leads with the `error:` line and keeps the tail
+
+`record_jsonl_exit_status` currently appends the raw 8 KB tail. It SHOULD lead
+with the extracted `error:` line and keep the tail after it — not replace one
+with the other.
+
+Both readers matter and want different things. An agent reading
+`failed_projects` over MCP needs the one actionable sentence at the front; a
+human debugging a broken toolchain wants the surrounding build output. Leading
+with the line and retaining the tail serves both; dropping the tail would trade
+one information loss for another.
+
+### D5 — `just probe-smoke` asserts the message, not just the exit code
 
 It already runs each sidecar against an unreachable toolchain and asserts no
 crash. It gains an assertion that stderr carries an `error:` line naming an

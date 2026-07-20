@@ -22,11 +22,23 @@ exits non-zero for a specific, nameable reason, reported as something vague.
 `kenn-swift`'s missing `libIndexStore` is the current example: the binary
 installs fine and dies later "naming neither the library nor the reason".
 
-Index time is already better and shows the way: the driver captures sidecar
-stderr and `error_reason` deliberately picks the first `error`-prefixed line
-rather than the last line, because the last line is usually a backtrace frame.
-The convention exists; it is just neither required of sidecars nor honoured at
-probe time.
+Index time fails the caller differently, and the split is the opposite of what
+you would guess:
+
+| driver | extraction | what the caller gets |
+|---|---|---|
+| rust, go, python (third-party) | `error_reason` | one actionable line |
+| ts, dotnet, swift (kenn's own) | none | the raw 8 KB stderr tail |
+
+`error_reason` picks the first `error`-prefixed line rather than the last —
+because the last is usually a backtrace frame — and it is applied ONLY to the
+third-party tools, which cannot be made to follow a kenn convention. kenn's own
+sidecars, the ones that could, get `record_jsonl_exit_status` dumping their
+whole tail verbatim into `failed_projects`.
+
+So the extraction convention exists and is proven, and is wired precisely where
+it cannot be relied on. For an agent reading a failure over MCP, 8 KB of build
+noise around one useful sentence is the problem.
 
 ## What Changes
 

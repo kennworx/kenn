@@ -12,9 +12,12 @@
   motivated the change — the binary currently installs fine and dies later
   naming neither the library nor the reason. → verify: probe-smoke passes for
   swift; stdout stays empty.
-- [ ] 2.2 `kenn-dotnet`: same shape for a missing/unusable SDK. It already
-  names the `global.json` pin rather than blaming PATH — keep that specificity
-  and add the install command. → verify: probe-smoke passes for dotnet.
+- [ ] 2.2 `kenn-dotnet`: the message already exists and is the quality bar —
+  `MsBuildBootstrap.LocatorAdvice` names the `global.json` pin, its
+  `rollForward`, and three fixes, specifically refusing the misleading "install
+  the SDK" when the SDK is installed. It carries no `error:` prefix, so the
+  extraction convention would not select it. Add the prefix; do NOT rewrite the
+  message. → verify: probe-smoke passes for dotnet and the pin is still named.
 - [ ] 2.3 `kenn-ts`: same shape. → verify: probe-smoke passes for typescript.
 - [ ] 2.4 Confirm no sidecar writes any diagnostic to stdout. → verify: run
   each against a broken toolchain and assert stdout is empty or valid JSONL —
@@ -40,12 +43,18 @@
   would pass a test that only checks the capture. → verify: red on the
   mutation, green on restore.
 
-## 4. Index time
+## 4. Index time — real work, not the no-op it looks like
 
-- [ ] 4.1 Confirm `error_reason` already surfaces a conforming line end-to-end
-  — it prefers the first `error`-prefixed line by design. This is likely a
-  no-op in code and a test. → verify: an indexer failing mid-run puts its
-  `error:` line in the run report's `failed_projects`, not a backtrace frame.
+- [ ] 4.1 `record_jsonl_exit_status` (`pipeline/ingest.rs:619`) appends the raw
+  8 KB stderr tail with no extraction — `error_reason` is wired only to the
+  SCIP drivers (rust/go/python), never to kenn's own sidecars. Apply it here,
+  leading with the `error:` line and KEEPING the tail after it (D4). → verify:
+  a failing sidecar's `failed_projects` entry opens with the actionable line;
+  the tail is still present below it.
+- [ ] 4.2 **Mutation-check**: remove the extraction so the entry leads with raw
+  output again, and confirm the test goes RED. An assertion that merely greps
+  the whole entry for the message passes either way and guards nothing. →
+  verify: red on the mutation, green on restore.
 
 ## 5. Documentation
 
