@@ -131,6 +131,12 @@ for anything missing:
 fallback, so it stays searchable but has no symbol graph. Re-run `kenn init`
 after installing an indexer to pick it up.
 
+When an indexer is present but fails, the report shows **what it actually
+said** rather than the generic hint — so "reinstall it" is not always the
+answer. An indexer that starts and then fails on a missing SDK, or one the
+dynamic loader refuses to start over a missing library, each say so in their
+own words, and kenn passes that through.
+
 Two gotchas worth knowing: `scip-go` needs the target module to have been
 built (`go build ./...`) or it appears to hang while compiling dependencies,
 and `scip-python` shells out to `pip list`, so the Python environment you want

@@ -229,7 +229,20 @@ pub enum Availability {
     /// Authored as `enabled = true` + `runtime = "docker"` + `image` (task 5.1).
     Containerized { image: String },
     /// Marker found but the probe failed. The language falls back to text.
-    Degraded { command: String, hint: String },
+    ///
+    /// `hint` is the static per-language install advice; `reason` is what the
+    /// failing process (or the loader that refused to start it) actually said,
+    /// empty when it could not be executed or said nothing. Both are kept:
+    /// `reason` is specific but only exists sometimes, and every third-party
+    /// indexer has nothing but `hint`.
+    Degraded {
+        command: String,
+        hint: String,
+        reason: String,
+        /// The command could not be executed at all, rather than running and
+        /// failing. Different fix, so it reads differently.
+        not_executable: bool,
+    },
 }
 
 /// A detected language paired with its availability verdict.
@@ -241,17 +254,51 @@ pub struct Classified {
 /// Run a version-probe argv and report success. Exit 0 ⇒ true; a non-zero exit
 /// (the Homebrew-rustup-shim case: a present binary that fails to run) or a
 /// spawn failure ⇒ false. Existence on `PATH` alone is deliberately not enough.
-fn probe_ok(argv: &[String]) -> bool {
+/// What a probe learned. A bool cannot express the distinction that matters:
+/// an indexer that could not be executed needs installing, while one that ran
+/// and failed is present but missing something it needs — and only the second
+/// has an explanation worth showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Probe {
+    /// Ran and exited 0.
+    Ok,
+    /// Could not be executed at all — not found, or not executable.
+    NotExecutable,
+    /// Ran and exited non-zero. `stderr` is what it said, which may be empty.
+    Failed { stderr: String },
+}
+
+impl Probe {
+    fn ok(&self) -> bool {
+        matches!(self, Probe::Ok)
+    }
+}
+
+/// Run `<command> --version` and report what happened.
+///
+/// stderr is CAPTURED rather than discarded: it is the only place the specific
+/// reason lives. For `kenn-swift` that reason is often not even the indexer's
+/// own words — `libIndexStore` is a hard link dependency, so a failure to
+/// resolve it aborts the process in dyld before `main`, and the loader's
+/// "Library not loaded" message is the whole diagnostic.
+///
+/// `output()` rather than a background drain: `--version` writes a few bytes,
+/// so there is no pipe to fill. The index-time path streams and does need one.
+fn probe_ok(argv: &[String]) -> Probe {
     let Some((prog, rest)) = argv.split_first() else {
-        return false;
+        return Probe::NotExecutable;
     };
-    std::process::Command::new(prog)
+    let out = std::process::Command::new(prog)
         .args(rest)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => Probe::Ok,
+        Ok(o) => Probe::Failed {
+            stderr: String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        },
+        Err(_) => Probe::NotExecutable,
+    }
 }
 
 /// Classify one detected spec, using `probe` to test its tool. A built-in is
@@ -263,7 +310,7 @@ fn probe_ok(argv: &[String]) -> bool {
 /// `Degraded` — index it in a container rather than dropping to text.
 fn classify_with(
     spec: &'static LanguageSpec,
-    probe: impl Fn(&[String]) -> bool,
+    probe: impl Fn(&[String]) -> Probe,
     containerize: bool,
 ) -> Classified {
     let availability = match spec.probe_command {
@@ -272,16 +319,23 @@ fn classify_with(
             let mut argv = command_fn();
             let tool = argv.first().cloned().unwrap_or_default();
             argv.push("--version".to_string());
-            if probe(&argv) {
+            let outcome = probe(&argv);
+            if outcome.ok() {
                 Availability::Enabled
             } else if let Some(image) = spec.default_image.filter(|_| containerize) {
                 Availability::Containerized {
                     image: image.to_string(),
                 }
             } else {
+                let (reason, not_executable) = match outcome {
+                    Probe::Failed { stderr } => (stderr, false),
+                    _ => (String::new(), true),
+                };
                 Availability::Degraded {
                     command: tool,
                     hint: spec.install_hint.unwrap_or("").to_string(),
+                    reason,
+                    not_executable,
                 }
             }
         }
@@ -563,15 +617,43 @@ mod tests {
     fn probe_ok_reflects_exit_status() {
         // Real system binaries stand in for the three outcomes, so the test
         // needs no language toolchain installed.
-        assert!(probe_ok(&argv(&["true"])), "exit 0 ⇒ available");
+        assert_eq!(probe_ok(&argv(&["true"])), Probe::Ok, "exit 0 ⇒ available");
         assert!(
-            !probe_ok(&argv(&["false"])),
+            matches!(probe_ok(&argv(&["false"])), Probe::Failed { .. }),
             "non-zero exit ⇒ unavailable (the shim case)"
         );
-        assert!(
-            !probe_ok(&argv(&["kenn-nonexistent-binary-zzz", "--version"])),
+        assert_eq!(
+            probe_ok(&argv(&["kenn-nonexistent-binary-zzz", "--version"])),
+            Probe::NotExecutable,
             "spawn failure ⇒ unavailable"
         );
+    }
+
+    /// A binary that fails must hand back what it said. This is the whole point
+    /// of the probe capturing stderr: for `kenn-swift` the specific reason is
+    /// often the dynamic loader's "Library not loaded", printed before `main`
+    /// ever runs, and it is the only place the missing library is named.
+    #[test]
+    fn a_failing_probe_captures_what_the_command_said() {
+        let argv = argv(&["sh", "-c", "echo 'boom: libIndexStore' >&2; exit 1"]);
+        match probe_ok(&argv) {
+            Probe::Failed { stderr } => {
+                assert!(stderr.contains("libIndexStore"), "captured: {stderr:?}");
+            }
+            other => panic!("want Failed with stderr, got {other:?}"),
+        }
+    }
+
+    /// "Not found" and "ran and failed" are different fixes — install it, versus
+    /// it is installed but something it needs is not — so they must not collapse
+    /// into one verdict.
+    #[test]
+    fn an_absent_command_is_distinguished_from_a_failing_one() {
+        assert_eq!(
+            probe_ok(&argv(&["kenn-nonexistent-binary-zzz"])),
+            Probe::NotExecutable
+        );
+        assert!(matches!(probe_ok(&argv(&["false"])), Probe::Failed { .. }));
     }
 
     #[test]
@@ -586,15 +668,21 @@ mod tests {
 
     #[test]
     fn an_available_tool_enables_its_language() {
-        let c = classify_with(spec("rust"), |_| true, false);
+        let c = classify_with(spec("rust"), |_| Probe::Ok, false);
         assert_eq!(c.availability, Availability::Enabled);
     }
 
     #[test]
     fn a_failing_probe_degrades_with_command_and_hint() {
-        let c = classify_with(spec("go"), |_| false, false);
+        let c = classify_with(
+            spec("go"),
+            |_| Probe::Failed {
+                stderr: String::new(),
+            },
+            false,
+        );
         match c.availability {
-            Availability::Degraded { command, hint } => {
+            Availability::Degraded { command, hint, .. } => {
                 assert_eq!(command, "scip-go");
                 assert!(hint.contains("scip-go"), "hint names the tool: {hint}");
             }
@@ -602,11 +690,61 @@ mod tests {
         }
     }
 
+    /// The wiring between capture and render, which neither of those tests
+    /// covers on its own: the probe's stderr has to REACH `Degraded.reason`.
+    /// A capture test passes while classify drops it on the floor, and a render
+    /// test that builds `Degraded` by hand passes while nothing ever fills it.
+    #[test]
+    fn a_failing_probes_stderr_reaches_the_verdict() {
+        let c = classify_with(
+            spec("swift"),
+            |_| Probe::Failed {
+                stderr: "dyld: Library not loaded: @rpath/libIndexStore.dylib".to_string(),
+            },
+            false,
+        );
+        match c.availability {
+            Availability::Degraded {
+                reason,
+                not_executable,
+                ..
+            } => {
+                assert!(reason.contains("libIndexStore"), "reason: {reason:?}");
+                assert!(!not_executable, "it ran and failed, it was not absent");
+            }
+            other => panic!("want Degraded carrying the reason: {other:?}"),
+        }
+    }
+
+    /// An absent command carries no reason and must say so, or the report shows
+    /// an empty explanation instead of the install hint.
+    #[test]
+    fn an_unexecutable_probe_carries_no_reason() {
+        let c = classify_with(spec("swift"), |_| Probe::NotExecutable, false);
+        match c.availability {
+            Availability::Degraded {
+                reason,
+                not_executable,
+                ..
+            } => {
+                assert!(reason.is_empty(), "reason: {reason:?}");
+                assert!(not_executable);
+            }
+            other => panic!("want Degraded: {other:?}"),
+        }
+    }
+
     #[test]
     fn a_failing_probe_with_docker_containerizes_to_the_default_image() {
         // `--docker` active + probe fails + a published image ⇒ Containerized
         // with that language's digest-pinned default, not Degraded.
-        let c = classify_with(spec("rust"), |_| false, true);
+        let c = classify_with(
+            spec("rust"),
+            |_| Probe::Failed {
+                stderr: String::new(),
+            },
+            true,
+        );
         match c.availability {
             Availability::Containerized { image } => {
                 assert_eq!(image, IMG_RUST);
@@ -624,7 +762,7 @@ mod tests {
         // Containerization is a *fallback*: an available local tool stays
         // Enabled even under `--docker`, so we don't force a container when the
         // host toolchain works.
-        let c = classify_with(spec("rust"), |_| true, true);
+        let c = classify_with(spec("rust"), |_| Probe::Ok, true);
         assert_eq!(c.availability, Availability::Enabled);
     }
 
@@ -637,7 +775,7 @@ mod tests {
             spec("rust"),
             |argv| {
                 *seen.borrow_mut() = argv.to_vec();
-                true
+                Probe::Ok
             },
             false,
         );

@@ -200,6 +200,8 @@ mod tests {
             Availability::Degraded {
                 command: String::new(),
                 hint: String::new(),
+                reason: String::new(),
+                not_executable: true,
             },
         )
     }

@@ -629,6 +629,23 @@ pub(crate) fn record_jsonl_exit_status(
                 .map_or_else(|| format!("signal/{s:?}"), |c| format!("exit {c}"));
             let mut msg = format!("{} {code}", report.indexer_name);
             if !stderr_tail.is_empty() {
+                // Lead with the extracted cause, then keep the tail.
+                //
+                // This path used to append the raw 8KB tail alone, so the one
+                // actionable sentence sat buried in build noise — fine for a
+                // human scrolling, useless to an agent reading the failure over
+                // a tool call. `error_reason` is the same extraction the SCIP
+                // drivers already use, and it prefers the first `error` line
+                // over the last, because the last is usually a backtrace frame.
+                //
+                // The tail is RETAINED rather than replaced: the two readers
+                // want different things, and dropping it would trade one
+                // information loss for another.
+                let reason = crate::driver::error_reason(stderr_tail);
+                if !reason.is_empty() {
+                    msg.push_str(": ");
+                    msg.push_str(reason);
+                }
                 msg.push_str("\nstderr tail:\n");
                 msg.push_str(stderr_tail.trim_end());
             }

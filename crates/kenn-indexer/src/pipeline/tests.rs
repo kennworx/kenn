@@ -367,6 +367,49 @@ fn exit_status_message_names_the_producer() {
     );
 }
 
+/// The failure entry must OPEN with the cause, not bury it.
+///
+/// This path used to append the raw 8KB stderr tail alone. An agent reading
+/// `failed_projects` over a tool call gets the first line; if that line is
+/// "kenn-swift exit 1" and the actual reason is 40 lines down inside build
+/// noise, the relay has technically preserved the information and practically
+/// lost it.
+///
+/// The tail must still be there — a person debugging a broken toolchain wants
+/// the surrounding output — so this asserts BOTH, not one at the expense of the
+/// other.
+#[cfg(unix)]
+#[test]
+fn exit_status_message_leads_with_the_cause_and_keeps_the_tail() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    // The real shape: progress output, the cause mid-stream, then a backtrace.
+    // `lines().last()` would pick the frame, which is why extraction prefers
+    // the first `error` line.
+    let tail = "Building for debugging...\n\
+                error: no such module 'IndexStore'\n\
+                note: check your toolchain\n\
+                stack backtrace:\n   6: __pthread_cond_wait";
+    let mut report = RunReport::started("kenn-swift", "0", "u");
+    record_jsonl_exit_status(Ok(ExitStatus::from_raw(1 << 8)), tail, &mut report);
+
+    let entry = &report.failed_projects[0];
+    let first = entry.lines().next().unwrap_or_default();
+    assert!(
+        first.contains("no such module 'IndexStore'"),
+        "first line must carry the cause, got: {first}"
+    );
+    assert!(
+        !first.contains("__pthread_cond_wait"),
+        "must not lead with a backtrace frame: {first}"
+    );
+    assert!(
+        entry.contains("Building for debugging"),
+        "the tail must be retained: {entry}"
+    );
+}
+
 #[test]
 fn pipeline_finalizes_even_with_no_units() {
     let dir = TempDir::new().unwrap();
