@@ -1,0 +1,2 @@
+{"op":"attach","anchor":"crates/kenn-store/src/db/sqlite/reader/fetch.rs","ts":"2026-06-24T16:28:32.92535Z","sha":"f94e7389d5e03dbd"}
+{"op":"attach","anchor":"crates/kenn-store/src/db/findings/lifecycle.rs","ts":"2026-06-24T16:28:32.92535Z","sha":"2b6064fdd8624d57"}

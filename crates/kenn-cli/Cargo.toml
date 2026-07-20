@@ -1,0 +1,52 @@
+[package]
+name = "kenn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Code graph for your codebase — and for the agents working on it"
+repository.workspace = true
+homepage = "https://github.com/kennworx/kenn"
+
+# The one distributable crate in the workspace. Required explicitly because
+# `publish = false` otherwise hides its binary from dist entirely.
+[package.metadata.dist]
+dist = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "kenn"
+path = "src/main.rs"
+
+[dependencies]
+kenn-model = { path = "../kenn-model" }
+kenn-config = { path = "../kenn-config" }
+kenn-indexer = { path = "../kenn-indexer" }
+kenn-store = { path = "../kenn-store" }
+kenn-mcp = { path = "../kenn-mcp" }
+kenn-analyze = { path = "../kenn-analyze" }
+kenn-server = { path = "../kenn-server" }
+kenn-embed = { path = "../kenn-embed" }
+kenn-collect = { path = "../kenn-collect" }
+
+anyhow.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
+toon = "0.1"
+serde = { workspace = true }
+serde_json.workspace = true
+time.workspace = true
+toml.workspace = true
+toml_edit = "0.25"
+globset.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+tempfile.workspace = true
+rusqlite.workspace = true

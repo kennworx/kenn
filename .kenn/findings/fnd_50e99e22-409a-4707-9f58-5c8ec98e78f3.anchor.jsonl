@@ -1,0 +1,6 @@
+{"op":"attach","anchor":"crates/kenn-cli/src/init/detect.rs","ts":"2026-07-20T09:45:52.681141Z","sha":"143f0b5ba5e25aa0"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/workflow.rs","ts":"2026-07-20T09:45:52.681141Z","sha":"4509cae8c304a5eb"}
+{"op":"attach","anchor":"docker","ts":"2026-07-20T09:45:52.681141Z"}
+{"op":"attach","anchor":"docker/README.md","ts":"2026-07-20T09:45:52.520516Z","sha":"06fc9672c26fb46b"}
+{"op":"attach","anchor":"crates/kenn-toolchain/src/resolve.rs","ts":"2026-07-20T09:45:52.520516Z","sha":"5126ee51dd15c732"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/docker.rs","ts":"2026-07-20T09:45:52.520516Z","sha":"3c8bd155e1ab32fa"}

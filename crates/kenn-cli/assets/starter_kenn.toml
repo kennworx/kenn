@@ -1,0 +1,142 @@
+# kenn configuration. Every section is optional; defaults shown below.
+
+[workspace]
+# root = "."           # default: current workspace (git toplevel or cwd)
+# Additional workspace-wide skip globs. `.git/**` is always skipped
+# (hardcoded); linked git worktrees are auto-discovered. Use this for
+# cross-language paths the indexer should never touch (e.g., secrets
+# directories). Per-language conventions live on `[language.X].excludes`.
+# excludes = []
+
+[layout]
+# derived_root = ".kenn/local"   # where the throwaway derived store lives —
+                                 # a relative/absolute path, or "global" for a
+                                 # per-repo XDG cache shared across branches.
+                                 # The committed `.kenn/` sidecars never move.
+
+[language.csharp]
+enabled = false                             # opt-in; flip to true for C# workspaces
+# command = ["kenn-dotnet"]                 # launcher tokens; default = PATH lookup
+# projects = ["MyApp.sln"]                  # restrict to specific .sln/.csproj; default: auto-discover
+# restore = true                            # run `dotnet restore` before indexing (default).
+#                                           # Without it NuGet types never bind — they degrade to
+#                                           # bare names and the run still exits 0, silently. Set
+#                                           # false ONLY if you always pre-restore the workspace.
+provision_directory_build_props = false     # opt-in: never modify the repo without consent
+# Per-language excludes; user-set REPLACES the default fully. Default:
+# excludes = ["bin/**", "**/bin/**", "obj/**", "**/obj/**"]
+
+[language.rust]
+enabled = false                             # opt-in; flip to true for Rust workspaces
+# command = ["rust-analyzer"]               # launcher tokens; default = PATH lookup
+# excludes = ["target/**", "**/target/**"]  # default; user-set REPLACES
+
+[language.typescript]
+enabled = false                             # opt-in; flip to true for TypeScript workspaces
+# command = ["kenn-ts"]                     # launcher tokens; default = PATH lookup
+# excludes = ["node_modules/**", "**/node_modules/**"]   # default; user-set REPLACES
+
+[language.python]
+enabled = false                             # opt-in; flip to true for Python workspaces
+# command = ["scip-python"]                 # launcher tokens; default = PATH lookup
+# Other runtimes: bunx, npx, uvx — see docs/
+# targets = ["src/api"]                     # workspace-relative sub-packages; N entries = N × Pyright pass
+# Per-language excludes (walk-time + ingest-time). User-set REPLACES.
+# Default = PythonConfig::DEFAULT_EXCLUDES:
+# excludes = [
+#     "__pycache__/**", "**/__pycache__/**",
+#     ".venv/**", "**/.venv/**", "venv/**", "**/venv/**",
+#     ".tox/**", "**/.tox/**",
+#     "dist/**", "**/dist/**", "build/**", "**/build/**",
+#     "*.egg-info/**", "**/*.egg-info/**",
+# ]
+
+[language.go]
+enabled = false                             # opt-in; flip to true for Go workspaces
+# command = ["scip-go"]                     # launcher tokens; default = PATH lookup
+# scip-go needs a BUILT module: run your normal `go build ./...` first.
+# A cold module makes scip-go appear to hang while it compiles deps.
+# Per-language excludes (walk-time + ingest-time). User-set REPLACES.
+# Default = GoConfig::DEFAULT_EXCLUDES:
+# excludes = ["vendor/**", "**/vendor/**", "**/testdata/**"]
+
+[language.swift]
+enabled = false                             # opt-in; flip to true for Swift workspaces
+# command = ["kenn-swift"]                  # launcher tokens; default = PATH lookup
+# excludes = [".build/**", "**/.build/**"]  # default; user-set REPLACES
+
+[language.markdown]
+enabled = false                             # opt-in; built-in, no external command
+# excludes = ["**/.git/**", "**/.kenn/**", "**/node_modules/**", "**/target/**"]
+
+[language.css]
+enabled = false                             # opt-in; built-in, no external command
+
+[language.html]
+enabled = false                             # opt-in; built-in, no external command
+
+[language.text]
+# Generic text fallback: chunked FTS + embeddings for files no semantic
+# producer handles. `kenn init` enables this and fills `include` when a
+# detected language's indexer is missing, so the repo stays searchable.
+enabled = false
+# include = ["**/*.yaml", "config/*.json"]  # explicit — empty indexes nothing
+# excludes = [...]                          # user-set REPLACES the defaults
+
+[index]
+# Post-index analysis (god-nodes, communities, anchors) and its outputs.
+# persist_analysis = true              # write analysis tables into the snapshot
+# write_report = true                  # render the markdown analysis report
+# report_path = "kenn_report.md"       # report output, relative to workspace root
+# graph_path = "kenn_graph.html"       # `kenn visualize` output, relative to root
+
+[tests]
+# Path globs for files that count as test code. Authoritative — no
+# built-in fallback; if this list is empty, nothing is treated as test.
+# `kenn init` seeds this from the enabled languages' conventions when it is
+# empty (below); edit freely to match your project's layout.
+paths = []
+
+[ingest]
+batch_size = 10000                          # records per sink batch
+
+[lifecycle]
+gc_keep = 2                                 # current + previous (rollback target)
+
+[staleness]
+git_aware_skip = true                       # skip reindex when (HEAD, dirty xxhashes) match
+
+[mcp]
+# Start the in-process file watcher at server boot — the primary
+# freshness driver. Set to false to require explicit `watch_start`
+# tool calls instead.
+watch_on = true
+
+# Debounce window for the file watcher: collapse edit bursts within
+# this many milliseconds of inactivity into a single reindex trigger.
+watch_debounce_ms = 30000
+
+[metrics]
+regression_threshold_pct = 10               # per-metric drop that triggers a warning
+
+# --- Docker indexer runtime ---------------------------------------------------
+# Any `[language.X]` can run its indexer inside a container instead of on the
+# host PATH — for a toolchain you'd rather not install locally:
+#   [language.rust]
+#   runtime = "docker"                                    # default "local" (host PATH)
+#   image   = "ghcr.io/kennworx/kenn-rust@sha256:…"       # required when runtime = "docker"
+# Docker is a FALLBACK, not the default: kenn prefers a local toolchain and only
+# containerizes when you ask. `kenn init --docker` does it for you — a detected
+# language whose local tool is missing is authored as `runtime = "docker"` + its
+# published `ghcr.io/kennworx/*` image (digest-pinned) instead of degrading to
+# the text fallback; needs a running docker daemon.
+#
+# Caches for the docker indexer runtime (only used when a `[language.X]` sets
+# `runtime = "docker"`). Defaults shown; uncomment to change.
+# [docker]
+# cache_volume = "kenn-shared-deps"         # opt into ONE shared cross-repo dependency-source cache.
+#                                           # Unset (default): a per-repo volume bound to the repo's main
+#                                           # worktree, shared by its worktrees, reclaimed by
+#                                           # `kenn docker-cache --orphans` when the repo is deleted.
+# persist_build_cache = false               # true: keep build artifacts (cargo target/, Go build cache)
+#                                           # in a per-workspace volume across re-indexes; never shared

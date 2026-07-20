@@ -1,0 +1,150 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kenn-model",
+    "crates/kenn-config",
+    "crates/kenn-indexer",
+    "crates/kenn-store",
+    "crates/kenn-analyze",
+    "crates/kenn-cli",
+    "crates/kenn-mcp",
+    "crates/kenn-server",
+    "crates/kenn-embed",
+    "crates/kenn-collect",
+    "crates/kenn-toolchain",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kennworx/kenn"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0.102"
+brush-parser = "0.4"
+arc-swap = "1.9.1"
+fs2 = "0.4"
+notify = "8.2.0"
+globset = "0.4.18"
+# In-process git (gix-git-backend): reads the repo directly — no `git` binary,
+# no PATH, no safe.directory, no porcelain parsing. Minimal features: `status`
+# (index-vs-worktree, pulls dirwalk/blob-diff) + `max-performance-safe` (the
+# pure-Rust zlib backend for object decompression, no C dep). Network/HTTP
+# features are deliberately excluded to bound build weight (design D4).
+gix = { version = "0.85.0", default-features = false, features = ["status", "max-performance-safe", "sha1"] }
+scip = "0.7.1"
+serde = { version = "1.0.228", default-features = false, features = ["derive", "alloc"] }
+serde_json = "1.0.150"
+serde_yaml_ng = "0.10"
+thiserror = "2"
+toml = "1.1.2"
+# SQLite backend, shared across kenn-store and kenn-collect. `bundled` ships
+# SQLite with the C library so there's no system-sqlite dependency.
+rusqlite = { version = "0.40", features = ["bundled"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "std"] }
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64", "xxh3"] }
+time = { version = "0.3", default-features = false, features = ["std", "formatting", "macros", "parsing"] }
+
+# dev-only
+insta = { version = "1.47.2", features = ["json"] }
+tempfile = "3.27.0"
+assert_cmd = "2.2.2"
+
+# Release profile: optimized for distribution size without trading runtime
+# speed. `strip` drops the symbol table; `lto` + `codegen-units = 1` let dead
+# code be eliminated across the whole 500+ crate graph; `panic = "abort"` drops
+# the stack-unwinding tables — release never needs unwinding, the dev/test
+# profiles keep it. `opt-level` stays at the default `3`: this is a
+# compute-heavy tool, so speed is never traded for size.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# The profile `dist` builds release artifacts with (`cargo build --profile dist`).
+# Required: without it every build job dies with "profile `dist` is not defined"
+# before compiling anything.
+#
+# `lto = "thin"` rather than inheriting release's fat LTO. Fat LTO on this crate
+# graph is a very long single-threaded link, paid once per target on four
+# separate runners; thin keeps nearly all the cross-crate optimization at a
+# fraction of that. Everything else — strip, panic=abort, codegen-units — comes
+# from release.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# `bench` inherits `release` by default — that would put fat `lto` + a
+# single codegen unit on the whole lance/datafusion graph, a 20-min+ link
+# on every `cargo bench`. Override to thin LTO: most of the cross-crate
+# optimization at a fraction of the link time. (`panic` is ignored for the
+# bench profile — cargo forces unwinding so the harness works.)
+[profile.bench]
+lto = "thin"
+codegen-units = 16
+
+[workspace.lints.rust]
+# Default deny — narrow `#[expect(unsafe_code, reason = "...")]` at a
+# specific block is permitted when the use case genuinely needs it
+# (extern "C" syscalls like setpriority via `Command::pre_exec` for
+# subprocess priority lowering — `forbid` cannot be overridden at
+# narrower scopes, which blocks even targeted opt-outs).
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# Stricter opt-in lints (https://emschwartz.me/your-clippy-config-should-be-stricter/)
+# Don't panic
+string_slice = "warn"
+indexing_slicing = "warn"
+unwrap_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+get_unwrap = "warn"
+unwrap_in_result = "warn"
+unchecked_time_subtraction = "warn"
+panic_in_result_fn = "warn"
+# Don't fail silently
+let_underscore_future = "warn"
+let_underscore_must_use = "warn"
+unused_result_ok = "warn"
+map_err_ignore = "warn"
+assertions_on_result_states = "warn"
+# Async safety
+await_holding_lock = "warn"
+await_holding_refcell_ref = "warn"
+if_let_mutex = "warn"
+large_futures = "warn"
+# Memory safety
+mem_forget = "warn"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_safety_comment = "warn"
+# Numeric correctness
+float_cmp = "warn"
+float_cmp_const = "warn"
+lossy_float_literal = "warn"
+cast_sign_loss = "warn"
+invalid_upcast_comparisons = "warn"
+# General best practices
+rc_mutex = "warn"
+debug_assert_with_mut_call = "warn"
+iter_not_returning_iterator = "warn"
+expl_impl_clone_on_copy = "warn"
+infallible_try_from = "warn"
+dbg_macro = "warn"
+# Suppression discipline
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"

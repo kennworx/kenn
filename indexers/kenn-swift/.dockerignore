@@ -1,0 +1,6 @@
+# Docker build context (docker/kenn-swift/Dockerfile). Exclude host build output —
+# a ~2 GB macOS-built .build/ copied into the linux image would poison the
+# in-container `swift build` (wrong platform / stale resolution) and bloat the
+# context upload.
+.build
+build

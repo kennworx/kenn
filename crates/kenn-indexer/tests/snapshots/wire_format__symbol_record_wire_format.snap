@@ -1,0 +1,18 @@
+---
+source: crates/kenn-indexer/tests/wire_format.rs
+expression: dump(&r)
+---
+{
+  "id": 42,
+  "pub_id": "rs:foo::bar",
+  "language": "rust",
+  "pkg_id": 0,
+  "kind": "function",
+  "name": "bar",
+  "enclosing_sym_id": 1,
+  "partial": false,
+  "nargs": 2,
+  "targs": 1,
+  "external": false,
+  "test": false
+}

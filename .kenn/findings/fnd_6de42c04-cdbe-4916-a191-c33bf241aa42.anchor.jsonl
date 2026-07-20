@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"docker","ts":"2026-07-13T16:28:31.526683Z"}
+{"op":"attach","anchor":".github/workflows/images.yml","ts":"2026-07-13T16:28:31.526683Z","sha":"aa6ac76df56d127e"}
+{"op":"attach","anchor":"crates/kenn-config/src/language/runtime.rs","ts":"2026-07-13T16:28:31.526683Z","sha":"b38799f544824b1a"}

@@ -1,0 +1,9 @@
+{"op":"attach","anchor":".github/workflows/images.yml","ts":"2026-07-20T09:46:08.046762Z","sha":"aa6ac76df56d127e"}
+{"op":"attach","anchor":"crates/kenn-config/src/language/runtime.rs","ts":"2026-07-20T09:46:08.046762Z","sha":"b38799f544824b1a"}
+{"op":"attach","anchor":"docker","ts":"2026-07-20T09:46:08.046762Z"}
+{"op":"attach","anchor":"docker/kenn-csharp/Dockerfile","ts":"2026-07-20T09:46:08.046762Z","sha":"e93c4c0e51f711e5"}
+{"op":"attach","anchor":"docker/kenn-python/Dockerfile","ts":"2026-07-20T09:46:08.046762Z","sha":"7d3a78f3c1806bc4"}
+{"op":"attach","anchor":"docker/kenn-swift/Dockerfile","ts":"2026-07-20T09:46:08.046762Z","sha":"cf1b8137b771e40e"}
+{"op":"attach","anchor":"docker/bake.hcl","ts":"2026-07-20T09:46:07.897594Z","sha":"70a8068bc60fb64f"}
+{"op":"attach","anchor":".github/workflows/images.yml","ts":"2026-07-20T09:46:07.897594Z","sha":"bab4920848b25d78"}
+{"op":"attach","anchor":"justfile","ts":"2026-07-20T09:46:07.897594Z","sha":"2492f3e0411bc22a"}

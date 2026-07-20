@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src","ts":"2026-07-05T07:33:59.605076Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools/support.rs","ts":"2026-07-05T07:33:59.605076Z","sha":"4772aa82f80191aa"}
+{"op":"attach","anchor":"crates/kenn-store/src/db/sqlite/writer/finalize.rs","ts":"2026-07-05T07:33:59.495546Z","sha":"b93759ac27c76a40"}
+{"op":"attach","anchor":"crates/kenn-store/src/db/sqlite/writer/finalize.rs","ts":"2026-07-07T17:20:28.156332Z","sha":"12f0a6a131c5bfc3"}

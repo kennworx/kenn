@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-store/src/git.rs","ts":"2026-07-06T15:28:30.157306Z","sha":"1f55f841f8a09833"}
+{"op":"attach","anchor":"crates/kenn-store/src/staleness.rs","ts":"2026-07-06T15:28:30.157306Z","sha":"e9c0e17ed83b9bfe"}
+{"op":"attach","anchor":"crates/kenn-store/src/worktree.rs","ts":"2026-07-06T15:28:30.157306Z","sha":"da9aa79749cf9744"}
+{"op":"attach","anchor":"crates/kenn-store/src/worktree.rs","ts":"2026-07-07T17:20:28.199161Z","sha":"4dd482dc7c35a94e"}

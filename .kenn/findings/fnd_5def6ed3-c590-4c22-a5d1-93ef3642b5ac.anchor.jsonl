@@ -1,0 +1,2 @@
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Indexing/IndexerCore.cs","ts":"2026-07-15T20:53:09.02646Z","sha":"f0e26a4d258ce648"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/driver/dotnet.rs","ts":"2026-07-15T20:53:09.02646Z","sha":"a12cef8d7f735314"}

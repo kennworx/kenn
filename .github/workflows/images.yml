@@ -1,0 +1,115 @@
+# Build + publish the docker-runtime indexer images to GHCR
+# (docker-indexer-runtime §4). Pushes to ghcr.io/<owner>/<image> — <owner> is
+# the repo owner (kennworx), resolved at run time, so this file isn't pinned to
+# one namespace. Runs on a published release and on manual dispatch.
+#
+# Auth: the built-in GITHUB_TOKEN with `packages: write` pushes to the owner's
+# GHCR — no PAT/secret needed. First push of a NEW package name may need the org
+# to allow Actions to create packages (kennworx → Settings → Packages), and the
+# published packages must be made public (Package → Settings → Change visibility)
+# for `kenn init --docker` to pull without a login.
+#
+# EVERY PLATFORM BUILDS ON ITS OWN ARCHITECTURE. No QEMU anywhere — that is the
+# whole shape of this file, and it is not a preference. Emulation broke this
+# publish twice in ways that named the wrong culprit:
+#
+#   - `go install` hit a TLS handshake timeout against proxy.golang.org, because
+#     emulated crypto is slow enough to exceed the deadline. It reads as a
+#     network flake and is not one.
+#   - `rustc -vV` SIGSEGVs outright under qemu-x86_64 ("uncaught target signal
+#     11"), which is also why amd64 images cannot be built on an arm64 laptop.
+#
+# GitHub's `ubuntu-24.04-arm` runners are native aarch64 and available to this
+# repo, so both jobs are native and the whole class is gone. They also carry
+# more disk than the amd64 runners (measured: 37G free vs ~14G), which is why
+# only the amd64 job needs the reclamation step below.
+name: images
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  IMAGES: csharp typescript go rust python swift
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: amd64
+            runner: ubuntu-latest
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      # One graph per platform still means one runner holds six images and every
+      # build stage — swift's base alone is ~3GB. ubuntu-latest ships ~30GB of
+      # preinstalled toolchains this build never touches; a publish exhausted the
+      # disk badly enough that the runner could not write its own diagnostics.
+      - name: Free runner disk
+        if: matrix.platform == 'amd64'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost /usr/share/swift \
+                      /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # ONE bake graph per platform, not six builds: every image copies the same
+      # kenn-toolchain entrypoint, and separate builds cannot share it. In one
+      # graph it is built once per platform rather than once per image — two
+      # native Rust compiles per publish instead of twelve emulated ones.
+      #
+      # Each job writes its OWN arch-suffixed tag, which `merge` then combines
+      # into the real one. push-by-digest would avoid the extra tags, but bake's
+      # targets carry `tags` and buildkit refuses the combination outright —
+      # "can't push tagged ref ... by digest" — so this trades six throwaway
+      # tags for dropping the metadata-file, artifact round-trip and jq that
+      # untangling it would need. The arch tags are useful on their own when
+      # only one platform is suspect.
+      - name: Build and push ${{ matrix.platform }}
+        run: docker buildx bake -f docker/bake.hcl default --push
+        env:
+          TAG: latest-${{ matrix.platform }}
+          PLATFORMS: linux/${{ matrix.platform }}
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # A per-platform build cannot write a multi-arch manifest, so the tag
+      # users actually pull is assembled here. `imagetools create` fails if
+      # either arch tag is missing, which is the behaviour we want: a tag that
+      # silently carries one architecture is worse than no tag.
+      - name: Assemble manifest lists
+        run: |
+          for image in $IMAGES; do
+            name="${REGISTRY}/kenn-${image}"
+            docker buildx imagetools create -t "${name}:latest" \
+              "${name}:latest-amd64" "${name}:latest-arm64"
+          done
+      - name: Report what was published
+        run: |
+          for image in $IMAGES; do
+            docker buildx imagetools inspect "${REGISTRY}/kenn-${image}:latest" \
+              --format '{{.Name}}{{range .Manifest.Manifests}} {{.Platform.OS}}/{{.Platform.Architecture}}{{end}}'
+          done

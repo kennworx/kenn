@@ -1,0 +1,6 @@
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-06-18T11:50:33.422971Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/workflow.rs","ts":"2026-06-18T11:50:33.422971Z"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-06-20T12:13:40.340184Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/workflow.rs","ts":"2026-06-23T12:05:48.092905Z"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-06-23T12:05:53.474388Z"}
+{"op":"rename","from":"crates/kenn-cli/src/cmd_index.rs","to":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-15T16:45:55.532225Z"}

@@ -1,0 +1,50 @@
+/.claude/settings.local.json
+/.worktrees/
+
+# IDE
+.idea/
+.vscode/
+*.DotSettings.user
+
+# Aggregated build artifacts
+/build/
+.build/
+# SwiftPM scratch dirs for cross-platform verification builds (e.g. Linux-in-Docker)
+.build-*/
+
+# Cargo
+/target/
+# Local sccache build-cache wiring — not imposed on CI / other devs.
+/.cargo/
+
+# .NET build outputs (scoped to dotnet indexer dirs)
+/indexers/*-dotnet*/bin/
+/indexers/*-dotnet*/obj/
+
+# kenn store: `.kenn/.gitignore` ignores the derived `.kenn/local/` and
+# `.kenn/knowledge/` (rebuilt per worktree); `.kenn/vectors/` — the
+# committed embedding sidecar — is tracked.
+# The `.kenn/atlas` convenience symlink (→ live OKF bundle) is regenerated each
+# index; `.kenn/.gitignore` is rebuilt by kenn from its embedded template, so
+# pin the ignore here too where kenn won't overwrite it.
+/.kenn/atlas
+
+# Local Claude Code config (commands, skills, settings) — not shared in-repo
+/.claude/
+
+# Working / scratch files (logs, ad-hoc DBs, dumps)
+/scratch/
+/tmp/
+
+# JS/TS dependencies (e.g. the kenn-ts indexer's bundled `typescript`).
+node_modules/
+
+# kenn analyze output (generated): `[index] report_path` / `graph_path`
+kenn_report.md
+kenn_graph.html
+
+# bun --compile temp artifacts (from build-indexer-ts / just install)
+*.bun-build
+
+# per-indexer scratch (bun/dotnet verify logs)
+indexers/*/tmp/

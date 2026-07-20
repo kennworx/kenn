@@ -1,0 +1,9 @@
+---
+source: crates/kenn-indexer/tests/wire_format.rs
+expression: dump(&r)
+---
+{
+  "sym_id": 42,
+  "sig": "fn bar<T>(x: T) -> T",
+  "doc": "/// Returns its argument."
+}

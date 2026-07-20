@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-model/src/language.rs","ts":"2026-06-18T11:50:07.204843Z"}
+{"op":"attach","anchor":"crates/kenn-model/src/kind.rs","ts":"2026-06-18T11:50:07.204843Z"}
+{"op":"attach","anchor":"crates/kenn-config/src/language/css.rs","ts":"2026-06-18T11:50:07.204843Z"}
+{"op":"attach","anchor":"crates/kenn-model/src/id/css.rs","ts":"2026-06-18T11:50:07.204843Z"}

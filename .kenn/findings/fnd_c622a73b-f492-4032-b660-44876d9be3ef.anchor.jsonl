@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/walk.rs","ts":"2026-06-14T14:48:27.252512Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/ingest.rs","ts":"2026-06-14T14:48:27.252512Z"}
+{"op":"attach","anchor":"crates/kenn-model/src/id/md.rs","ts":"2026-06-14T14:48:27.252512Z"}
+{"op":"rename","from":"crates/kenn-indexer/src/markdown/ingest.rs","to":"crates/kenn-indexer/src/markdown/ingest/core.rs","ts":"2026-07-15T16:45:55.373182Z"}

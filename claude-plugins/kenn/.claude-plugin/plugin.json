@@ -1,0 +1,20 @@
+{
+  "name": "kenn",
+  "description": "Code-intelligence MCP server for an indexed codebase — symbol search, call/type-graph navigation, semantic search, and a provenance-tracked findings store. Bundles a skill on how to use the tools.",
+  "author": {
+    "name": "Sergey Martynov"
+  },
+  "keywords": [
+    "mcp",
+    "code-intelligence",
+    "code-search",
+    "code-graph",
+    "rust"
+  ],
+  "mcpServers": {
+    "kenn": {
+      "command": "kenn",
+      "args": ["mcp"]
+    }
+  }
+}

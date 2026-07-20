@@ -1,0 +1,16 @@
+{
+  "name": "kenn-dev",
+  "owner": {
+    "name": "Sergey Martynov"
+  },
+  "plugins": [
+    {
+      "name": "kenn",
+      "source": "./claude-plugins/kenn",
+      "description": "Code-intelligence MCP server: navigate, search, and introspect an indexed codebase, with a provenance-tracked findings knowledge store.",
+      "author": {
+        "name": "Sergey Martynov"
+      }
+    }
+  ]
+}

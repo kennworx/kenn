@@ -1,0 +1,5 @@
+{"op":"attach","anchor":"crates/kenn-mcp/src/error.rs","ts":"2026-06-09T09:59:56.731356Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools/query.rs","ts":"2026-06-09T09:59:56.731356Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools/state.rs","ts":"2026-06-09T09:59:56.731356Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/indexing/orchestrate.rs","ts":"2026-06-09T13:42:54.148796Z"}
+{"op":"rename","from":"crates/kenn-mcp/src/tools/query.rs","to":"crates/kenn-mcp/src/tools/query/lookup.rs","ts":"2026-07-15T16:47:33.294394Z"}

@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-07-05T15:52:49.077251Z","sha":"1ef737dd44d03e14"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/workflow.rs","ts":"2026-07-05T15:52:49.077251Z","sha":"2afbda04b34ba58a"}
+{"op":"rename","from":"crates/kenn-cli/src/cmd_index.rs","to":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-15T16:45:55.054444Z"}

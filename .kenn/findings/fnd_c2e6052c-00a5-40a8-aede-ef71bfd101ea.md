@@ -1,0 +1,8 @@
+---
+id: fnd_c2e6052c-00a5-40a8-aede-ef71bfd101ea
+tags:
+- guide
+parent_ids: []
+created_at: 2026-06-18T13:42:18.871176Z
+---
+CSS-internal dependency graph (Phase 3 §8, implemented for `imports`) lives in `css/internal.rs` (pure) + `css/ingest.rs::emit_internal_imports`. `@use`/`@import`/`@forward` are resolved away by dart-sass compilation, so they're recovered by a LIGHT SOURCE SCAN (`extract_imports`: line-spot the keyword + first quoted specifier — not Sass parsing) over each stylesheet's source, then turned into `imports` edges between the stylesheet `module` nodes (reusing the existing `EdgeKind::Imports { kind: Explicit }` — no new edge plumbing). Resolution: `ingest_css_phase1` builds a `relpath → module-id` map in pass A (css from `parse_css` records[0]; sass from `SassExtract::module_map()` covering entries + reached partials), then pass B calls `resolve_import` which applies Sass resolution (bare name → `_name.scss` partial, `.scss`/`.sass`/`.css`, `_index.scss`) and emits an edge only when the target module exists (missing target → NO edge, never dangling). This runs INSIDE phase 1 (gated only on the stylesheet producer, NOT the code barrier — both endpoints are stylesheet modules). DEFERRED: `@extend .class`/`composes` → `EdgeKind::ExtendsRule` (needs enclosing-selector tracking in the source scan + the registry/file-pinned target resolution) and the `check_css` orphan/dangling report (§9).

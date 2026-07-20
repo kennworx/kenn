@@ -1,0 +1,5 @@
+# Docker build context (docker/kenn-dotnet/Dockerfile). Exclude host build
+# output — a macOS-built bin/obj copied into the linux image would poison the
+# in-container `dotnet publish` (wrong RID / stale restore).
+bin
+obj

@@ -1,0 +1,81 @@
+# Releasing
+
+Releases are built by [`dist`](https://github.com/axodotdev/cargo-dist). The
+config lives in `dist-workspace.toml`; the workflow at
+`.github/workflows/release.yml` is **generated from it**.
+
+> Do not hand-edit the generated workflow. Change the config and run
+> `dist generate` — CI checks that the committed workflow matches the config
+> and fails if they have diverged.
+
+## Cutting a release
+
+```console
+# bump [workspace.package] version in Cargo.toml, then:
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+That builds every target, attaches tarballs plus checksums to a GitHub release,
+generates the shell installer, and publishes the Homebrew formula.
+
+## Targets and runners
+
+Every target builds on its **own architecture** — see
+`[dist.github-custom-runners]`:
+
+| target | runner |
+|---|---|
+| `aarch64-apple-darwin` | `macos-14` |
+| `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` |
+| `x86_64-unknown-linux-gnu` | `ubuntu-22.04` |
+
+**No Windows, and no Intel macOS.** Intel Macs are not worth carrying a build
+for. Windows is deliberately absent because kenn cannot *run* there yet —
+`atomic_flip_live` has a `cfg(not(unix))` arm that always returns an error, so
+every `kenn index` fails at the final live-pointer flip. See
+`openspec/changes/windows-support`; the target returns per that change's task 7.
+
+A listed target that fails does not fail alone: `host` and
+`publish-homebrew-formula` run after the full matrix, so one broken target
+blocks publication for every platform that built fine.
+
+This is not incidental. `kenn-embed` vendors llama.cpp, so every build is also a
+C++ build, and dist's default for aarch64 Linux is a cross toolchain. Emulation
+is not an alternative: `rustc` SIGSEGVs under `qemu-x86_64` ("uncaught target
+signal 11"), which is the same reason `docker/bake.hcl`'s publish uses native
+runners.
+
+Verify the mapping after any config change — the matrix is computed at run time,
+so reading the workflow file will not tell you:
+
+```console
+dist plan --output-format=json | jq -r '.ci.github.artifacts_matrix.include[] | "\(.runner) \(.targets|join(","))"'
+```
+
+## The Homebrew tap
+
+`brew install kennworx/tap/kenn` resolves to `github.com/kennworx/homebrew-tap`,
+a **separate repository** — Homebrew requires the `homebrew-` name prefix. It
+already exists and already carries formulae for other tools; dist writes
+`Formula/kenn.rb` alongside them. Do not recreate or reinitialise it.
+
+Pushing there is a cross-repo write, and the workflow's built-in `GITHUB_TOKEN`
+is scoped to this repo only, so dist uses a `HOMEBREW_TAP_TOKEN` secret. That
+already exists as a **kennworx org secret**, shared with the other repos that
+publish to the tap; this repo has been added to its selected-repository list, so
+no per-repo secret is needed.
+
+If a release ever publishes but the formula does not update, check that list
+first — an org secret with `visibility: selected` silently yields an empty value
+in a repo that is not on it:
+
+```console
+gh api orgs/kennworx/actions/secrets/HOMEBREW_TAP_TOKEN/repositories \
+  --jq '.repositories[].full_name'
+```
+
+## Container images
+
+Indexer images are published separately by `.github/workflows/images.yml`, on
+release or manual dispatch. They are versioned by digest rather than by this
+tag — see [`docker/README.md`](../docker/README.md).

@@ -1,0 +1,16 @@
+# kenn store: committed data stays tracked — `pack-*.bin` files (CI-produced)
+# in any sidecar generation dir and `findings/<id>.md` records. Dev-local
+# `seg-*.bin` files are excluded; `kenn index --repack` promotes them. The
+# GC bookkeeping (`.last-access` stamps, `gc.lock`) and sidecar scratch are
+# local-only. The derived store (runs/, live, index.lock, readers/) is
+# rebuilt per worktree; when it lives under `.kenn/` it is excluded by the
+# derived-root line appended after these.
+vectors/**/seg-*.bin
+vectors/**/.last-access
+vectors/.tmp/
+vectors/gc.lock
+findings/.tmp/
+# `atlas` is a convenience symlink to the live OKF atlas bundle, regenerated
+# each index (its target lives under the derived store).
+atlas
+local/

@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_init.rs","ts":"2026-07-11T10:17:28.968132Z","sha":"b6076340fa756694"}
+{"op":"attach","anchor":"crates/kenn-cli/tests/cli_smoke.rs","ts":"2026-07-11T10:17:28.968132Z","sha":"c069c6d130830d32"}
+{"op":"attach","anchor":"crates/kenn-cli/src/init/author.rs","ts":"2026-07-11T10:17:28.968132Z","sha":"0b7a8d986bdd6904"}
+{"op":"attach","anchor":"crates/kenn-cli/src/init/detect.rs","ts":"2026-07-18T12:30:11.890747Z","sha":"5dd8942bec98cff2"}

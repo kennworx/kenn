@@ -1,0 +1,70 @@
+[package]
+name = "kenn-indexer"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+kenn-model = { path = "../kenn-model" }
+kenn-config = { path = "../kenn-config" }
+kenn-store = { path = "../kenn-store" }
+# Pin readers, shared with the in-container entrypoint. Swift is provisioned
+# host-side, so the host needs the same `Package.swift` reader the entrypoint
+# uses for every other language — one implementation, not two.
+kenn-toolchain = { path = "../kenn-toolchain" }
+
+anyhow.workspace = true
+globset.workspace = true
+scip.workspace = true
+protobuf = "3.7.2"
+# CommonMark inline-link + code-span tokenizer. default-features=false keeps
+# it to ~2 new crates (no HTML renderer); wikilinks/transclusions are scanned
+# on top of the text spans it marks (they are not CommonMark).
+pulldown-cmark = { version = "0.13", default-features = false }
+# Structured, error-tolerant CSS parser for the `.css` stylesheet producer
+# (atomic class/id/custom-property extraction). `.scss`/`.sass` are compiled
+# by dart-sass first, then their output is parsed by this same crate.
+lightningcss = "1.0.0-alpha.71"
+# Parses dart-sass `--source-map` output to back-map each compiled selector to
+# its origin `.scss`/`.sass` file + line (the def site).
+sourcemap = "9"
+# WHATWG-conformant HTML tree builder for the `.html`/`.htm` document producer.
+# A custom `TreeSink` captures per-element tag/attrs/line + nesting while the
+# tree builder handles every HTML quirk (implied/optional close, raw-text
+# script/style, malformed recovery). markup5ever_rcdom is the shared markup5ever
+# infra `html5ever` re-exports (QualName, interned strings, tendril, Attribute).
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
+# Maps a file extension → MIME type, to tell a note-link from an
+# attachment embed (`![[diagram.png]]`) and classify the attachment.
+mime_guess = { version = "2.0.5", default-features = false }
+serde = { workspace = true }
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+spdx = "0.13"
+thiserror.workspace = true
+time.workspace = true
+toml.workspace = true
+tracing.workspace = true
+xxhash-rust.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+
+# For setpriority() in the rust-analyzer scip subprocess's pre_exec
+# hook when language.rust.low_priority is set. Unix-only; Windows is a
+# no-op (kenn isn't Windows-targeted today).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+
+[dev-dependencies]
+assert_cmd.workspace = true
+insta.workspace = true
+tempfile.workspace = true

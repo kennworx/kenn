@@ -1,0 +1,5 @@
+{"op":"attach","anchor":"crates/kenn-store/src/db/sqlite/reader/search.rs","ts":"2026-06-24T16:28:45.064981Z","sha":"0e142d54ad81d33c"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools/query.rs","ts":"2026-06-24T16:28:45.064981Z","sha":"f04bc385413a249d"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools/query.rs","ts":"2026-07-05T07:04:46.223457Z","sha":"134dc007663378ac"}
+{"op":"rename","from":"crates/kenn-mcp/src/tools/query.rs","to":"crates/kenn-mcp/src/tools/query/lookup.rs","ts":"2026-07-15T16:47:33.335692Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools/query/lookup.rs","ts":"2026-07-15T16:49:02.526555Z","sha":"ef921c1a8b3ce841"}

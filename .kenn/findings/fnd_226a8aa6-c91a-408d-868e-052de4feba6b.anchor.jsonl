@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"docker/kenn-typescript/Dockerfile","ts":"2026-07-18T20:34:29.429933Z","sha":"5b7826935ed48e9b"}
+{"op":"attach","anchor":"docker/kenn-rust/Dockerfile","ts":"2026-07-18T20:34:29.429933Z","sha":"adbdc97749fab566"}
+{"op":"attach","anchor":"docker/kenn-go/Dockerfile","ts":"2026-07-18T20:34:29.429933Z","sha":"ae1b19c50421a377"}
+{"op":"attach","anchor":"docker/kenn-swift/Dockerfile","ts":"2026-07-18T20:37:51.817607Z","sha":"2466a196c84ea447"}

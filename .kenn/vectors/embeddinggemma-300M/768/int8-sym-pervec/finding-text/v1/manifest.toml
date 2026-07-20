@@ -1,0 +1,13 @@
+format_version = 2
+
+[embedding_model]
+id = "embeddinggemma-300M"
+
+[vector]
+dim = 768
+quant = "int8-sym-pervec"
+norm = "l2"
+
+[fingerprint]
+hash = "xxh3-64"
+text = "finding-text/v1"

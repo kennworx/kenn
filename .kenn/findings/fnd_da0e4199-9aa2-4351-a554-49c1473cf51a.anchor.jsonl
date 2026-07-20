@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"indexers","ts":"2026-07-10T14:17:37.793434Z"}
+{"op":"attach","anchor":"justfile","ts":"2026-07-10T14:17:37.793434Z","sha":"82620a0c29d0a2af"}
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Cli/MsBuildBootstrap.cs","ts":"2026-07-19T10:53:28.345812Z","sha":"1ad46d0bbd07cd6e"}

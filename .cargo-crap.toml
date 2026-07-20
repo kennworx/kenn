@@ -1,0 +1,16 @@
+# cargo-crap configuration. See `cargo crap --help`.
+
+# A function is "crappy" if CC²·(1-cov)³ + CC > threshold. The default
+# is 30 (matches the original CRAP paper). We adopt it as-is.
+threshold = 30
+
+# Regression-detector tolerance. CRAP-score deltas with absolute value
+# at or below this count as Unchanged. Coverage measurement has small
+# run-to-run jitter (test thread scheduling, async ordering); absorbing
+# ±1 of CRAP delta filters that noise without hiding real regressions.
+epsilon = 1.0
+
+# How to score functions with complexity data but no coverage entries.
+# Pessimistic (treat as 0% covered) matches what the gate considers a
+# CRAP regression and is the right default for a quality gate.
+missing = "pessimistic"

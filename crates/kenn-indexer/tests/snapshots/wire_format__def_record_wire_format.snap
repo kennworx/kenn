@@ -1,0 +1,14 @@
+---
+source: crates/kenn-indexer/tests/wire_format.rs
+expression: dump(&r)
+---
+{
+  "sym_id": 7,
+  "file_id": 2,
+  "start_line": 10,
+  "start_col": 0,
+  "end_line": 80,
+  "end_col": 1,
+  "body_start_line": 0,
+  "body_end_line": 0
+}

@@ -1,0 +1,12 @@
+---
+source: crates/kenn-indexer/tests/wire_format.rs
+expression: dump(&r)
+---
+{
+  "src_id": 1,
+  "target_id": 9,
+  "properties": {
+    "edge_kind": "imports",
+    "kind": "re_export"
+  }
+}

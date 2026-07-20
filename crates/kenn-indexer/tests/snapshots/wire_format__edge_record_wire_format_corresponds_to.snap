@@ -1,0 +1,14 @@
+---
+source: crates/kenn-indexer/tests/wire_format.rs
+expression: dump(&r)
+---
+{
+  "src_id": 12,
+  "target_id": 13,
+  "properties": {
+    "edge_kind": "corresponds_to",
+    "source": "config",
+    "generator": "",
+    "canonical": 12
+  }
+}

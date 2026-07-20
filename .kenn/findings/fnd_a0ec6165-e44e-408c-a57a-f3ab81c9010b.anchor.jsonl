@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"crates/kenn-mcp/src/server/mod.rs","ts":"2026-07-15T16:49:55.273268Z","sha":"323add96e108d69d"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/css/ingest/mod.rs","ts":"2026-07-15T16:49:55.273268Z","sha":"f945398e0a3de084"}
+{"op":"attach","anchor":"justfile","ts":"2026-07-15T16:49:55.273268Z","sha":"3ccfc9585e886747"}

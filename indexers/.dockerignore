@@ -1,0 +1,10 @@
+# Applies only to the kenn-ts image build (docker/kenn-ts/Dockerfile), whose
+# context is this `indexers/` dir because kenn-ts imports the shared frames.ts.
+# Allow-list: ship only frames.ts + the kenn-ts sources; drop the other sidecars
+# and all host build output.
+*
+!frames.ts
+!kenn-ts
+kenn-ts/node_modules
+kenn-ts/tmp
+kenn-ts/test

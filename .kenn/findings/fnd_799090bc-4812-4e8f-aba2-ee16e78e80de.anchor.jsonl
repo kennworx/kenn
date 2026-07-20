@@ -1,0 +1,8 @@
+{"op":"attach","anchor":"docker/kenn-go/Dockerfile","ts":"2026-07-20T09:45:36.011198Z","sha":"ae1b19c50421a377"}
+{"op":"attach","anchor":"docker/kenn-rust/Dockerfile","ts":"2026-07-20T09:45:36.011198Z","sha":"adbdc97749fab566"}
+{"op":"attach","anchor":"docker/kenn-swift/Dockerfile","ts":"2026-07-20T09:45:36.011198Z","sha":"2466a196c84ea447"}
+{"op":"attach","anchor":"docker/kenn-typescript/Dockerfile","ts":"2026-07-20T09:45:36.011198Z","sha":"5b7826935ed48e9b"}
+{"op":"attach","anchor":"docker/README.md","ts":"2026-07-20T09:45:35.84836Z","sha":"06fc9672c26fb46b"}
+{"op":"attach","anchor":"docker/bake.hcl","ts":"2026-07-20T09:45:35.84836Z","sha":"70a8068bc60fb64f"}
+{"op":"attach","anchor":"docker/kenn-swift/Dockerfile","ts":"2026-07-20T09:45:35.84836Z","sha":"2bf54a7c2aea410e"}
+{"op":"attach","anchor":"docker/kenn-toolchain/Dockerfile","ts":"2026-07-20T09:45:35.84836Z","sha":"be6a4c0d6a508c83"}

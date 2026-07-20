@@ -1,0 +1,30 @@
+[package]
+name = "kenn-analyze"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+kenn-model = { path = "../kenn-model" }
+kenn-config = { path = "../kenn-config" }
+kenn-store = { path = "../kenn-store" }
+
+anyhow.workspace = true
+# Derives an attachment node's MIME type from its filename, for the
+# graph's per-type attachment coloring.
+mime_guess = { version = "2.0.5", default-features = false }
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[dev-dependencies]
+tempfile.workspace = true

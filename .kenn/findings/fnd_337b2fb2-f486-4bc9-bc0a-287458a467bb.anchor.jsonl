@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"docker/scip-python/Dockerfile","ts":"2026-07-17T15:07:49.660985Z","sha":"7d3a78f3c1806bc4"}
+{"op":"attach","anchor":"justfile","ts":"2026-07-17T15:07:49.660985Z","sha":"c884c389d9e3a4f7"}
+{"op":"rename","from":"docker/scip-python/Dockerfile","to":"docker/kenn-python/Dockerfile","ts":"2026-07-19T10:53:21.693255Z"}

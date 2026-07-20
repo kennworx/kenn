@@ -1,0 +1,10 @@
+{"op":"attach","anchor":"crates/kenn-model/src/language.rs","ts":"2026-06-20T12:13:57.211277Z"}
+{"op":"attach","anchor":"crates/kenn-model/src/short_id.rs","ts":"2026-06-20T12:13:57.211277Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/transform/lang.rs","ts":"2026-06-20T12:13:57.211277Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/transform/naming.rs","ts":"2026-06-20T12:13:57.211277Z"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-06-20T12:13:57.211277Z"}
+{"op":"attach","anchor":"crates/kenn-config/src/language/mod.rs","ts":"2026-06-20T12:13:57.211277Z"}
+{"op":"attach","anchor":"crates/kenn-config/src/language/go.rs","ts":"2026-06-23T12:05:54.017764Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/driver/go.rs","ts":"2026-06-23T12:05:54.220778Z"}
+{"op":"attach","anchor":"crates/kenn-model/src/language.rs","ts":"2026-07-06T13:33:02.788149Z","sha":"dcde6b5f30e947a9"}
+{"op":"rename","from":"crates/kenn-cli/src/cmd_index.rs","to":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-15T16:45:55.093662Z"}

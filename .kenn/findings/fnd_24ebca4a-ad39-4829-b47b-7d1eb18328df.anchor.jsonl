@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/docker.rs","ts":"2026-07-11T16:19:14.086526Z","sha":"9111bae2047fb74c"}
+{"op":"attach","anchor":"crates/kenn-config/src/docker.rs","ts":"2026-07-11T16:19:14.086526Z","sha":"c6d25c0caa1bff38"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/docker.rs","ts":"2026-07-11T16:56:28.871107Z","sha":"41f53bfa4523fbec"}

@@ -1,0 +1,91 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- net10, aligned with the SDK-10 generation. An earlier net10 attempt
+         crashed (AccessViolationException) because the MSBuild assemblies loaded
+         in-process were net8/9 (Roslyn 4.7 / Microsoft.Build 17.x) — a runtime
+         MISMATCH inside the net10 process. This migration removes the mismatch
+         by moving the whole stack to net10: Roslyn 5.6 (whose MSBuildWorkspace
+         runs evaluation in an out-of-process BuildHost on the SDK runtime) and
+         Microsoft.Build 18.x. The docker image runs framework-dependent on the
+         sdk:10 base, so its net10 runtime hosts a net10 MSBuild — matched. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Kenn.Dotnet</RootNamespace>
+    <AssemblyName>kenn-dotnet</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <!-- Needed by FileTracker.TryHashFile for memory-mapped zero-copy
+         hashing (SafeBuffer.AcquirePointer requires unsafe blocks). -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!--
+    Self-contained single-file publish. The binary embeds the .NET runtime so
+    end users don't need .NET installed to run kenn-dotnet itself; they still
+    need a .NET SDK for MSBuildWorkspace to evaluate their target .csproj/.sln
+    (if they have C# to index, they already have one).
+
+    IncludeAllContentForSelfExtract is REQUIRED with Roslyn 5.6: its
+    MSBuildWorkspace runs project evaluation in an out-of-process BuildHost
+    child (BuildHost-netcore/Microsoft.CodeAnalysis.Workspaces.MSBuild.BuildHost
+    .dll + its .deps.json/.runtimeconfig.json). The plain single-file bundler
+    EXCLUDES those config files (NETSDK1236) so the child can't launch; forcing
+    full self-extract writes every bundled file to disk at startup (~/.net, or
+    DOTNET_BUNDLE_EXTRACT_BASE_DIR) where the BuildHost is located + launched.
+    Orphan cleanup of that child lives in BuildHostGuard.cs.
+
+    Trimming is intentionally OFF: Roslyn + MSBuild + MEF rely on reflection
+    in ways the linker can't see through.
+
+    Publish:
+      dotnet publish -c Release -r osx-arm64
+      dotnet publish -c Release -r linux-x64
+      dotnet publish -c Release -r win-x64
+  -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>embedded</DebugType>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="kenn-dotnet.tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Build.Locator" Version="1.11.2" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.6.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="5.6.0" />
+    <PackageReference Include="Microsoft.Extensions.FileSystemGlobbing" Version="10.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.1" />
+    <PackageReference Include="System.CommandLine" Version="2.0.7" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.1" />
+    <!-- Pin over the vulnerable 10.0.4 that Roslyn 5.6 pulls in transitively
+         (GHSA-37gx-xxp4-5rgx / GHSA-w3x6-4m5h-cxqf → NU1903). -->
+    <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.10" />
+  </ItemGroup>
+
+  <!--
+    MSBuildLocator requires that any Microsoft.Build.* references pulled in
+    transitively (here via Roslyn workspaces) NOT carry their runtime assets
+    into our binary, otherwise MSBuildLocator's runtime resolution into the
+    user's installed SDK clashes with our bundled copies. Compile-time refs
+    only; PrivateAssets="all" stops the marker from leaking to consumers.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Build" Version="18.8.2" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Build.Framework" Version="18.8.2" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Build.Tasks.Core" Version="18.8.2" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Build.Utilities.Core" Version="18.8.2" ExcludeAssets="runtime" PrivateAssets="all" />
+    <!-- Pulled in transitively by Microsoft.Build 18.x; MSBuildLocator (MSBL001)
+         requires the same runtime-exclusion so its resolver owns the copy. -->
+    <PackageReference Include="Microsoft.NET.StringTools" Version="18.8.2" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

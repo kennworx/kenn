@@ -1,0 +1,53 @@
+# kenn configuration. Every section is optional; defaults shown below.
+
+[workspace]
+# root = "."           # default: current workspace (git toplevel or cwd)
+# excludes = []        # additional workspace-wide skip globs; .git/** is always skipped
+
+[language.csharp]
+enabled = true
+command = ["build/kenn-dotnet"]
+projects = ["indexers/kenn-dotnet/kenn-dotnet.csproj"]
+provision_directory_build_props = false
+
+[language.rust]
+enabled = true
+max_threads = 2       # cap rust-analyzer scip rayon parallelism (RAYON_NUM_THREADS)
+low_priority = true   # setpriority +10 (nice) — macOS nudges scheduler to E-cores
+
+[language.typescript]
+enabled = true
+command = ["build/kenn-ts"]
+projects = ["indexers/kenn-ts/tsconfig.json"]
+
+[language.markdown]
+enabled = true
+# Only this repo's own non-code dirs. The git dir, kenn's store, and every
+# language's build/vendor dir (node_modules, target, .build, …) are inherited
+# automatically — never list them here. `tmp/` holds throwaway test corpora;
+# `build/` is the compiled-binary output; `.claude/` is local Claude config.
+excludes = ["**/tmp/**", "**/build/**", "**/.claude/**"]
+
+[tests]
+# Path globs for files that count as test code — authoritative, no built-in
+# fallback (an empty list flags nothing, skewing test_ratio + leaking test
+# symbols into the atlas). Seeded from the enabled languages' conventions;
+# inline `#[cfg(test)] mod tests` is caught separately by the descriptor heuristic.
+paths = [
+    "**/tests/**",                                            # rust integration tests
+    "**/*Test.cs", "**/*Tests.cs", "**/*.Test.cs", "**/*.Tests.cs",
+    "**/*.test.ts", "**/*.spec.ts", "**/*.test.tsx",
+]
+
+[ingest]
+batch_size = 10000                          # records per sink batch
+
+[lifecycle]
+gc_keep = 2                                 # current + previous (rollback target)
+
+[staleness]
+git_aware_skip = true                       # skip reindex when (HEAD, dirty xxhashes) match
+
+[metrics]
+regression_threshold_pct = 10               # per-metric drop that triggers a warning
+

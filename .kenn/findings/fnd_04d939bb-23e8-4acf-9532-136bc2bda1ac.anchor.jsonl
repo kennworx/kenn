@@ -1,0 +1,2 @@
+{"op":"attach","anchor":"crates/kenn-mcp/src/server.rs","ts":"2026-06-09T18:01:41.612536Z"}
+{"op":"rename","from":"crates/kenn-mcp/src/server.rs","to":"crates/kenn-mcp/src/server/handler.rs","ts":"2026-07-15T16:47:33.085243Z"}

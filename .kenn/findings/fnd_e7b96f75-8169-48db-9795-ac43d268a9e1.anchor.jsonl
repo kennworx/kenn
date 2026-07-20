@@ -1,0 +1,2 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/atlas/producer.rs","ts":"2026-07-17T09:43:13.560733Z","sha":"36181a9f9eb59f25"}
+{"op":"attach","anchor":"crates/kenn-store/src/db/sqlite/writer/aggregate.rs","ts":"2026-07-17T09:43:13.560733Z","sha":"2b85eaaa138fd8c7"}

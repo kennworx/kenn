@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/workflow.rs","ts":"2026-07-16T12:57:54.198734Z","sha":"6710ca0b9ba7f5c7"}
+{"op":"attach","anchor":"crates/kenn-config/src/language/markdown.rs","ts":"2026-07-16T12:57:54.02181Z","sha":"bcb080021925ad82"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/workflow.rs","ts":"2026-07-16T12:57:54.02181Z","sha":"78fe41404d56c29e"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/discover.rs","ts":"2026-07-16T12:57:54.02181Z","sha":"c68e5d34a8346bd0"}

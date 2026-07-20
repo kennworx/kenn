@@ -1,0 +1,5 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/pubid.rs","ts":"2026-07-15T15:39:41.308621Z","sha":"7d2615e1d025570f"}
+{"op":"attach","anchor":"crates/kenn-model/src/shell_safe.rs","ts":"2026-07-15T15:39:41.308621Z","sha":"260cdcde122eab31"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/pubid.rs","ts":"2026-07-16T13:34:43.500691Z","sha":"62c4edb1cd4527d8"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/html/ids.rs","ts":"2026-07-16T17:13:01.576709Z","sha":"f65bf711e748d667"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/css/parse.rs","ts":"2026-07-16T17:13:01.6285Z","sha":"34b0589e20ca4f31"}

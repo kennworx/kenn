@@ -1,0 +1,57 @@
+[package]
+name = "kenn-server"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "kenn-server"
+path = "src/main.rs"
+
+[dependencies]
+kenn-config = { path = "../kenn-config" }
+kenn-embed = { path = "../kenn-embed" }
+
+# `BatchEncoder::encode_batch` is `async fn` — `ProducerBatchEncoder` wraps
+# the async producer for the scheduler. async-trait gives dyn-compat for
+# the boxed encoder.
+async-trait = "0.1"
+base64 = "0.22"
+
+# HTTP host
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.6", default-features = false, features = ["trace"] }
+
+# JSON envelopes for the OpenAI shape
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true }
+tracing-appender = "0.2"
+
+# State paths (PID/log)
+directories = "6"
+
+# Process control (Unix only — Windows uses CREATE_NO_WINDOW | DETACHED_PROCESS
+# spawn flags from the parent CLI). `nix` provides setsid for detachment and
+# the stop/status signal handling; daemonization is setsid-only, no fork.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+tempfile.workspace = true

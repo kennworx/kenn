@@ -1,0 +1,1055 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{TITLE}}</title>
+<style>
+  :root {
+    --bg: #0e1117; --fg: #e6edf3; --panel: #161b22;
+    --border: #30363d; --accent: #58a6ff; --muted: #8b949e;
+  }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  #app { display: grid; grid-template-columns: var(--side-w, 280px) 5px 1fr; height: 100vh; overflow: hidden; }
+  #splitter { cursor: col-resize; background: var(--border); height: 100vh; user-select: none;
+    transition: background-color 80ms ease-out; }
+  #splitter:hover, #splitter.dragging { background: var(--accent); }
+  body.resizing-side, body.resizing-side * { cursor: col-resize !important; user-select: none !important; }
+  #side, #graph { min-height: 0; min-width: 0; height: 100vh; overflow: hidden; }
+  #side { padding: 12px; border-right: 1px solid var(--border);
+    background: var(--panel); font-size: 13px; box-sizing: border-box;
+    display: flex; flex-direction: column; }
+  /* Only the Anchors list scrolls; everything above it stays pinned.
+     Pull right into #side's 12px padding so the scrollbar sits flush
+     against the panel edge; restore a small inner gap on the rows so
+     the count numbers don't kiss the scrollbar thumb. */
+  #anchors { flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    margin-right: -12px; padding-right: 8px;
+    scrollbar-width: thin; scrollbar-color: rgba(139,148,158,0.35) transparent; }
+  #anchors::-webkit-scrollbar { width: 6px; }
+  #anchors::-webkit-scrollbar-track { background: transparent; }
+  #anchors::-webkit-scrollbar-thumb { background: rgba(139,148,158,0.25); border-radius: 3px; }
+  #anchors::-webkit-scrollbar-thumb:hover { background: rgba(139,148,158,0.55); }
+  #side h1 { font-size: 14px; margin: 0 0 8px; color: var(--accent); }
+  #side h2 { font-size: 12px; margin: 14px 0 6px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.05em; }
+  #side input[type=search] { width: 100%; box-sizing: border-box; padding: 6px 8px;
+    background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px;
+    font-size: 13px; }
+  #side label { display: flex; align-items: center; gap: 6px; padding: 2px 0;
+    font-size: 12px; color: var(--fg); cursor: pointer; }
+  #side label input { margin: 0; }
+  #side .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+  #side .legend-row { display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; padding: 3px 0; color: var(--muted); line-height: 1.5; }
+  #side .num { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #graph { position: relative; background: var(--bg); }
+  #cy { width: 100%; height: 100%; }
+  /* Ring marking the point shown in the hover panel. The border THICKNESS
+     is fixed (2px); JS sizes the diameter to hug the point it's on and
+     moves it. translate(-50%,-50%) centers it on the point. */
+  #focus-ring { position: absolute; box-sizing: border-box; margin: 0;
+    border: 2px solid #ffd33d; border-radius: 50%; pointer-events: none;
+    transform: translate(-50%, -50%); display: none; z-index: 5;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.65); }
+  #top-right { position: absolute; top: 12px; right: 12px; z-index: 10;
+    display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+    pointer-events: none; max-width: 360px; }
+  #top-right > * { pointer-events: auto; }
+  #hover { background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 10px; font-size: 12px; line-height: 1.4; display: none;
+    pointer-events: none; max-width: 360px; }
+  #hover .name { color: var(--accent); font-weight: 600; }
+  #hover .muted { color: var(--muted); }
+  #hover hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
+  #hover .neighbor-list { font-size: 11px; line-height: 1.35; }
+  #hover .neighbor-list .item { padding: 1px 0; display: flex; align-items: center; gap: 3px; }
+  #hover .neighbor-list .swatch { display: inline-block; width: 8px; height: 8px;
+    border-radius: 2px; flex: 0 0 auto; }
+  #top-left { position: absolute; top: 12px; left: 12px; z-index: 10;
+    display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
+    pointer-events: none; }
+  #top-left > * { pointer-events: auto; }
+  #selection-info { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 4px; padding: 8px 10px; font-size: 12px; max-width: 360px;
+    line-height: 1.4; display: none; }
+  #selection-info .name { font-weight: 600; }
+  #selection-info .muted { color: var(--muted); }
+  #selection-info .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    vertical-align: middle; margin-right: 4px; }
+  #status { position: absolute; bottom: 12px; left: 12px; font-size: 11px; color: var(--muted);
+    background: rgba(22,27,34,0.85); padding: 4px 8px; border-radius: 3px; z-index: 10; }
+  #mode-bar { font-size: 12px; background: rgba(22,27,34,0.9); padding: 6px 10px;
+    border-radius: 4px; border: 1px solid var(--border); display: none; }
+  #mode-bar .anchor-name { color: var(--accent); font-weight: 600; }
+  #mode-bar button { background: none; border: 1px solid var(--border); color: var(--fg);
+    padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; margin-left: 8px; }
+  .stat { font-size: 11px; color: var(--muted); margin: 4px 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <h1>{{TITLE}}</h1>
+    <div class="stat" id="counts"></div>
+    <h2>Search</h2>
+    <input id="search" type="search" placeholder="node / anchor name…">
+    <h2>Filters</h2>
+    <label><input type="checkbox" id="hide-external"> hide external packages</label>
+    <label><input type="checkbox" id="hide-tests"> hide test code</label>
+    <label><input type="checkbox" id="hide-code"> hide code</label>
+    <label><input type="checkbox" id="hide-markdown"> hide markdown</label>
+    <label><input type="checkbox" id="hide-attachments"> hide attachments</label>
+    <label><input type="checkbox" id="isolate"> isolate connected only</label>
+    <h2>Edge kinds</h2>
+    <div id="kinds"></div>
+    <h2>Anchors</h2>
+    <div id="anchors"></div>
+  </aside>
+  <div id="splitter" title="drag to resize"></div>
+  <main id="graph">
+    <div id="cy"></div>
+    <div id="focus-ring"></div>
+    <div id="top-right">
+      <div id="hover"></div>
+    </div>
+    <div id="top-left">
+      <div id="mode-bar">
+        expanded: <span class="anchor-name" id="mode-anchor"></span>
+        <button id="collapse-btn">collapse (Esc)</button>
+      </div>
+      <div id="selection-info"></div>
+    </div>
+    <div id="status"></div>
+  </main>
+</div>
+<script type="module">
+window.addEventListener("error", e => {
+  const s = document.getElementById("status");
+  if (s) s.textContent = "ERR: " + e.message;
+});
+window.addEventListener("unhandledrejection", e => {
+  const s = document.getElementById("status");
+  if (s) s.textContent = "REJ: " + (e.reason?.message || String(e.reason));
+});
+
+const DATA = {{DATA_JSON}};
+const status = document.getElementById("status");
+
+function hashCode(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h) + s.charCodeAt(i); h |= 0; }
+  return h;
+}
+function hslToRgba(h, s, l, a) {
+  s /= 100; l /= 100;
+  const k = n => (n + h / 30) % 12;
+  const sm = s * Math.min(l, 1 - l);
+  const f = n => {
+    const c = l - sm * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    return c;
+  };
+  return [f(0), f(8), f(4), a];
+}
+function hexToRgba(hex, a) {
+  return [
+    parseInt(hex.slice(1, 3), 16) / 255,
+    parseInt(hex.slice(3, 5), 16) / 255,
+    parseInt(hex.slice(5, 7), 16) / 255,
+    a,
+  ];
+}
+function anchorRgba(anchor, a = 1.0) {
+  const seed = Math.abs(hashCode(anchor));
+  const h = (seed * 137.508) % 360;
+  return hslToRgba(h, 65, 58, a);
+}
+function rgbaToCss(rgba) {
+  const r = Math.round(rgba[0] * 255);
+  const g = Math.round(rgba[1] * 255);
+  const b = Math.round(rgba[2] * 255);
+  return `rgba(${r}, ${g}, ${b}, ${rgba[3]})`;
+}
+const KIND_COLORS = {
+  calls: "#58a6ff", type_use: "#8b949e", field_access: "#f0883e",
+  implements: "#3fb950", instantiates: "#bc8cff", overrides: "#e3b341",
+  imports: "#56d4dd", links_to: "#d2a8ff", embeds: "#ff7b72",
+};
+// Attachment node color by MIME top-level type (n.mime = "image/png" → image).
+const MIME_COLORS = {
+  image: "#3fb950", video: "#bc8cff", audio: "#e3b341",
+  application: "#f0883e", text: "#56d4dd",
+};
+// Node classes, mutually exclusive: attachment (a non-markdown asset stub),
+// markdown (a note), or code (everything else). Drive the hide-* filters.
+function isAttachmentNode(n) { return n.kind === "attachment"; }
+function isMarkdownNode(n) { return n.language === "markdown" && !isAttachmentNode(n); }
+// Attachments are colored by MIME type; every other node by its anchor.
+function nodeRgba(n) {
+  if (isAttachmentNode(n)) {
+    const top = (n.mime || "").split("/")[0];
+    return hexToRgba(MIME_COLORS[top] || "#8b949e", 1.0);
+  }
+  return anchorRgba(n.anchor);
+}
+// Does a node survive the type toggles (external/test/code/markdown/
+// attachment)? Search-term filtering is applied separately by callers.
+function nodeClassPass(n, hideExternal, hideTests, hideCode, hideMarkdown, hideAttachments) {
+  if (hideExternal && n.external) return false;
+  if (hideTests && n.test) return false;
+  if (hideAttachments && isAttachmentNode(n)) return false;
+  if (hideMarkdown && isMarkdownNode(n)) return false;
+  if (hideCode && !isMarkdownNode(n) && !isAttachmentNode(n)) return false;
+  return true;
+}
+function kindHex(k) { return KIND_COLORS[k] || "#8b949e"; }
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+status.innerHTML = '<span class="running">loading cosmos.gl…</span>';
+const { Graph } = await import("https://esm.sh/@cosmos.gl/graph@2.6.4");
+
+// ── precompute reusable arrays ────────────────────────────────
+// `nodeIdToIdx`: short_id (string) → index in DATA.nodes
+// `anchorToIdx`: anchor name → index in DATA.supernodes
+const nodeIdToIdx = new Map();
+DATA.nodes.forEach((n, i) => nodeIdToIdx.set(String(n.id), i));
+const anchorToIdx = new Map();
+DATA.supernodes.forEach((s, i) => anchorToIdx.set(s.anchor, i));
+
+// ── build mode datasets ───────────────────────────────────────
+// Each "view" is { pointsXY, pointColors, pointSizes, linkSrc,
+//                  linkTgt, linkColors, linkWidths,
+//                  hover(idx), click(idx) }
+// We swap views by calling the cosmos setters and re-rendering.
+
+function buildOverviewView() {
+  const term = searchTerm;
+  const hideExternal = filterEl("hide-external");
+  const hideTests = filterEl("hide-tests");
+  const hideCode = filterEl("hide-code");
+  const hideMarkdown = filterEl("hide-markdown");
+  const hideAttachments = filterEl("hide-attachments");
+  const anyNodeFilter = hideExternal || hideTests || hideCode || hideMarkdown || hideAttachments;
+  // Per-anchor count of nodes that survive the node filters. An anchor
+  // with zero survivors (e.g. `System.Text.Json` when hide-external is
+  // on, or a docs folder when hide-markdown is on) is removed from the
+  // overview entirely — otherwise the user sees a cluster they can't
+  // actually expand into.
+  const anchorSurvivors = new Map();
+  if (anyNodeFilter) {
+    for (const n of DATA.nodes) {
+      if (!nodeClassPass(n, hideExternal, hideTests, hideCode, hideMarkdown, hideAttachments)) continue;
+      anchorSurvivors.set(n.anchor, (anchorSurvivors.get(n.anchor) || 0) + 1);
+    }
+  }
+  const visible = [];
+  for (let i = 0; i < DATA.supernodes.length; i++) {
+    const s = DATA.supernodes[i];
+    if (term && !s.anchor.toLowerCase().includes(term)) continue;
+    if (anyNodeFilter && !anchorSurvivors.has(s.anchor)) continue;
+    visible.push(i);
+  }
+  const renderIdxBySuper = new Map();
+  visible.forEach((srcIdx, ri) => renderIdxBySuper.set(srcIdx, ri));
+  const n = visible.length;
+  const xy = new Float32Array(n * 2);
+  const colors = new Float32Array(n * 4);
+  const sizes = new Float32Array(n);
+  for (let k = 0; k < n; k++) {
+    const s = DATA.supernodes[visible[k]];
+    xy[k*2] = s.x;
+    xy[k*2 + 1] = s.y;
+    const rgba = anchorRgba(s.anchor);
+    colors[k*4] = rgba[0]; colors[k*4 + 1] = rgba[1];
+    colors[k*4 + 2] = rgba[2]; colors[k*4 + 3] = 1.0;
+    sizes[k] = Math.max(8, Math.min(40, Math.sqrt(s.node_count) * 2.4));
+  }
+  const lsrcArr = [];
+  const ltgtArr = [];
+  const lcolorArr = [];
+  const lwidthArr = [];
+  for (let i = 0; i < DATA.anchor_edges.length; i++) {
+    const ae = DATA.anchor_edges[i];
+    const a = anchorToIdx.get(ae.a);
+    const b = anchorToIdx.get(ae.b);
+    const ra = renderIdxBySuper.get(a);
+    const rb = renderIdxBySuper.get(b);
+    if (ra === undefined || rb === undefined) continue;
+    lsrcArr.push(ra); ltgtArr.push(rb);
+    lwidthArr.push(Math.max(0.6, Math.min(4, Math.log2(1 + ae.weight) * 0.6)));
+    lcolorArr.push(0.30, 0.32, 0.36, 0.55);
+  }
+  return {
+    name: "overview",
+    focusAnchor: null,
+    pointCount: n, linkCount: lsrcArr.length,
+    xy, colors, sizes,
+    lsrc: new Float32Array(lsrcArr),
+    ltgt: new Float32Array(ltgtArr),
+    lcolors: new Float32Array(lcolorArr),
+    lwidths: new Float32Array(lwidthArr),
+    _visible: visible,
+    hover(idx) {
+      if (idx === null) return null;
+      const s = DATA.supernodes[visible[idx]];
+      return `<div class="name">${escapeHtml(s.anchor)}</div>` +
+        `<div class="muted">${s.node_count} nodes · weight ${s.total_weight}</div>` +
+        `<div class="muted">click to expand</div>`;
+    },
+    click(idx) {
+      if (idx === null) { clearSelection(); return; }
+      const anchor = DATA.supernodes[visible[idx]].anchor;
+      switchView(buildExpandedView(anchor));
+    },
+    selectionRenderIdx(sel) {
+      if (!sel || sel.kind !== "super") return -1;
+      const src = anchorToIdx.get(sel.anchor);
+      const r = renderIdxBySuper.get(src);
+      return r === undefined ? -1 : r;
+    },
+  };
+}
+
+function buildAllDetailView() {
+  return buildDetailViewFiltered(null);
+}
+
+function buildExpandedView(focusAnchor) {
+  return buildDetailViewFiltered(focusAnchor);
+}
+
+function buildDetailViewFiltered(focusAnchor) {
+  // When focusAnchor is null: render every detail node + edge.
+  // When set: render the focused anchor's nodes + its incident edges
+  // + the OTHER anchors as supernodes (so cross-anchor connections
+  // remain visible). Cross-anchor detail edges are NOT rendered to
+  // keep the cost bounded — the anchor supernodes carry that signal
+  // at this zoom.
+  const useAll = (focusAnchor === null);
+  const showOtherSupers = !useAll;
+  const hideExternal = filterEl("hide-external");
+  const hideTests = filterEl("hide-tests");
+  const hideCode = filterEl("hide-code");
+  const hideMarkdown = filterEl("hide-markdown");
+  const hideAttachments = filterEl("hide-attachments");
+  const anyNodeFilter = hideExternal || hideTests || hideCode || hideMarkdown || hideAttachments;
+  const term = searchTerm;
+  const nodePass = (n) => {
+    if (!nodeClassPass(n, hideExternal, hideTests, hideCode, hideMarkdown, hideAttachments)) return false;
+    if (term && !n.name.toLowerCase().includes(term)) return false;
+    return true;
+  };
+
+  // 1) Pick the detail-node indices we'll render and the supernode
+  //    indices we'll render alongside them.
+  const detailIdx = [];
+  for (let i = 0; i < DATA.nodes.length; i++) {
+    const n = DATA.nodes[i];
+    if (!useAll && n.anchor !== focusAnchor) continue;
+    if (!nodePass(n)) continue;
+    detailIdx.push(i);
+  }
+  // Anchors whose entire node set was filtered out by the node toggles
+  // shouldn't appear as surrounding supernodes either.
+  const anchorSurvivors = new Map();
+  if (anyNodeFilter) {
+    for (const n of DATA.nodes) {
+      if (!nodeClassPass(n, hideExternal, hideTests, hideCode, hideMarkdown, hideAttachments)) continue;
+      anchorSurvivors.set(n.anchor, (anchorSurvivors.get(n.anchor) || 0) + 1);
+    }
+  }
+  const superIdx = [];
+  if (showOtherSupers) {
+    for (let i = 0; i < DATA.supernodes.length; i++) {
+      const sa = DATA.supernodes[i].anchor;
+      if (sa === focusAnchor) continue;
+      if (anyNodeFilter && !anchorSurvivors.has(sa)) continue;
+      superIdx.push(i);
+    }
+  }
+  const pointCount = detailIdx.length + superIdx.length;
+
+  const xy = new Float32Array(pointCount * 2);
+  const colors = new Float32Array(pointCount * 4);
+  const sizes = new Float32Array(pointCount);
+
+  // 1a) detail nodes
+  for (let k = 0; k < detailIdx.length; k++) {
+    const n = DATA.nodes[detailIdx[k]];
+    xy[k*2] = n.x; xy[k*2 + 1] = n.y;
+    const rgba = nodeRgba(n);
+    colors[k*4] = rgba[0]; colors[k*4 + 1] = rgba[1];
+    colors[k*4 + 2] = rgba[2]; colors[k*4 + 3] = 1.0;
+    sizes[k] = 3 + Math.min(10, Math.log2(1 + n.weight) * 0.9);
+  }
+  // 1b) supernodes (for non-focused anchors when expanded)
+  for (let k = 0; k < superIdx.length; k++) {
+    const s = DATA.supernodes[superIdx[k]];
+    const dst = detailIdx.length + k;
+    xy[dst*2] = s.x; xy[dst*2 + 1] = s.y;
+    const rgba = anchorRgba(s.anchor);
+    colors[dst*4] = rgba[0]; colors[dst*4 + 1] = rgba[1];
+    colors[dst*4 + 2] = rgba[2]; colors[dst*4 + 3] = 1.0;
+    sizes[dst] = Math.max(8, Math.min(40, Math.sqrt(s.node_count) * 2.4));
+  }
+
+  // 2) Detail-node index → render index in the current view
+  const detailRenderIdx = new Map();
+  for (let k = 0; k < detailIdx.length; k++) {
+    detailRenderIdx.set(detailIdx[k], k);
+  }
+  const superRenderIdx = new Map(); // anchor name → render idx
+  for (let k = 0; k < superIdx.length; k++) {
+    superRenderIdx.set(DATA.supernodes[superIdx[k]].anchor, detailIdx.length + k);
+  }
+
+  // 3) Edges
+  const linkSrcArr = [];
+  const linkTgtArr = [];
+  const linkColorArr = [];
+  const linkWidthArr = [];
+  // anchor → Map<targetNodeIdx, Set<kind>> — cross-anchor incidence
+  // from the focused anchor's nodes to nodes in other clusters. Used
+  // by the supernode hover to list "all points in cluster X reachable
+  // from this expansion" even when no detail point is selected.
+  const crossTargets = new Map();
+  const recordCross = (otherIdx, otherAnchor, kind) => {
+    let byNode = crossTargets.get(otherAnchor);
+    if (!byNode) { byNode = new Map(); crossTargets.set(otherAnchor, byNode); }
+    let kinds = byNode.get(otherIdx);
+    if (!kinds) { kinds = new Set(); byNode.set(otherIdx, kinds); }
+    kinds.add(kind);
+  };
+  for (let i = 0; i < DATA.edges.length; i++) {
+    const e = DATA.edges[i];
+    if (!isKindOn(e.kind)) continue;
+    const aDataIdx = nodeIdToIdx.get(String(e.a));
+    const bDataIdx = nodeIdToIdx.get(String(e.b));
+    if (aDataIdx === undefined || bDataIdx === undefined) continue;
+    const aInDetail = detailRenderIdx.get(aDataIdx);
+    const bInDetail = detailRenderIdx.get(bDataIdx);
+    let sIdx, tIdx;
+    if (useAll) {
+      // In all-detail mode there are no supernodes to fall back to,
+      // so a filtered-out endpoint (external/test/search) means the
+      // edge has nowhere to attach — drop it entirely instead of
+      // letting undefined coerce to point 0 / origin.
+      if (aInDetail === undefined || bInDetail === undefined) continue;
+      sIdx = aInDetail; tIdx = bInDetail;
+    } else if (aInDetail !== undefined && bInDetail !== undefined) {
+      // intra-focus
+      sIdx = aInDetail; tIdx = bInDetail;
+    } else if (aInDetail !== undefined) {
+      // a is focused, b is in another anchor → route to b's supernode.
+      // But only if b itself isn't filtered out by hide-external /
+      // hide-tests / search — otherwise we'd paint a cross-cluster edge
+      // for a hidden endpoint, making it look like the focus connects
+      // to a cluster that should be hidden.
+      if (!nodePass(DATA.nodes[bDataIdx])) continue;
+      const otherSuperIdx = superRenderIdx.get(DATA.nodes[bDataIdx].anchor);
+      if (otherSuperIdx === undefined) continue;
+      recordCross(bDataIdx, DATA.nodes[bDataIdx].anchor, e.kind);
+      sIdx = aInDetail; tIdx = otherSuperIdx;
+    } else if (bInDetail !== undefined) {
+      if (!nodePass(DATA.nodes[aDataIdx])) continue;
+      const otherSuperIdx = superRenderIdx.get(DATA.nodes[aDataIdx].anchor);
+      if (otherSuperIdx === undefined) continue;
+      recordCross(aDataIdx, DATA.nodes[aDataIdx].anchor, e.kind);
+      sIdx = bInDetail; tIdx = otherSuperIdx;
+    } else {
+      continue; // both off-focus — represented by anchor supernode positions but no detail link
+    }
+    linkSrcArr.push(sIdx);
+    linkTgtArr.push(tIdx);
+    const rgba = hexToRgba(kindHex(e.kind), 0.55);
+    linkColorArr.push(rgba[0], rgba[1], rgba[2], rgba[3]);
+    linkWidthArr.push(Math.max(0.4, Math.min(2.2, Math.log2(1 + e.weight) * 0.5)));
+  }
+  return {
+    name: useAll ? "all" : "expanded:" + focusAnchor,
+    focusAnchor,
+    pointCount,
+    linkCount: linkSrcArr.length,
+    xy, colors, sizes,
+    lsrc: new Float32Array(linkSrcArr),
+    ltgt: new Float32Array(linkTgtArr),
+    lcolors: new Float32Array(linkColorArr),
+    lwidths: new Float32Array(linkWidthArr),
+    _detailIdx: detailIdx, _superIdx: superIdx,
+    hover(idx) {
+      if (idx === null) return null;
+      if (idx < detailIdx.length) {
+        const n = DATA.nodes[detailIdx[idx]];
+        const tags = [];
+        if (n.external) tags.push('<span class="muted">external</span>');
+        if (n.test) tags.push('<span class="muted">test</span>');
+        // Attachments show their MIME type instead of a (markdown) language.
+        const typeLabel = isAttachmentNode(n)
+          ? (n.mime || "attachment")
+          : (n.language || "?");
+        return `<div class="name">${escapeHtml(n.name)}</div>` +
+          `<div class="muted">${escapeHtml(n.kind)} · ${escapeHtml(typeLabel)}</div>` +
+          `<div class="muted">anchor: <b style="color:${rgbaToCss(anchorRgba(n.anchor))}">${escapeHtml(n.anchor)}</b></div>` +
+          `<div class="muted">weighted degree: ${n.weight}</div>` +
+          (tags.length ? `<div>${tags.join(" · ")}</div>` : "");
+      }
+      const s = DATA.supernodes[superIdx[idx - detailIdx.length]];
+      let html = `<div class="name">${escapeHtml(s.anchor)}</div>` +
+        `<div class="muted">${s.node_count} nodes · weight ${s.total_weight}</div>` +
+        `<div class="muted">click to expand</div>`;
+      // Pick the source for the connection list: a single selected
+      // detail point (specific to that point), or — when no selection
+      // — every detail point in the focused cluster (broad view of
+      // the cross-anchor surface).
+      let byNeighbor = null;
+      let captionLead = "";
+      if (selection && selection.kind === "detail" && selection.neighborsByAnchor) {
+        byNeighbor = selection.neighborsByAnchor.get(s.anchor);
+        if (byNeighbor && byNeighbor.size > 0) {
+          captionLead = `connection${byNeighbor.size === 1 ? "" : "s"} to <b>${escapeHtml(DATA.nodes[selection.dataIdx].name)}</b>`;
+        }
+      } else if (!useAll) {
+        byNeighbor = crossTargets.get(s.anchor);
+        if (byNeighbor && byNeighbor.size > 0) {
+          captionLead = `connection${byNeighbor.size === 1 ? "" : "s"} to <b>${escapeHtml(focusAnchor)}</b>`;
+        }
+      }
+      if (byNeighbor && byNeighbor.size > 0) {
+        const items = [...byNeighbor.entries()]
+          .map(([i, kinds]) => ({ node: DATA.nodes[i], kinds }))
+          .sort((a, b) => a.node.name.localeCompare(b.node.name))
+          .map(({ node, kinds }) => {
+            const swatches = [...kinds].sort()
+              .map(k => `<span class="swatch" style="background:${kindHex(k)}" title="${escapeHtml(k)}"></span>`)
+              .join("");
+            return `<div class="item">${swatches}<span>${escapeHtml(node.name)}</span></div>`;
+          })
+          .join("");
+        html += `<hr><div class="muted">${byNeighbor.size} ${captionLead}:</div>` +
+          `<div class="neighbor-list">${items}</div>`;
+      }
+      return html;
+    },
+    click(idx) {
+      if (idx === null) { clearSelection(); return; }
+      if (idx < detailIdx.length) {
+        const dataIdx = detailIdx[idx];
+        const isCurrent =
+          selection && selection.kind === "detail" && selection.dataIdx === dataIdx;
+        if (isCurrent) { popSelection(); return; }
+        setSelection({ kind: "detail", dataIdx, renderIdx: idx, anchor: DATA.nodes[dataIdx].anchor });
+      } else {
+        // Clicked a supernode while in expanded mode → switch focus.
+        const otherAnchor = DATA.supernodes[superIdx[idx - detailIdx.length]].anchor;
+        switchView(buildExpandedView(otherAnchor));
+      }
+    },
+    selectionRenderIdx(sel) {
+      if (!sel) return -1;
+      if (sel.kind === "detail") {
+        const k = detailRenderIdx.get(sel.dataIdx);
+        return k === undefined ? -1 : k;
+      }
+      // selection.kind === "super" — find index among supernodes shown
+      for (let k = 0; k < superIdx.length; k++) {
+        if (DATA.supernodes[superIdx[k]].anchor === sel.anchor) {
+          return detailIdx.length + k;
+        }
+      }
+      return -1;
+    },
+  };
+}
+
+// ── cosmos graph instance ────────────────────────────────────
+const container = document.getElementById("cy");
+let currentView = null;
+// Render-index of the point currently shown in the hover panel (and marked
+// by the #focus-ring overlay), or null. Reset on every view switch.
+let lastHoverIdx = null;
+
+// Filter state read fresh from the DOM each view build, so checkbox
+// toggles take effect via rebuildCurrentView without snapshotting.
+function filterEl(id) {
+  const el = document.getElementById(id);
+  return el ? el.checked : false;
+}
+function isKindOn(kind) {
+  const el = document.getElementById(`k-${kind}`);
+  return el ? el.checked : true;
+}
+
+// Selection stack — one-deep. `selection` is the active selection,
+// `prevSelection` is restored when the user clicks the active node a
+// second time (drill-in / drill-back).
+const selectionInfo = document.getElementById("selection-info");
+let selection = null;
+let prevSelection = null;
+
+let isolateOn = false;
+
+function clearSelection() {
+  selection = null;
+  prevSelection = null;
+  if (graph) {
+    // cosmos treats `selectPointsByIndices([])` as "everything dimmed".
+    // To restore full-opacity, undo the selection state entirely.
+    if (typeof graph.unselectPoints === "function") graph.unselectPoints();
+    else graph.selectPointsByIndices(null);
+    // When isolate-mode is on, falling back to "no selection" should
+    // still hide unconnected points (cluster-only view if expanded).
+    applyIsolationMask();
+    graph.render();
+  }
+  selectionInfo.style.display = "none";
+}
+
+// When isolate-mode is on and nothing is explicitly selected, build a
+// mask that keeps only the points relevant to the current expansion:
+// focused-cluster nodes + supernodes that have an edge into the cluster.
+// In overview / all-detail with no selection there's nothing to isolate
+// to — fall through to the default (everything visible).
+function applyIsolationMask() {
+  if (!currentView || selection) return;
+  if (!isolateOn) return;
+  if (!currentView.focusAnchor) return;
+  const detailLen = currentView._detailIdx ? currentView._detailIdx.length : 0;
+  if (detailLen === 0) return;
+  const keep = new Set();
+  for (let k = 0; k < detailLen; k++) keep.add(k);
+  for (let i = 0; i < currentView.lsrc.length; i++) {
+    const s = currentView.lsrc[i], t = currentView.ltgt[i];
+    if (s < detailLen) keep.add(t);
+    if (t < detailLen) keep.add(s);
+  }
+  graph.selectPointsByIndices([...keep]);
+}
+function setSelection(sel) {
+  if (selection) prevSelection = selection;
+  if (sel && sel.kind === "detail") {
+    sel.neighborsByAnchor = computeNeighborsByAnchor(sel.dataIdx);
+  }
+  selection = sel;
+  applySelection();
+}
+
+// For a selected detail node, bucket its neighbors by anchor so the
+// hover handler can show, in O(1), which nodes inside a hovered
+// cluster connect back to the selection.
+function computeNeighborsByAnchor(dataIdx) {
+  // anchor → Map<neighborIdx, Set<kind>>
+  const out = new Map();
+  for (let i = 0; i < DATA.edges.length; i++) {
+    const e = DATA.edges[i];
+    const aIdx = nodeIdToIdx.get(String(e.a));
+    const bIdx = nodeIdToIdx.get(String(e.b));
+    let other;
+    if (aIdx === dataIdx) other = bIdx;
+    else if (bIdx === dataIdx) other = aIdx;
+    else continue;
+    if (other === undefined) continue;
+    const anchor = DATA.nodes[other].anchor;
+    let byNeighbor = out.get(anchor);
+    if (!byNeighbor) { byNeighbor = new Map(); out.set(anchor, byNeighbor); }
+    let kinds = byNeighbor.get(other);
+    if (!kinds) { kinds = new Set(); byNeighbor.set(other, kinds); }
+    kinds.add(e.kind);
+  }
+  return out;
+}
+function popSelection() {
+  if (prevSelection) {
+    selection = prevSelection;
+    prevSelection = null;
+    applySelection();
+  } else {
+    clearSelection();
+  }
+}
+function applySelection() {
+  if (!selection || !currentView) { selectionInfo.style.display = "none"; return; }
+  const focus = currentView.selectionRenderIdx
+    ? currentView.selectionRenderIdx(selection)
+    : -1;
+  if (focus < 0) { selectionInfo.style.display = "none"; return; }
+  const keep = new Set([focus]);
+  for (let i = 0; i < currentView.lsrc.length; i++) {
+    if (currentView.lsrc[i] === focus) keep.add(currentView.ltgt[i]);
+    else if (currentView.ltgt[i] === focus) keep.add(currentView.lsrc[i]);
+  }
+  graph.selectPointsByIndices([...keep]);
+  graph.render();
+  renderSelectionInfo();
+}
+function renderSelectionInfo() {
+  if (!selection) { selectionInfo.style.display = "none"; return; }
+  if (selection.kind === "detail") {
+    const n = DATA.nodes[selection.dataIdx];
+    const color = rgbaToCss(anchorRgba(n.anchor));
+    const tags = [];
+    if (n.external) tags.push('<span class="muted">external</span>');
+    if (n.test) tags.push('<span class="muted">test</span>');
+    // Attachments show their MIME type instead of a (markdown) language.
+    const typeLabel = isAttachmentNode(n) ? (n.mime || "attachment") : (n.language || "?");
+    selectionInfo.innerHTML =
+      `<div class="name" style="color:${color}">${escapeHtml(n.name)}</div>` +
+      `<div class="muted">${escapeHtml(n.kind)} · ${escapeHtml(typeLabel)}</div>` +
+      `<div><span class="swatch" style="background:${color}"></span>` +
+      `<b style="color:${color}">${escapeHtml(n.anchor)}</b></div>` +
+      `<div class="muted">weighted degree: ${n.weight}</div>` +
+      (tags.length ? `<div>${tags.join(" · ")}</div>` : "");
+  } else {
+    const s = DATA.supernodes.find(x => x.anchor === selection.anchor);
+    if (!s) { selectionInfo.style.display = "none"; return; }
+    const color = rgbaToCss(anchorRgba(s.anchor));
+    selectionInfo.innerHTML =
+      `<div class="name" style="color:${color}">${escapeHtml(s.anchor)}</div>` +
+      `<div class="muted">${s.node_count} nodes · weight ${s.total_weight}</div>`;
+  }
+  selectionInfo.style.display = "block";
+}
+
+const config = {
+  backgroundColor: "#0e1117",
+  pointSize: 6,
+  scalePointsOnZoom: false,
+  pointGreyoutOpacity: 0.02,
+  linkGreyoutOpacity: 0.02,
+  linkColor: "#30363d",
+  linkWidth: 1,
+  linkWidthScale: 1,
+  linkArrows: false,
+  scaleLinksOnZoom: false,
+  fitViewOnInit: true,
+  fitViewPadding: 0.12,
+  enableDrag: false,
+  enableSimulation: false,
+  disableSimulation: true,
+  // Hover AND click are driven by a custom generous hit-test (see the
+  // pointer block below) instead of cosmos' exact-pixel detection, so tiny
+  // points are easy to inspect and click; the inspected point is marked
+  // with a fixed-thickness DOM ring (#focus-ring) — cosmos' own ring scales
+  // with point size and zoom, which we don't want.
+  renderHoveredPointRing: false,
+  hoveredPointCursor: "pointer",
+};
+const graph = new Graph(container, config);
+window.__graph = graph;
+
+function switchView(view) {
+  // Mode/view change clears any active selection (spec 6.3).
+  // Cosmos remembers the prior `selectPointsByIndices` mask across
+  // setPoint*/setLinks calls, so we must explicitly unselect — otherwise
+  // the new view paints with the old greyout mask applied.
+  selection = null;
+  prevSelection = null;
+  selectionInfo.style.display = "none";
+  // The previous view's focused/hovered point index is meaningless in the
+  // new view's buffers — clear the ring and the hover panel.
+  lastHoverIdx = null;
+  if (typeof setFocusRing === "function") setFocusRing(null);
+  if (typeof hover !== "undefined" && hover) hover.style.display = "none";
+  if (typeof graph !== "undefined" && graph) {
+    if (typeof graph.unselectPoints === "function") graph.unselectPoints();
+    else graph.selectPointsByIndices(null);
+  }
+  currentView = view;
+  graph.setPointPositions(view.xy);
+  graph.setPointColors(view.colors);
+  graph.setPointSizes(view.sizes);
+  // cosmos.gl wants a single interleaved [src0, tgt0, src1, tgt1, ...]
+  // Float32Array, not two parallel arrays.
+  const links = new Float32Array(view.lsrc.length * 2);
+  for (let i = 0; i < view.lsrc.length; i++) {
+    links[i*2] = view.lsrc[i];
+    links[i*2 + 1] = view.ltgt[i];
+  }
+  graph.setLinks(links);
+  graph.setLinkColors(view.lcolors);
+  graph.setLinkWidths(view.lwidths);
+  applyIsolationMask();
+  graph.render();
+  graph.pause(); // never simulate; positions are authoritative
+  graph.fitView(0);
+  // status + mode bar
+  if (view.name === "overview") {
+    status.textContent =
+      `${DATA.supernodes.length} anchors · ${DATA.anchor_edges.length} bundled edges · overview`;
+    modeBar.style.display = "none";
+  } else if (view.name === "all") {
+    status.textContent =
+      `${DATA.nodes.length} nodes · ${DATA.edges.length} edges · all detail`;
+    modeBar.style.display = "none";
+  } else {
+    const cnt = DATA.supernodes.find(s => s.anchor === view.focusAnchor)?.node_count ?? "?";
+    status.textContent =
+      `expanded ${view.focusAnchor} (${cnt} nodes) · click another anchor to swap · Esc to overview`;
+    modeBar.style.display = "block";
+    modeAnchorEl.textContent = view.focusAnchor;
+  }
+}
+
+// ── sidebar populate ──────────────────────────────────────────
+document.getElementById("counts").textContent =
+  `${DATA.nodes.length} nodes · ${DATA.edges.length} edges · ${DATA.anchors.length} anchors`;
+const kindsEl = document.getElementById("kinds");
+const kindChecked = new Map();
+for (const k of DATA.kinds) {
+  kindChecked.set(k, true);
+  const id = `k-${k}`;
+  kindsEl.insertAdjacentHTML("beforeend",
+    `<label><input type="checkbox" id="${id}" checked>` +
+    `<span class="swatch" style="background:${kindHex(k)}"></span>${escapeHtml(k)}</label>`);
+  // Filtering by edge kind on the GL side requires rebuilding the
+  // link buffer. Cheap for the overview; manageable for detail.
+  document.getElementById(id).addEventListener("change", () => rebuildCurrentView());
+}
+const anchorsEl = document.getElementById("anchors");
+const anchorCounts = new Map();
+for (const n of DATA.nodes) anchorCounts.set(n.anchor, (anchorCounts.get(n.anchor) || 0) + 1);
+const sortedAnchors = [...anchorCounts.entries()].sort((a, b) => b[1] - a[1]);
+for (const [a, c] of sortedAnchors) {
+  anchorsEl.insertAdjacentHTML("beforeend",
+    `<div class="legend-row" data-anchor="${escapeHtml(a)}" style="cursor:pointer"><span><span class="swatch" style="background:${rgbaToCss(anchorRgba(a))}"></span> ${escapeHtml(a)}</span><span class="num">${c}</span></div>`);
+}
+// Clicking an anchor in the legend is equivalent to clicking its
+// supernode in overview mode — expand into that anchor.
+anchorsEl.addEventListener("click", (ev) => {
+  const row = ev.target.closest(".legend-row");
+  if (!row) return;
+  const anchor = row.getAttribute("data-anchor");
+  if (!anchor) return;
+  // Toggle: clicking the already-expanded anchor collapses back to
+  // the default view (overview for big graphs, all-detail otherwise).
+  if (currentView && currentView.focusAnchor === anchor) {
+    switchView(initialOverviewLike());
+  } else {
+    switchView(buildExpandedView(anchor));
+  }
+});
+
+// ── filter wiring (currently kind-filter only triggers rebuild) ─
+document.getElementById("hide-external").addEventListener("change", rebuildCurrentView);
+document.getElementById("hide-tests").addEventListener("change", rebuildCurrentView);
+document.getElementById("hide-code").addEventListener("change", rebuildCurrentView);
+document.getElementById("hide-markdown").addEventListener("change", rebuildCurrentView);
+document.getElementById("hide-attachments").addEventListener("change", rebuildCurrentView);
+document.getElementById("isolate").addEventListener("change", () => {
+  isolateOn = document.getElementById("isolate").checked;
+  // Drive visibility entirely through cosmos' greyout opacity. 0 → hide
+  // unselected points/links; 0.02 keeps them as faded context.
+  // setConfig is the cheapest path: no view rebuild.
+  if (typeof graph.setConfig === "function") {
+    graph.setConfig({
+      pointGreyoutOpacity: isolateOn ? 0 : 0.02,
+      linkGreyoutOpacity: isolateOn ? 0 : 0.02,
+    });
+  }
+  if (selection) applySelection();
+  else {
+    if (typeof graph.unselectPoints === "function") graph.unselectPoints();
+    else graph.selectPointsByIndices(null);
+    applyIsolationMask();
+  }
+  graph.render();
+});
+const searchEl = document.getElementById("search");
+let searchTerm = "";
+let searchTimer = null;
+searchEl.addEventListener("input", () => {
+  searchTerm = searchEl.value.toLowerCase().trim();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(rebuildCurrentView, 120);
+});
+
+function rebuildCurrentView() {
+  if (!currentView) return;
+  if (currentView.name === "overview") {
+    switchView(buildOverviewView());
+  } else if (currentView.name === "all") {
+    switchView(buildAllDetailView());
+  } else {
+    switchView(buildExpandedView(currentView.focusAnchor));
+  }
+}
+
+// ── mode bar ──────────────────────────────────────────────────
+const modeBar = document.getElementById("mode-bar");
+const modeAnchorEl = document.getElementById("mode-anchor");
+const collapseBtn = document.getElementById("collapse-btn");
+collapseBtn.addEventListener("click", () => switchView(initialOverviewLike()));
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape") return;
+  if (selection) {
+    clearSelection();
+  } else if (currentView && currentView.focusAnchor) {
+    switchView(initialOverviewLike());
+  }
+});
+function initialOverviewLike() {
+  // For "big" graphs go to overview; small stays in all-detail.
+  return DATA.edges.length > SUPERNODE_EDGE_THRESHOLD
+    ? buildOverviewView()
+    : buildAllDetailView();
+}
+
+// ── hover panel + fixed-size focus ring ───────────────────────
+const hover = document.getElementById("hover");
+const focusRing = document.getElementById("focus-ring");
+let focusIdx = null;   // render-index the ring tracks, or null
+let ringRAF = 0;       // rAF handle for the ring-follow loop
+
+// Place the ring at the focused point's current screen position. Re-run
+// every frame so it follows pan/zoom; its size is fixed by CSS, so it
+// stays the same on screen no matter the point size or zoom level.
+const RING_GAP_PX = 5; // gap between the point's edge and the ring
+function positionRing() {
+  if (focusIdx === null || !currentView) { focusRing.style.display = "none"; return; }
+  const xy = currentView.xy;
+  if (focusIdx * 2 + 1 >= xy.length) { focusRing.style.display = "none"; return; }
+  const [sx, sy] = graph.spaceToScreenPosition([xy[focusIdx*2], xy[focusIdx*2 + 1]]);
+  // Diameter hugs the point at the CURRENT zoom: spaceToScreenRadius applies
+  // the same size-scaling cosmos renders with and returns the on-screen
+  // DIAMETER (our `sizes` are diameters). The 2px border thickness is fixed.
+  const size = (currentView.sizes && currentView.sizes[focusIdx]) || 6;
+  const d = graph.spaceToScreenRadius(size) + RING_GAP_PX * 2;
+  focusRing.style.width = d + "px";
+  focusRing.style.height = d + "px";
+  focusRing.style.left = sx + "px";
+  focusRing.style.top = sy + "px";
+  focusRing.style.display = "block";
+}
+function ringTick() {
+  if (focusIdx === null) { ringRAF = 0; focusRing.style.display = "none"; return; }
+  positionRing();
+  ringRAF = requestAnimationFrame(ringTick);
+}
+function setFocusRing(idx) {
+  focusIdx = idx;
+  if (idx !== null && !ringRAF) ringRAF = requestAnimationFrame(ringTick);
+  else if (idx === null) positionRing(); // hide immediately
+}
+
+function onHover(idx) {
+  if (!currentView) return;
+  const i = (idx === null || idx === undefined) ? null : idx;
+  const html = currentView.hover(i);
+  if (html) { hover.innerHTML = html; hover.style.display = "block"; }
+  else hover.style.display = "none";
+  // Ring the inspected point so it's obvious which one the panel describes.
+  setFocusRing(i);
+}
+
+// ── generous pointer hit-test (hover + click) ─────────────────
+// Cosmos' built-in detection needs the cursor exactly over a point, which
+// is fiddly for 3px nodes. Instead we pick the nearest point within a
+// screen-space radius. Done in space coords: one screen→space conversion
+// plus a linear scan of the position array — no per-point matrix math.
+const HOVER_RADIUS_PX = 16; // minimum hit radius, so tiny dots are reachable
+const EDGE_PAD_PX = 3;      // extra reach just beyond a point's own edge
+let pointerX = 0, pointerY = 0, hoverFrame = 0;
+
+// Nearest point to a screen position whose hit area the cursor is inside, or
+// -1. The hit radius is per-point: max(HOVER_RADIUS_PX, the point's own screen
+// radius + pad) — so the WHOLE of a big point is hoverable, not just a fixed
+// disc at its center, while tiny points still get a generous minimum.
+function nearestPointIndex(clientX, clientY) {
+  if (!graph || !currentView) return -1;
+  const positions = graph.getPointPositions();
+  if (!positions || positions.length === 0) return -1;
+  const sizes = currentView.sizes;
+  const rect = container.getBoundingClientRect();
+  const mx = clientX - rect.left, my = clientY - rect.top;
+  // Map space → screen with the camera transform (cosmos has no rotation, so a
+  // sampled origin + unit axes give an exact affine map — cheap per point).
+  const o = graph.spaceToScreenPosition([0, 0]);
+  const ax = graph.spaceToScreenPosition([1, 0]);
+  const ay = graph.spaceToScreenPosition([0, 1]);
+  const kx = ax[0] - o[0], ky = ay[1] - o[1];
+  // Screen px per size unit — the point-size scaling cosmos renders with.
+  const sizeUnit = graph.spaceToScreenRadius(1) || 1;
+  let best = -1, bestPx2 = Infinity;
+  for (let i = 0; i < positions.length / 2; i++) {
+    const dx = (o[0] + positions[i*2] * kx) - mx;
+    const dy = (o[1] + positions[i*2 + 1] * ky) - my;
+    const dPx2 = dx*dx + dy*dy; // squared screen distance
+    // Hit radius = the point's rendered screen radius (diameter/2, +pad), with
+    // a HOVER_RADIUS_PX floor so tiny dots stay reachable.
+    const pr = (sizes && sizes[i] ? sizes[i] * sizeUnit / 2 : 0) + EDGE_PAD_PX;
+    const r = Math.max(HOVER_RADIUS_PX, pr);
+    if (dPx2 <= r*r && dPx2 < bestPx2) { bestPx2 = dPx2; best = i; }
+  }
+  return best;
+}
+
+container.addEventListener("mousemove", (ev) => {
+  pointerX = ev.clientX; pointerY = ev.clientY;
+  if (hoverFrame) return;
+  hoverFrame = requestAnimationFrame(() => {
+    hoverFrame = 0;
+    const idx = nearestPointIndex(pointerX, pointerY);
+    container.style.cursor = idx >= 0 ? "pointer" : "default";
+    if (idx === lastHoverIdx) return;
+    lastHoverIdx = idx;
+    onHover(idx >= 0 ? idx : null);
+  });
+});
+container.addEventListener("mouseleave", () => {
+  if (hoverFrame) { cancelAnimationFrame(hoverFrame); hoverFrame = 0; }
+  lastHoverIdx = null;
+  container.style.cursor = "default";
+  onHover(null);
+});
+
+// Click uses the same generous hit-test (the point under the ring), so you
+// can click anywhere within reach of a tiny dot. These are POINTER events in
+// the CAPTURE phase: cosmos calls preventDefault on pointerdown (which
+// suppresses the compatibility mousedown/up/click events entirely — that's
+// why hover via mousemove works but a mouse-click handler never fired), and
+// capture runs before cosmos' own handlers. A click is told from a pan by how
+// far the pointer travelled since pointerdown.
+let downX = 0, downY = 0;
+container.addEventListener("pointerdown", (ev) => {
+  if (ev.button === 0) { downX = ev.clientX; downY = ev.clientY; }
+}, true);
+container.addEventListener("pointerup", (ev) => {
+  if (ev.button !== 0 || !currentView) return;
+  if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > 6) return; // a pan, not a click
+  const idx = nearestPointIndex(ev.clientX, ev.clientY);
+  currentView.click(idx >= 0 ? idx : null);
+}, true);
+
+// ── initial view ──────────────────────────────────────────────
+const SUPERNODE_EDGE_THRESHOLD = 5000;
+switchView(initialOverviewLike());
+
+// ── splitter drag (resize side panel) ─────────────────────────
+const splitter = document.getElementById("splitter");
+const MIN_SIDE = 160;
+const MAX_SIDE_MARGIN = 200; // keep at least this much room for the graph
+splitter.addEventListener("mousedown", (ev) => {
+  ev.preventDefault();
+  splitter.classList.add("dragging");
+  document.body.classList.add("resizing-side");
+  const onMove = (e) => {
+    const w = Math.max(MIN_SIDE, Math.min(window.innerWidth - MAX_SIDE_MARGIN, e.clientX));
+    document.documentElement.style.setProperty("--side-w", w + "px");
+  };
+  const onUp = () => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    splitter.classList.remove("dragging");
+    document.body.classList.remove("resizing-side");
+    // Let cosmos re-fit to the new canvas width.
+    graph.fitView(0);
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+});
+</script>
+</body>
+</html>

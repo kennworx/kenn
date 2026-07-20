@@ -1,0 +1,6 @@
+{"op":"attach","anchor":"crates/kenn-model/src/edge.rs","ts":"2026-06-20T10:38:07.822868Z"}
+{"op":"attach","anchor":"crates/kenn-store/src/db/codes.rs","ts":"2026-06-20T10:38:07.822868Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/edge.rs","ts":"2026-06-20T10:38:07.822868Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/transform_jsonl/records.rs","ts":"2026-06-20T10:38:07.822868Z"}
+{"op":"attach","anchor":"indexers/frames.ts","ts":"2026-06-20T10:38:07.822868Z"}
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Wire/EdgeKind.cs","ts":"2026-06-20T10:38:07.822868Z"}

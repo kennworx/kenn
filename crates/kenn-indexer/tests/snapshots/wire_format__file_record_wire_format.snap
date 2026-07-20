@@ -1,0 +1,12 @@
+---
+source: crates/kenn-indexer/tests/wire_format.rs
+expression: dump(&r)
+---
+{
+  "id": 1,
+  "path": "src/lib.rs",
+  "language": "rust",
+  "test": false,
+  "external": false,
+  "content_hash": 3735928559
+}

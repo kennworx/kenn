@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/driver/dotnet.rs","ts":"2026-07-16T06:56:44.801119Z","sha":"a12cef8d7f735314"}
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Indexing/IndexerCore.cs","ts":"2026-07-16T06:56:44.801119Z","sha":"f0e26a4d258ce648"}
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Indexing/IndexerCore.cs","ts":"2026-07-16T06:56:44.585085Z","sha":"b4f7938683c62b97"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/driver/dotnet.rs","ts":"2026-07-18T19:27:43.015182Z","sha":"2437ecac66c65639"}

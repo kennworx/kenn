@@ -1,0 +1,5 @@
+{"op":"attach","anchor":"crates/kenn-config/src/docker.rs","ts":"2026-07-16T15:34:59.703309Z","sha":"c6d25c0caa1bff38"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/docker.rs","ts":"2026-07-16T15:34:59.703309Z","sha":"41f53bfa4523fbec"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/docker.rs","ts":"2026-07-16T15:34:59.548087Z","sha":"e7e592bd64dabd6f"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/workflow.rs","ts":"2026-07-16T15:34:59.548087Z","sha":"a039e38d5295a79c"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_docker_cache.rs","ts":"2026-07-16T15:50:47.982831Z","sha":"7390b66cdcd0cc97"}

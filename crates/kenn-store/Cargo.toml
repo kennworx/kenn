@@ -1,0 +1,61 @@
+[package]
+name = "kenn-store"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+kenn-model = { path = "../kenn-model" }
+kenn-config = { path = "../kenn-config" }
+kenn-embed = { path = "../kenn-embed" }
+
+anyhow.workspace = true
+fs2.workspace = true
+gix.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+thiserror.workspace = true
+time.workspace = true
+toml.workspace = true
+tracing.workspace = true
+xxhash-rust.workspace = true
+
+# Lance is async-native — the single storage engine.
+# `time` drives the lazy query embedder's idle-unload task (design D7).
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+
+uuid = { version = "1", features = ["v4"] }
+
+# SQLite backend (replace-lance-with-sqlite). `bundled` ships SQLite with
+# FTS5 + the trigram tokenizer; `sqlite-vec` is a single vendored C file
+# (vec0 vector search), no Rust dep tree.
+rusqlite.workspace = true
+sqlite-vec = "0.1"
+# Reader connection pool (mcp-offload-blocking-storage): N background-thread
+# rusqlite Clients so MCP read queries run off the runtime workers and
+# parallelize. default-features=false + bundled keeps its rusqlite unified
+# with the workspace `rusqlite` (0.40, bundled).
+async-sqlite = { version = "0.6", default-features = false, features = ["bundled"] }
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support", "async_tokio"] }
+# `serial_test` serializes the real-model `hybrid_search.rs` tests that
+# share the process-wide `init_shared_embedder` singleton. `#[file_serial]`
+# (the `file_locks` feature) takes a cross-process lock so they never run
+# concurrently with each other or with another test binary that loads the
+# Metal model.
+serial_test = { version = "3", features = ["file_locks"] }
+tempfile.workspace = true
+
+[[bench]]
+name = "storage_harness"
+harness = false

@@ -1,0 +1,44 @@
+[package]
+name = "kenn-embed"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+kenn-config = { path = "../kenn-config" }
+
+thiserror.workspace = true
+tracing.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `EmbeddingProducer::embed` is `async fn` in a trait used via `dyn` —
+# `async-trait` provides the boxed-future indirection needed for dyn-compat.
+async-trait = "0.1"
+
+# Async runtime — `LazyEmbedder` does its model load in a
+# `spawn_blocking`, the idle-unload runs as a tokio task, and the
+# selector + spawn helpers run as regular tasks. `process` is needed
+# for `tokio::process::Command` (fork-exec the local daemon).
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "net", "macros", "process"] }
+
+# In-process llama.cpp — `LlamaEmbedder` runtime.
+llama-cpp-2 = "0.1.146"
+
+# `RemoteEmbedder` — OpenAI-compatible HTTP client. Async — drops the
+# `blocking` feature since `EmbeddingProducer::embed` is now async.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+base64 = "0.22"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { version = "0.1.146", features = ["metal"] }
+
+[dev-dependencies]
+tempfile.workspace = true

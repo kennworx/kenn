@@ -1,0 +1,44 @@
+[package]
+name = "kenn-mcp"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+kenn-indexer = { path = "../kenn-indexer" }
+kenn-analyze = { path = "../kenn-analyze" }
+kenn-config = { path = "../kenn-config" }
+kenn-model = { path = "../kenn-model", features = ["schemars"] }
+kenn-store = { path = "../kenn-store" }
+
+anyhow.workspace = true
+arc-swap.workspace = true
+base64 = "0.22"
+globset.workspace = true
+lru = "0.18"
+metrics = "0.24"
+notify.workspace = true
+rmcp = { version = "1.6", features = ["server", "transport-io", "macros"] }
+schemars = "1"
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-std", "signal"] }
+tracing.workspace = true
+xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+fs2.workspace = true
+tempfile.workspace = true
+# `test-util` enables tokio's paused-time helpers (`tokio::time::pause`,
+# `tokio::time::advance`) used by the file-watcher debounce tests.
+tokio = { version = "1", features = ["test-util", "rt", "rt-multi-thread", "macros", "sync", "time", "process"] }

@@ -1,0 +1,12 @@
+---
+source: crates/kenn-indexer/tests/wire_format.rs
+expression: dump(&r)
+---
+{
+  "src_id": 2,
+  "target_id": 8,
+  "properties": {
+    "edge_kind": "field_access",
+    "op": "write"
+  }
+}

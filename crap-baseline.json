@@ -1,0 +1,51 @@
+{
+  "$schema": "https://raw.githubusercontent.com/minikin/cargo-crap/main/schemas/report-v1.json",
+  "version": "0.2.1",
+  "entries": [
+    {
+      "file": "crates/kenn-embed/src/llama.rs",
+      "function": "LlamaEmbedder::embed_sync",
+      "line": 126,
+      "cyclomatic": 15.0,
+      "coverage": 0.0,
+      "crap": 240.0,
+      "crate": "kenn-embed"
+    },
+    {
+      "file": "crates/kenn-mcp/src/indexing.rs",
+      "function": "resolve_roots_and_maybe_rebind",
+      "line": 890,
+      "cyclomatic": 8.0,
+      "coverage": 0.0,
+      "crap": 72.0,
+      "crate": "kenn-mcp"
+    },
+    {
+      "file": "crates/kenn-embed/src/llama.rs",
+      "function": "llama_backend",
+      "line": 37,
+      "cyclomatic": 6.0,
+      "coverage": 0.0,
+      "crap": 42.0,
+      "crate": "kenn-embed"
+    },
+    {
+      "file": "crates/kenn-store/src/db/jobs.rs",
+      "function": "embed_pending",
+      "line": 110,
+      "cyclomatic": 26.0,
+      "coverage": 78.0,
+      "crap": 33.198048,
+      "crate": "kenn-store"
+    },
+    {
+      "file": "crates/kenn-model/src/kind.rs",
+      "function": "Kind::db_name",
+      "line": 98,
+      "cyclomatic": 31.0,
+      "coverage": 100.0,
+      "crap": 31.0,
+      "crate": "kenn-model"
+    }
+  ]
+}

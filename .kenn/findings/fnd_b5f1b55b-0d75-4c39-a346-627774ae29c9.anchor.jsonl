@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Indexing/SolutionLoader.cs","ts":"2026-07-10T15:34:56.973936Z","sha":"7411c6a3d556c5d0"}
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Indexing/BuildHostGuard.cs","ts":"2026-07-10T15:34:56.973936Z","sha":"3b5c89d68edfc8ae"}
+{"op":"attach","anchor":"justfile","ts":"2026-07-10T15:34:56.973936Z","sha":"3b829b5cb7d36a11"}

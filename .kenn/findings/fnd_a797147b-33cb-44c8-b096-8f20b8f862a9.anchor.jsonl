@@ -1,0 +1,5 @@
+{"op":"attach","anchor":"crates/kenn-analyze/src/lib.rs","ts":"2026-06-11T11:24:29.732147Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/indexing/orchestrate.rs","ts":"2026-06-11T11:24:29.732147Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/indexing/events.rs","ts":"2026-06-11T11:24:29.732147Z"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-06-11T11:24:29.732147Z"}
+{"op":"rename","from":"crates/kenn-cli/src/cmd_index.rs","to":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-15T16:45:55.173445Z"}

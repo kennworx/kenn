@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"indexers/kenn-dotnet/kenn-dotnet.csproj","ts":"2026-07-17T21:36:10.408967Z","sha":"f9d2e2bce3d338b0"}
+{"op":"attach","anchor":"docker/kenn-dotnet/Dockerfile","ts":"2026-07-17T21:36:10.408967Z","sha":"e93c4c0e51f711e5"}
+{"op":"rename","from":"docker/kenn-dotnet/Dockerfile","to":"docker/kenn-csharp/Dockerfile","ts":"2026-07-19T10:53:21.75352Z"}

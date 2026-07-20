@@ -1,0 +1,14 @@
+# The build context is the repository root (images need both the Rust entrypoint
+# and a language sidecar), so exclude everything a build never reads. Without
+# this, `target/` and `tmp/` alone push the context past a gigabyte.
+target/
+tmp/
+build/
+.git/
+.kenn/
+**/bin/
+**/obj/
+**/node_modules/
+**/.build/
+**/target/
+**/.venv/

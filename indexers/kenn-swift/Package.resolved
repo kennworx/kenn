@@ -1,0 +1,23 @@
+{
+  "pins" : [
+    {
+      "identity" : "swift-index-store",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/MobileNativeFoundation/swift-index-store",
+      "state" : {
+        "branch" : "main",
+        "revision" : "7edb9a64e084ed64f83b84fb9269d3d1a20c0687"
+      }
+    },
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-syntax.git",
+      "state" : {
+        "revision" : "79e4b74a295b6eb74a8b585e3a39d29e70c1dbd1",
+        "version" : "603.0.2"
+      }
+    }
+  ],
+  "version" : 2
+}

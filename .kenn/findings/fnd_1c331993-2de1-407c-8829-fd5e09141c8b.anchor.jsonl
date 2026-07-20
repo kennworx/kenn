@@ -1,0 +1,7 @@
+{"op":"attach","anchor":"crates/kenn-store/src/embed/sidecar/manifest.rs","ts":"2026-07-05T15:52:39.137794Z","sha":"2531dc5a4f18dcd4"}
+{"op":"attach","anchor":"crates/kenn-store/src/meta.rs","ts":"2026-07-05T15:52:39.137794Z","sha":"f9f9246c9f5f42c0"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-07-05T15:52:39.137794Z","sha":"1ef737dd44d03e14"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-07-07T12:11:04.045399Z","sha":"5634da662445121e"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-07-07T17:20:28.236814Z","sha":"cda0d45826f450cf"}
+{"op":"rename","from":"crates/kenn-cli/src/cmd_index.rs","to":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-15T16:45:54.557386Z"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-15T16:49:02.440372Z","sha":"e06bf93c4e2d4faf"}

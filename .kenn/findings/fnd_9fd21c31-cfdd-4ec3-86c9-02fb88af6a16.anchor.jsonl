@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"crates/kenn-config/src/index.rs","ts":"2026-06-15T09:41:52.529382Z"}
+{"op":"attach","anchor":"crates/kenn-analyze/src/lib.rs","ts":"2026-06-15T09:41:52.529382Z"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_visualize.rs","ts":"2026-06-15T09:41:52.529382Z"}

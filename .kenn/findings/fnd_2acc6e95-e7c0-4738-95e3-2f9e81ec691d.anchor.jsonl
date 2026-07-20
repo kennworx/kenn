@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/css/extends.rs","ts":"2026-06-18T20:14:10.691877Z"}
+{"op":"attach","anchor":"openspec/changes/index-css/specs/css-usage-graph/spec.md","ts":"2026-06-18T20:14:10.691877Z"}
+{"op":"rename","from":"openspec/changes/index-css/specs/css-usage-graph/spec.md","to":"openspec/specs/css-usage-graph/spec.md","ts":"2026-06-23T18:58:39.198381Z"}

@@ -1,0 +1,6 @@
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-07-05T18:07:03.719822Z","sha":"1ef737dd44d03e14"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/workflow.rs","ts":"2026-07-05T18:07:03.719822Z","sha":"2afbda04b34ba58a"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/workflow.rs","ts":"2026-07-05T18:07:03.609382Z","sha":"6d9474f8abe6e6d8"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-07-05T18:07:03.609382Z","sha":"ddb2111442de8661"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/report.rs","ts":"2026-07-05T18:07:03.609382Z","sha":"509818888fdb15c1"}
+{"op":"rename","from":"crates/kenn-cli/src/cmd_index.rs","to":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-15T16:45:54.725104Z"}

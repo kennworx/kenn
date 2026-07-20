@@ -1,0 +1,6 @@
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools","ts":"2026-06-09T13:43:03.793941Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools/state.rs","ts":"2026-06-09T13:43:03.793941Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools/state.rs","ts":"2026-06-09T18:01:22.782094Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/server.rs","ts":"2026-06-09T18:01:23.700558Z"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools/lifecycle.rs","ts":"2026-07-07T19:32:18.790795Z","sha":"7866e9472cc59d2b"}
+{"op":"rename","from":"crates/kenn-mcp/src/server.rs","to":"crates/kenn-mcp/src/server/core.rs","ts":"2026-07-15T16:47:33.130138Z"}

@@ -1,0 +1,748 @@
+{
+  "backend": "lance",
+  "note": "Lance top-k baseline; query_vec=None (lexical). Findings baseline omitted — this corpus has no findings.",
+  "queries": [
+    {
+      "blended": [
+        "rs:kenn-mcp::state::ReaderBinding::reader",
+        "rs:kenn-store::db::reader",
+        "rs:kenn-store::db::graph::reader",
+        "rs:kenn-store::readers",
+        "rs:kenn-store::api::reader",
+        "rs:kenn-store::api::reader::Reader",
+        "rs:kenn-store::db::graph::reader::graph_reader",
+        "rs:kenn-mcp::state::ReaderBinding::new",
+        "rs:kenn-store::db::reader::DbReader",
+        "rs:kenn-mcp::state::ReaderBinding::_pin"
+      ],
+      "by_name": [
+        "rs:kenn-mcp::state::ReaderBinding::reader",
+        "rs:kenn-store::db::reader",
+        "rs:kenn-store::db::graph::reader",
+        "rs:kenn-store::readers",
+        "rs:kenn-store::api::reader",
+        "rs:kenn-store::api::reader::Reader",
+        "rs:kenn-mcp::state::ReaderBinding::new",
+        "rs:kenn-store::db::graph::reader::graph_reader",
+        "rs:kenn-mcp::state::ReaderBinding::_pin",
+        "rs:kenn-store::db::reader::DbReader::graph"
+      ],
+      "q": "reader"
+    },
+    {
+      "blended": [
+        "rs:kenn-cli::Command::Embed",
+        "rs:kenn-store::embed",
+        "rs:kenn-embed::shared::SharedEmbedder::embed",
+        "rs:kenn-embed::lazy::LazyEmbedder::embed",
+        "rs:kenn-embed::remote::RemoteEmbedder::EmbeddingProducer::embed",
+        "rs:kenn-embed::producer::EmbeddingProducer::embed",
+        "rs:kenn-embed::llama::LlamaEmbedder::EmbeddingProducer::embed",
+        "rs:kenn-embed::remote::EmbedEntry::embedding",
+        "rs:kenn-cli::cmd_embed",
+        "rs:kenn-server::embeddings::EmbeddingEntry::embedding"
+      ],
+      "by_name": [
+        "rs:kenn-cli::Command::Embed",
+        "rs:kenn-store::embed",
+        "rs:kenn-embed::shared::SharedEmbedder::embed",
+        "rs:kenn-embed::lazy::LazyEmbedder::embed",
+        "rs:kenn-embed::llama::LlamaEmbedder::EmbeddingProducer::embed",
+        "rs:kenn-embed::remote::RemoteEmbedder::EmbeddingProducer::embed",
+        "rs:kenn-embed::producer::EmbeddingProducer::embed",
+        "rs:kenn-embed::remote::EmbedEntry::embedding",
+        "rs:kenn-server::embeddings::EmbeddingEntry::embedding",
+        "rs:kenn-config::global::GlobalConfig::embeddings"
+      ],
+      "q": "embed"
+    },
+    {
+      "blended": [
+        "rs:kenn-config::config::Config::staleness",
+        "rs:kenn-config::staleness",
+        "rs:kenn-store::staleness",
+        "rs:kenn-mcp::indexing::MetaStaleness::staleness_key",
+        "rs:kenn-store::lifecycle::state::MetaStaleness::staleness_key",
+        "rs:kenn-store::lifecycle::state::read_recorded_staleness_key",
+        "rs:kenn-mcp::indexing::MetaStaleness",
+        "rs:kenn-store::lifecycle::state::MetaStaleness",
+        "rs:kenn-store::staleness::StalenessKey",
+        "rs:kenn-store::staleness::compute_staleness_key"
+      ],
+      "by_name": [
+        "rs:kenn-config::config::Config::staleness",
+        "rs:kenn-config::staleness",
+        "rs:kenn-store::staleness",
+        "rs:kenn-mcp::indexing::MetaStaleness::staleness_key",
+        "rs:kenn-store::lifecycle::state::MetaStaleness::staleness_key",
+        "rs:kenn-mcp::indexing::MetaStaleness",
+        "rs:kenn-store::lifecycle::state::MetaStaleness",
+        "rs:kenn-store::lifecycle::state::read_recorded_staleness_key",
+        "rs:kenn-store::staleness::StalenessKey",
+        "rs:kenn-store::staleness::compute_staleness_key"
+      ],
+      "q": "staleness"
+    },
+    {
+      "blended": [
+        "rs:kenn-mcp::tools::SearchScope",
+        "rs:kenn-mcp::types::search_hit_shape",
+        "rs:kenn-mcp::types::SearchHitRef",
+        "rs:kenn-mcp::tools::ServerState::search_symbols_cache",
+        "rs:kenn-store::db::lance::index::SearchHit",
+        "rs:kenn-mcp::tools::SearchSymbolsArgs",
+        "rs:kenn-mcp::tools::SearchFindingsArgs",
+        "rs:kenn-mcp::tools::SemanticSearchArgs",
+        "rs:kenn-mcp::search_args",
+        "rs:kenn-mcp::types::SemanticSearchResponse"
+      ],
+      "by_name": [
+        "rs:kenn-mcp::types::search_hit_shape",
+        "rs:kenn-mcp::tools::SearchScope",
+        "rs:kenn-mcp::types::SearchHitRef",
+        "rs:kenn-mcp::tools::ServerState::search_symbols_cache",
+        "rs:kenn-store::db::lance::index::SearchHit",
+        "rs:kenn-mcp::tools::SemanticSearchArgs::scope",
+        "rs:kenn-mcp::types::search_hit_shape::sample_file",
+        "rs:kenn-store::db::reader::scale_hits",
+        "rs:kenn-mcp::tools::SearchSymbolsArgs",
+        "rs:kenn-mcp::tools::SearchFindingsArgs"
+      ],
+      "q": "search"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::embed::sidecar::manifest::Manifest::vector",
+        "rs:kenn-config::vectors",
+        "rs:kenn-config::config::Config::vectors",
+        "rs:kenn-store::db::jobs::ReembedReport::vectors",
+        "rs:kenn-store::db::reader::VECTOR_WEIGHT",
+        "rs:kenn-config::vectors::VectorsConfig",
+        "rs:kenn-store::db::lance::index::MIN_VECTORS_FOR_IVF",
+        "rs:kenn-store::api::types::WriterOptions::vectors_dir",
+        "rs:kenn-store::embed::sidecar::manifest::VectorStamp",
+        "rs:kenn-store::embed::sidecar::quant::QuantVector"
+      ],
+      "by_name": [
+        "rs:kenn-config::config::Config::vectors",
+        "rs:kenn-store::embed::sidecar::manifest::Manifest::vector",
+        "rs:kenn-config::vectors",
+        "rs:kenn-store::db::jobs::ReembedReport::vectors",
+        "rs:kenn-config::vectors::VectorsConfig",
+        "rs:kenn-store::db::reader::VECTOR_WEIGHT",
+        "rs:kenn-store::db::lance::index::MIN_VECTORS_FOR_IVF",
+        "rs:kenn-store::api::types::WriterOptions::vectors_dir",
+        "rs:kenn-store::layout::types::Layout::vectors_root",
+        "rs:kenn-store::embed::sidecar::quant::QuantVector"
+      ],
+      "q": "vector"
+    },
+    {
+      "blended": [
+        "rs:kenn-cli::cmd_cc_hook::CcHookAction::SessionEnd",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::SessionEnd",
+        "rs:kenn-cli::cmd_cc_hook::CcHookAction::SessionStart",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::SessionStart",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::SessionStart::session_id",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::Prompt::session_id",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::Touch::session_id",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::SessionEnd::session_id",
+        "rs:kenn-cli::cmd_cc_hook::SessionStartInput::session_id",
+        "rs:kenn-cli::cmd_cc_hook::UserPromptInput::session_id"
+      ],
+      "by_name": [
+        "rs:kenn-cli::cmd_cc_hook::CcHookAction::SessionEnd",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::SessionEnd",
+        "rs:kenn-cli::cmd_cc_hook::CcHookAction::SessionStart",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::SessionStart",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::SessionStart::session_id",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::Prompt::session_id",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::Touch::session_id",
+        "rs:kenn-cli::cmd_cc_hook::RawRecord::SessionEnd::session_id",
+        "rs:kenn-cli::cmd_cc_hook::SessionStartInput::session_id",
+        "rs:kenn-cli::cmd_cc_hook::UserPromptInput::session_id"
+      ],
+      "q": "session"
+    },
+    {
+      "blended": [
+        "rs:kenn-cli::Command::CcHook",
+        "rs:kenn-cli::cmd_cc_hook",
+        "rs:kenn-indexer::pipeline::no_op_hook",
+        "rs:kenn-cli::cmd_cc_hook::CcHookAction",
+        "rs:kenn-cli::Command::CcHook::action",
+        "rs:kenn-store::layout::types::Layout::cc_hook_log_path",
+        "rs:kenn-analyze::build_analysis_hook",
+        "rs:kenn-cli::cmd_cc_hook::install::contains_kenn_cc_hook",
+        "rs:kenn-cli::cc_hook",
+        "rs:kenn-cli::cmd_cc_hook::run_standalone"
+      ],
+      "by_name": [
+        "rs:kenn-cli::Command::CcHook",
+        "rs:kenn-indexer::pipeline::no_op_hook",
+        "rs:kenn-cli::cmd_cc_hook",
+        "rs:kenn-cli::Command::CcHook::action",
+        "rs:kenn-cli::cmd_cc_hook::CcHookAction",
+        "rs:kenn-store::layout::types::Layout::cc_hook_log_path",
+        "rs:kenn-analyze::build_analysis_hook",
+        "rs:kenn-cli::cmd_cc_hook::run_standalone",
+        "rs:kenn-cli::cmd_cc_hook::install::contains_kenn_cc_hook",
+        "rs:kenn-cli::cc_hook"
+      ],
+      "q": "hook"
+    },
+    {
+      "blended": [
+        "rs:kenn-indexer::pipeline::PipelineError::Parse",
+        "rs:kenn-indexer::transform_jsonl::JsonlTransformError::Parse",
+        "rs:kenn-indexer::parse",
+        "rs:kenn-analyze::layout::LayoutAlgo::parse",
+        "rs:kenn-model::id::ts::TypeScriptTransformer::IdTransformer::parse_public",
+        "rs:kenn-model::id::rs::RustTransformer::IdTransformer::parse_public",
+        "rs:kenn-model::id::py::PythonTransformer::IdTransformer::parse_public",
+        "rs:kenn-model::id::go::GoTransformer::IdTransformer::parse_public",
+        "rs:kenn-indexer::parse_jsonl",
+        "rs:kenn-model::id::IdTransformer::parse_public"
+      ],
+      "by_name": [
+        "rs:kenn-indexer::pipeline::PipelineError::Parse",
+        "rs:kenn-indexer::transform_jsonl::JsonlTransformError::Parse",
+        "rs:kenn-indexer::parse",
+        "rs:kenn-analyze::layout::LayoutAlgo::parse",
+        "rs:kenn-indexer::parse_jsonl",
+        "rs:kenn-indexer::parse::ParseError",
+        "rs:kenn-model::id::ParsedId",
+        "rs:kenn-model::id::ts::TypeScriptTransformer::IdTransformer::parse_public",
+        "rs:kenn-model::id::rs::RustTransformer::IdTransformer::parse_public",
+        "rs:kenn-model::id::py::PythonTransformer::IdTransformer::parse_public"
+      ],
+      "q": "parse"
+    },
+    {
+      "blended": [
+        "rs:kenn-mcp::result_cache::CachedTopK::snapshot",
+        "rs:kenn-mcp::cursor::DecodedCursor::List::snapshot",
+        "rs:kenn-cli::cmd_status::StatusReport::Available::snapshot",
+        "rs:kenn-store::worktree::ReadContext::Available::snapshot",
+        "rs:kenn-mcp::indexing::ReadyParts::snapshot_id",
+        "rs:kenn-mcp::state::LifecycleState::Ready::snapshot_id",
+        "rs:kenn-mcp::tools::ReadyView::snapshot_id",
+        "rs:kenn-mcp::error::McpErrorCode::EmptySnapshot",
+        "rs:kenn-mcp::cursor::DecodedCursor::list_snapshot",
+        "rs:kenn-mcp::cursor::SnapshotId"
+      ],
+      "by_name": [
+        "rs:kenn-mcp::result_cache::CachedTopK::snapshot",
+        "rs:kenn-mcp::cursor::DecodedCursor::List::snapshot",
+        "rs:kenn-cli::cmd_status::StatusReport::Available::snapshot",
+        "rs:kenn-store::worktree::ReadContext::Available::snapshot",
+        "rs:kenn-mcp::indexing::ReadyParts::snapshot_id",
+        "rs:kenn-mcp::state::LifecycleState::Ready::snapshot_id",
+        "rs:kenn-mcp::tools::ReadyView::snapshot_id",
+        "rs:kenn-mcp::error::McpErrorCode::EmptySnapshot",
+        "rs:kenn-mcp::cursor::DecodedCursor::list_snapshot",
+        "rs:kenn-mcp::cursor::SnapshotId"
+      ],
+      "q": "snapshot"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::db::lance",
+        "rs:kenn-store::db::findings::lance_resolver",
+        "rs:kenn-store::db::lance::store::LanceStore",
+        "rs:kenn-store::db::writer::DbWriter::knowledge",
+        "rs:kenn-store::db::reader::DbReader::knowledge",
+        "rs:kenn-store::layout::types::Layout::run_lance_dir",
+        "rs:kenn-store::db::setup::ensure_lance_mem_pool",
+        "rs:kenn-store::db::findings::lance_resolver::LanceCodeNodeResolver",
+        "rs:kenn-store::db::reader::scale_hits",
+        "rs:kenn-store::layout::types::Layout::live_findings_lance_dir"
+      ],
+      "by_name": [
+        "rs:kenn-store::db::lance",
+        "rs:kenn-store::db::findings::lance_resolver",
+        "rs:kenn-store::db::writer::DbWriter::knowledge",
+        "rs:kenn-store::db::reader::DbReader::knowledge",
+        "rs:kenn-store::db::lance::store::LanceStore",
+        "rs:kenn-store::db::reader::scale_hits",
+        "rs:kenn-store::db::setup::ensure_lance_mem_pool",
+        "rs:kenn-store::db::findings::lance_resolver::LanceCodeNodeResolver",
+        "rs:kenn-store::db::graph::store::is_commit_conflict",
+        "rs:kenn-store::layout::types::Layout::run_lance_dir"
+      ],
+      "q": "lance"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::embed::sidecar",
+        "rs:kenn-store::layout::types::Layout::sidecar_tmp_dir",
+        "rs:kenn-store::db::findings::build::reconcile_finding_embeddings",
+        "rs:kenn-store::embed::sidecar::manifest::MANIFEST_FILE",
+        "rs:kenn-store::embed::sidecar::manifest::Manifest::write",
+        "rs:kenn-store::embed::sidecar::segment::SEGMENT_MAGIC",
+        "rs:kenn-store::layout::types::Layout::code_vectors_dir",
+        "rs:kenn-store::layout::types::Layout::findings_vectors_dir",
+        "rs:kenn-store::embed::sidecar::manifest::Manifest::read",
+        "rs:kenn-store::db::lance::embed_column::load_reuse_map"
+      ],
+      "by_name": [
+        "rs:kenn-store::embed::sidecar",
+        "rs:kenn-store::layout::types::Layout::sidecar_tmp_dir",
+        "rs:kenn-store::db::findings::build::reconcile_finding_embeddings"
+      ],
+      "q": "sidecar"
+    },
+    {
+      "blended": [
+        "rs:kenn-mcp::types::IndexStatus::watcher",
+        "rs:kenn-mcp::tools::ServerState::watcher",
+        "rs:kenn-mcp::watcher",
+        "rs:kenn-mcp::watcher::WatcherHandle::_watcher",
+        "rs:kenn-mcp::tools::ServerState::watcher_state",
+        "rs:kenn-mcp::state::WatcherState",
+        "rs:kenn-mcp::crate",
+        "rs:kenn-mcp::watch_on_boots_server_with_watcher",
+        "rs:kenn-mcp::types::default_watcher_state",
+        "rs:kenn-mcp::watcher::WatcherHandle"
+      ],
+      "by_name": [
+        "rs:kenn-mcp::types::IndexStatus::watcher",
+        "rs:kenn-mcp::watcher",
+        "rs:kenn-mcp::tools::ServerState::watcher",
+        "rs:kenn-mcp::watcher::WatcherHandle::_watcher",
+        "rs:kenn-mcp::tools::ServerState::watcher_state",
+        "rs:kenn-mcp::crate",
+        "rs:kenn-mcp::types::default_watcher_state",
+        "rs:kenn-mcp::state::WatcherState",
+        "rs:kenn-mcp::watch_on_boots_server_with_watcher",
+        "rs:kenn-mcp::watcher::WatcherHandle"
+      ],
+      "q": "watcher"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::api::types::BlendedHit",
+        "rs:kenn-store::db::reader::blended_sort_key",
+        "rs:kenn-store::api::types::BlendedHit::File",
+        "rs:kenn-store::api::types::BlendedFileRow",
+        "rs:kenn-store::api::types::BlendedSymbolRow",
+        "rs:kenn-store::api::types::BlendedHit::Symbol",
+        "rs:kenn-mcp::search_symbols_returns_blended_ranking",
+        "rs:kenn-store::snake_case_returns_for_blended_query",
+        "rs:kenn-store::bench_search_symbols_blended",
+        "rs:kenn-store::blended_returns_nonempty_when_bm25_match_exists"
+      ],
+      "by_name": [
+        "rs:kenn-store::api::types::BlendedHit",
+        "rs:kenn-store::api::types::BlendedHit::File",
+        "rs:kenn-store::db::reader::blended_sort_key",
+        "rs:kenn-store::api::types::BlendedHit::Symbol",
+        "rs:kenn-store::api::types::BlendedFileRow",
+        "rs:kenn-store::api::types::BlendedSymbolRow",
+        "rs:kenn-store::snake_case_returns_for_blended_query",
+        "rs:kenn-mcp::search_symbols_returns_blended_ranking",
+        "rs:kenn-store::bench_search_symbols_blended",
+        "rs:kenn-store::blended_returns_nonempty_when_bm25_match_exists"
+      ],
+      "q": "blended"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::db::graph::schema::dataset::GraphDataset::Symbols",
+        "rs:kenn-indexer::parse_jsonl::Frame::Symbol",
+        "rs:kenn-store::api::types::FoundSymbolRow::symbol",
+        "rs:kenn-store::api::types::BlendedSymbolRow::symbol",
+        "rs:kenn-mcp::types::RankedCodeHit::symbol",
+        "rs:kenn-mcp::types::SearchHitRef::Symbol",
+        "rs:kenn-store::api::types::BlendedHit::Symbol",
+        "rs:kenn-cli::cmd_index::Counts::symbols",
+        "rs:kenn-indexer::pipeline::UnitCounts::symbols",
+        "rs:kenn-store::symbol"
+      ],
+      "by_name": [
+        "rs:kenn-store::db::graph::schema::dataset::GraphDataset::Symbols",
+        "rs:kenn-indexer::parse_jsonl::Frame::Symbol",
+        "rs:kenn-store::api::types::FoundSymbolRow::symbol",
+        "rs:kenn-store::api::types::BlendedSymbolRow::symbol",
+        "rs:kenn-mcp::types::RankedCodeHit::symbol",
+        "rs:kenn-mcp::types::SearchHitRef::Symbol",
+        "rs:kenn-store::api::types::BlendedHit::Symbol",
+        "rs:kenn-cli::cmd_index::Counts::symbols",
+        "rs:kenn-indexer::pipeline::UnitCounts::symbols",
+        "rs:kenn-store::symbol"
+      ],
+      "q": "symbol"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::db::graph::schema",
+        "rs:kenn-store::db::findings::schema",
+        "rs:kenn-store::db::lance::schema",
+        "rs:kenn-store::db::graph::schema::dataset::GraphDataset::schema",
+        "rs:kenn-store::db::graph::schema::dataset::arc_schema",
+        "rs:kenn-store::api::types::DbError::SchemaMismatch",
+        "rs:kenn-store::db::lance::schema::dataset_schema",
+        "rs:kenn-store::db::graph::schema::ingest::defs_schema",
+        "rs:kenn-store::db::findings::schema::findings_schema",
+        "rs:kenn-store::db::graph::schema::ingest::edges_schema"
+      ],
+      "by_name": [
+        "rs:kenn-store::db::lance::schema",
+        "rs:kenn-store::db::graph::schema",
+        "rs:kenn-store::db::findings::schema",
+        "rs:kenn-store::db::graph::schema::dataset::GraphDataset::schema",
+        "rs:kenn-store::db::graph::schema::dataset::arc_schema",
+        "rs:kenn-store::db::graph::schema::ingest::defs_schema",
+        "rs:kenn-store::db::graph::schema::ingest::edges_schema",
+        "rs:kenn-store::db::graph::schema::ingest::files_schema",
+        "rs:kenn-store::api::types::DbError::SchemaMismatch",
+        "rs:kenn-store::db::lance::schema::dataset_schema"
+      ],
+      "q": "schema"
+    },
+    {
+      "blended": [
+        "rs:kenn-config::ingest",
+        "rs:kenn-config::config::Config::ingest",
+        "rs:kenn-store::db::graph::schema::ingest",
+        "rs:kenn-indexer::pipeline::ProgressEvent::UnitIngested",
+        "rs:kenn-indexer::pipeline::IngestUnit",
+        "rs:kenn-indexer::pipeline::ProgressEvent::UnitIngested::unit",
+        "rs:kenn-config::ingest::IngestConfig",
+        "rs:kenn-config::ingest::IngestConfig::Default",
+        "rs:kenn-indexer::transform_jsonl::JsonlIngestStats",
+        "rs:kenn-store::distinct_packages_matches_ingest"
+      ],
+      "by_name": [
+        "rs:kenn-config::config::Config::ingest",
+        "rs:kenn-store::db::graph::schema::ingest",
+        "rs:kenn-config::ingest",
+        "rs:kenn-indexer::pipeline::ProgressEvent::UnitIngested",
+        "rs:kenn-indexer::pipeline::ProgressEvent::UnitIngested::unit",
+        "rs:kenn-indexer::pipeline::IngestUnit",
+        "rs:kenn-config::ingest::IngestConfig",
+        "rs:kenn-config::ingest::IngestConfig::Default",
+        "rs:kenn-indexer::transform_jsonl::JsonlIngestStats",
+        "rs:kenn-store::distinct_packages_matches_ingest"
+      ],
+      "q": "ingest"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::embed::sidecar::manifest::Manifest::fingerprint",
+        "rs:kenn-store::staleness::StalenessKey::Tree::fingerprint",
+        "rs:kenn-store::embed::sidecar::quant::fingerprint",
+        "rs:kenn-store::embed::sidecar::manifest::FingerprintStamp",
+        "rs:kenn-store::db::lance::schema::COL_FINGERPRINT",
+        "rs:kenn-store::embed::sidecar::quant::FINGERPRINT_HASH",
+        "rs:kenn-store::db::lance::schema::text_fingerprint",
+        "rs:kenn-store::db::lance::schema::file_fingerprint",
+        "rs:kenn-store::staleness::tree_fingerprint",
+        "rs:kenn-store::staleness::fingerprint_dir"
+      ],
+      "by_name": [
+        "rs:kenn-store::embed::sidecar::manifest::Manifest::fingerprint",
+        "rs:kenn-store::staleness::StalenessKey::Tree::fingerprint",
+        "rs:kenn-store::embed::sidecar::quant::fingerprint",
+        "rs:kenn-store::embed::sidecar::manifest::FingerprintStamp",
+        "rs:kenn-store::db::lance::schema::COL_FINGERPRINT",
+        "rs:kenn-store::embed::sidecar::quant::FINGERPRINT_HASH",
+        "rs:kenn-store::db::lance::schema::text_fingerprint",
+        "rs:kenn-store::db::lance::schema::file_fingerprint",
+        "rs:kenn-store::staleness::tree_fingerprint",
+        "rs:kenn-store::staleness::fingerprint_dir"
+      ],
+      "q": "fingerprint"
+    },
+    {
+      "blended": [],
+      "by_name": [],
+      "q": "collector"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::db::writer::DbWriter::graph",
+        "rs:kenn-store::db::reader::DbReader::graph",
+        "rs:kenn-store::db::graph",
+        "rs:kenn-store::db::graph::reader::graph_reader::GraphReader::graph",
+        "rs:kenn-analyze::graph",
+        "rs:kenn-analyze::projection::AnchorMap::from_graph",
+        "rs:kenn-store::db::graph::reader::graph_reader",
+        "rs:kenn-store::db::graph::reader::memory_graph",
+        "rs:kenn-store::db::graph::reader::graph_scans",
+        "rs:kenn-analyze::graph::GraphJson"
+      ],
+      "by_name": [
+        "rs:kenn-store::db::writer::DbWriter::graph",
+        "rs:kenn-store::db::reader::DbReader::graph",
+        "rs:kenn-store::db::graph",
+        "rs:kenn-store::db::graph::reader::graph_reader::GraphReader::graph",
+        "rs:kenn-analyze::graph",
+        "rs:kenn-analyze::projection::AnchorMap::from_graph",
+        "rs:kenn-store::db::graph::reader::graph_scans",
+        "rs:kenn-store::db::graph::reader::graph_reader",
+        "rs:kenn-store::db::graph::reader::memory_graph",
+        "rs:kenn-store::db::graph::writer::GraphWriter::store"
+      ],
+      "q": "graph"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::lifecycle::types::StartupDecision::Reindex",
+        "rs:kenn-mcp::state::LifecycleState::Ready::reindex",
+        "rs:kenn-mcp::tools::reindex",
+        "rs:kenn-mcp::server::KennMcpServer::reindex",
+        "rs:kenn-mcp::tools::ReindexArgs",
+        "rs:kenn-mcp::tools::ReindexResponse",
+        "rs:kenn-mcp::state::ReindexProgress",
+        "rs:kenn-mcp::types::IndexStatus::reindex_in_progress",
+        "rs:kenn-mcp::reads_continue_during_in_flight_reindex",
+        "rs:kenn-mcp::failed_state_recovered_by_reindex_call"
+      ],
+      "by_name": [
+        "rs:kenn-store::lifecycle::types::StartupDecision::Reindex",
+        "rs:kenn-mcp::state::LifecycleState::Ready::reindex",
+        "rs:kenn-mcp::tools::reindex",
+        "rs:kenn-mcp::server::KennMcpServer::reindex",
+        "rs:kenn-mcp::tools::ReindexArgs",
+        "rs:kenn-mcp::tools::ReindexResponse",
+        "rs:kenn-mcp::state::ReindexProgress",
+        "rs:kenn-mcp::types::IndexStatus::reindex_in_progress",
+        "rs:kenn-mcp::failed_state_recovered_by_reindex_call",
+        "rs:kenn-mcp::reads_continue_during_in_flight_reindex"
+      ],
+      "q": "reindex"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::db::lance::index::search_docs",
+        "rs:kenn-config::language::csharp::CsharpConfig::command",
+        "rs:kenn-config::language::typescript::TypescriptConfig::command",
+        "rs:kenn-embed::producer::EmbeddingProducer::count_tokens",
+        "rs:kenn-embed::llama::LlamaEmbedder::EmbeddingProducer::count_tokens",
+        "rs:kenn-store::multi_token_query_uses_and_semantics",
+        "rs:kenn-store::bm25_exact_class_name_foobarbaz_top1",
+        "rs:kenn-embed::llama::CTX_TOKENS",
+        "rs:kenn-store::snake_case_returns_for_blended_query",
+        "rs:kenn-store::db::findings::query::bm25_finding_hits"
+      ],
+      "by_name": [],
+      "q": "tokenize"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::embed::sidecar::quant",
+        "rs:kenn-store::embed::sidecar::manifest::VectorStamp::quant",
+        "rs:kenn-store::embed::sidecar::quant::QUANT_CODE_INT8",
+        "rs:kenn-store::embed::sidecar::quant::QuantVector",
+        "rs:kenn-store::embed::sidecar::quant::QUANT_INT8_SYM_PERVEC",
+        "rs:kenn-store::embed::sidecar::quant::QuantVector::dequantize",
+        "rs:kenn-store::embed::sidecar::quant::QuantVector::quantize",
+        "rs:kenn-store::embed::sidecar::quant::quantize_one",
+        "rs:kenn-store::embed::sidecar::segment::Segment::entries",
+        "rs:kenn-store::embed::sidecar::segment::Segment::new"
+      ],
+      "by_name": [
+        "rs:kenn-store::embed::sidecar::quant",
+        "rs:kenn-store::embed::sidecar::manifest::VectorStamp::quant",
+        "rs:kenn-store::embed::sidecar::quant::QuantVector",
+        "rs:kenn-store::embed::sidecar::quant::QuantVector::dequantize",
+        "rs:kenn-store::embed::sidecar::quant::QuantVector::quantize",
+        "rs:kenn-store::embed::sidecar::quant::QUANT_CODE_INT8",
+        "rs:kenn-store::embed::sidecar::quant::quantize_one",
+        "rs:kenn-store::embed::sidecar::segment::Segment::entries",
+        "rs:kenn-store::embed::sidecar::quant::QUANT_INT8_SYM_PERVEC",
+        "rs:kenn-store::embed::sidecar::segment::Segment::new"
+      ],
+      "q": "quant"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::embed::sidecar::manifest",
+        "rs:kenn-store::embed::sidecar::manifest::Manifest",
+        "rs:kenn-store::embed::sidecar::manifest::MANIFEST_FILE",
+        "rs:kenn-store::embed::sidecar::manifest::Manifest::format_version",
+        "rs:kenn-store::embed::sidecar::manifest::Manifest::write",
+        "rs:kenn-store::embed::sidecar::manifest::Manifest::current",
+        "rs:kenn-store::embed::sidecar::quant::FINGERPRINT_HASH",
+        "rs:kenn-store::crates_dir",
+        "rs:kenn-store::embed::sidecar::manifest::Manifest::read",
+        "rs:kenn-store::embed::sidecar::quant::FORMAT_VERSION"
+      ],
+      "by_name": [
+        "rs:kenn-store::embed::sidecar::manifest",
+        "rs:kenn-store::embed::sidecar::manifest::Manifest",
+        "rs:kenn-store::embed::sidecar::manifest::MANIFEST_FILE"
+      ],
+      "q": "manifest"
+    },
+    {
+      "blended": [
+        "rs:kenn-indexer::parse_jsonl::Frame::Package",
+        "rs:kenn-model::kind::Kind::Package",
+        "rs:kenn-model::kind_classifier::ScipKind::Package",
+        "ts:`indexers/kenn-ts/src/indexing/edges.ts`/EdgeCtx#packages.",
+        "rs:kenn-store::db::graph::schema::dataset::GraphDataset::Packages",
+        "rs:kenn-indexer::package_layout::CargoToml::package",
+        "ts:`indexers/kenn-ts/src/indexing/packages.ts`/Packages#",
+        "rs:kenn-store::api::writer::WriteBatch::packages",
+        "rs:kenn-mcp::types::SymbolRef::package",
+        "rs:kenn-indexer::transform_jsonl::JsonlIngestStats::packages"
+      ],
+      "by_name": [
+        "rs:kenn-indexer::parse_jsonl::Frame::Package",
+        "rs:kenn-model::kind::Kind::Package",
+        "rs:kenn-model::kind_classifier::ScipKind::Package",
+        "ts:`indexers/kenn-ts/src/indexing/edges.ts`/EdgeCtx#packages.",
+        "rs:kenn-store::db::graph::schema::dataset::GraphDataset::Packages",
+        "rs:kenn-indexer::package_layout::CargoToml::package",
+        "ts:`indexers/kenn-ts/src/indexing/packages.ts`/Packages#",
+        "rs:kenn-store::api::writer::WriteBatch::packages",
+        "rs:kenn-indexer::transform_jsonl::JsonlIngestStats::packages",
+        "rs:kenn-model::id::ScipHead::package"
+      ],
+      "q": "package"
+    },
+    {
+      "blended": [
+        "rs:kenn-mcp::tools::SearchScope::Findings",
+        "rs:kenn-store::api::types::FindingHit::finding",
+        "rs:kenn-mcp::types::RankedFindingView::finding",
+        "rs:kenn-store::db::findings",
+        "rs:kenn-indexer::workflow::WorkflowError::Findings",
+        "rs:kenn-mcp::types::SemanticSearchResponse::findings",
+        "rs:kenn-mcp::tools::ServerState::findings",
+        "rs:kenn-store::api::types::Finding",
+        "rs:kenn-store::db::findings::record::FindingRecord::from_finding",
+        "rs:kenn-store::db::findings::record::FindingRecord::into_finding"
+      ],
+      "by_name": [
+        "rs:kenn-store::api::types::FindingHit::finding",
+        "rs:kenn-mcp::tools::SearchScope::Findings",
+        "rs:kenn-mcp::types::RankedFindingView::finding",
+        "rs:kenn-store::db::findings",
+        "rs:kenn-indexer::workflow::WorkflowError::Findings",
+        "rs:kenn-mcp::types::SemanticSearchResponse::findings",
+        "rs:kenn-mcp::tools::ServerState::findings",
+        "rs:kenn-store::api::types::Finding",
+        "rs:kenn-store::db::findings::record::FindingRecord::from_finding",
+        "rs:kenn-store::db::findings::record::FindingRecord::into_finding"
+      ],
+      "q": "finding"
+    },
+    {
+      "blended": [
+        "rs:kenn-store::db::graph::reader::graph_scans",
+        "rs:kenn-store::db::graph::reader::scan_util",
+        "rs:kenn-store::db::findings::query::collect_scan",
+        "rs:kenn-store::scan_analysis_god_nodes_filters_by_kind",
+        "rs:kenn-store::scan_analysis_flat_communities_returns_rows",
+        "rs:kenn-store::scan_analysis_node_membership_returns_per_node_rows",
+        "rs:kenn-store::scan_analysis_anchored_hierarchy_returns_rows_with_parents",
+        "rs:kenn-store::db::reader::DbReader::Reader::scan_symbols",
+        "rs:kenn-store::db::findings::query::scan_all_findings",
+        "rs:kenn-store::db::graph::reader::graph_scans::GraphReader::scan_symbols"
+      ],
+      "by_name": [
+        "rs:kenn-store::db::graph::reader::graph_scans",
+        "rs:kenn-store::db::graph::reader::scan_util",
+        "rs:kenn-store::db::findings::query::collect_scan",
+        "rs:kenn-store::scan_analysis_god_nodes_filters_by_kind",
+        "rs:kenn-store::scan_analysis_flat_communities_returns_rows",
+        "rs:kenn-store::scan_analysis_node_membership_returns_per_node_rows",
+        "rs:kenn-store::db::reader::DbReader::Reader::scan_symbols",
+        "rs:kenn-store::scan_analysis_anchored_hierarchy_returns_rows_with_parents",
+        "rs:kenn-store::db::graph::reader::graph_scans::GraphReader::scan_symbols",
+        "rs:kenn-store::db::graph::reader::graph_scans::GraphReader::scan_file_docs"
+      ],
+      "q": "scan"
+    },
+    {
+      "blended": [
+        "rs:kenn-mcp::tools::WatchStartResult::debounce_ms",
+        "rs:kenn-config::mcp::McpConfig::watch_debounce_ms",
+        "rs:kenn-mcp::TEST_DEBOUNCE_MS",
+        "rs:kenn-mcp::watch_stop_mid_debounce_cancels_trigger",
+        "rs:kenn-config::mcp::default_watch_debounce_ms",
+        "rs:kenn-mcp::deletion_of_source_file_triggers_debounce",
+        "rs:kenn-mcp::watcher::spawn_debounce_task",
+        "rs:kenn-mcp::types::IndexStatus::watcher",
+        "rs:kenn-mcp::burst_of_saves_collapses_to_one_trigger",
+        "rs:kenn-mcp::tools::ServerState::watcher_state"
+      ],
+      "by_name": [
+        "rs:kenn-mcp::tools::WatchStartResult::debounce_ms",
+        "rs:kenn-config::mcp::McpConfig::watch_debounce_ms",
+        "rs:kenn-mcp::TEST_DEBOUNCE_MS",
+        "rs:kenn-config::mcp::default_watch_debounce_ms",
+        "rs:kenn-mcp::watch_stop_mid_debounce_cancels_trigger",
+        "rs:kenn-mcp::deletion_of_source_file_triggers_debounce",
+        "rs:kenn-mcp::watcher::spawn_debounce_task"
+      ],
+      "q": "debounce"
+    },
+    {
+      "blended": [
+        "rs:kenn-embed::llama::l2_normalize",
+        "rs:kenn-store::db::findings::query::NEAR_DUP_THRESHOLD",
+        "rs:kenn-store::db::findings::query::vector_search_findings"
+      ],
+      "by_name": [],
+      "q": "cosine"
+    },
+    {
+      "blended": [
+        "rs:kenn-indexer::sink::BatchSink::writer",
+        "rs:kenn-store::db::writer",
+        "rs:kenn-store::db::graph::writer",
+        "rs:kenn-store::api::writer",
+        "rs:kenn-store::db::writer::DbWriter",
+        "rs:kenn-store::open_writer_at",
+        "rs:kenn-store::ingest_corpus",
+        "rs:kenn-store::open::reader_from_writer",
+        "rs:kenn-store::db::writer::DbWriter::graph",
+        "rs:kenn-store::api::types::WriterOptions"
+      ],
+      "by_name": [
+        "rs:kenn-indexer::sink::BatchSink::writer",
+        "rs:kenn-store::db::writer",
+        "rs:kenn-store::db::graph::writer",
+        "rs:kenn-store::api::writer",
+        "rs:kenn-store::ingest_corpus",
+        "rs:kenn-store::open_writer_at",
+        "rs:kenn-store::db::writer::DbWriter::graph",
+        "rs:kenn-store::open::reader_from_writer",
+        "rs:kenn-store::db::writer::DbWriter",
+        "rs:kenn-store::db::writer::DbWriter::options"
+      ],
+      "q": "writer"
+    },
+    {
+      "blended": [
+        "rs:kenn-config::config::Config::lifecycle",
+        "rs:kenn-config::lifecycle",
+        "rs:kenn-store::db::findings::lifecycle",
+        "rs:kenn-store::lifecycle",
+        "rs:kenn-mcp::tools::ServerState::lifecycle",
+        "rs:kenn-mcp::state::SharedLifecycle",
+        "rs:kenn-mcp::state::LifecycleState",
+        "rs:kenn-store::lifecycle::types::LifecycleState",
+        "rs:kenn-config::lifecycle::LifecycleConfig",
+        "rs:kenn-config::lifecycle::LifecycleConfig::Default"
+      ],
+      "by_name": [
+        "rs:kenn-config::config::Config::lifecycle",
+        "rs:kenn-store::db::findings::lifecycle",
+        "rs:kenn-config::lifecycle",
+        "rs:kenn-store::lifecycle",
+        "rs:kenn-mcp::tools::ServerState::lifecycle",
+        "rs:kenn-mcp::state::SharedLifecycle",
+        "rs:kenn-mcp::state::LifecycleState",
+        "rs:kenn-store::lifecycle::types::LifecycleState",
+        "rs:kenn-config::lifecycle::LifecycleConfig",
+        "rs:kenn-config::lifecycle::LifecycleConfig::Default"
+      ],
+      "q": "lifecycle"
+    }
+  ]
+}

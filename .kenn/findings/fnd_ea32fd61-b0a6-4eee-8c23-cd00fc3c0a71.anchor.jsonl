@@ -1,0 +1,5 @@
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Cli/MsBuildBootstrap.cs","ts":"2026-07-10T14:17:26.116996Z","sha":"a3d0d804d55a0a1a"}
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Cli/IndexCommand.cs","ts":"2026-07-10T14:17:26.116996Z","sha":"f17f3ad92c84f524"}
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Program.cs","ts":"2026-07-10T14:17:26.116996Z","sha":"36d39d004c32a5b0"}
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Cli/MsBuildBootstrap.cs","ts":"2026-07-19T10:53:28.254708Z","sha":"1ad46d0bbd07cd6e"}
+{"op":"attach","anchor":"indexers/kenn-dotnet/src/Cli/IndexCommand.cs","ts":"2026-07-19T10:53:28.301869Z","sha":"1d728963444df4f3"}

@@ -1,0 +1,5 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/ingest.rs","ts":"2026-06-14T18:37:15.553397Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/resolve.rs","ts":"2026-06-14T18:37:15.553397Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/resolve.rs","ts":"2026-06-14T18:37:15.178236Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/ingest.rs","ts":"2026-06-14T18:37:15.178236Z"}
+{"op":"rename","from":"crates/kenn-indexer/src/markdown/ingest.rs","to":"crates/kenn-indexer/src/markdown/ingest/core.rs","ts":"2026-07-15T16:45:54.852306Z"}

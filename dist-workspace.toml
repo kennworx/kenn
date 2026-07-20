@@ -1,0 +1,49 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'. The generated .github/workflows/release.yml is derived from
+# this file — do NOT hand-edit the workflow; change this and run `dist generate`.
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+# No powershell installer while there is no windows target for it to install.
+installers = ["shell", "homebrew"]
+tap = "kennworx/homebrew-tap"
+publish-jobs = ["homebrew"]
+install-path = "CARGO_HOME"
+hosting = "github"
+install-updater = false
+
+# No x86_64-apple-darwin: Intel Macs are not a target worth carrying a build for.
+# No musl: kenn-embed vendors llama.cpp, so every build is a C++ build, and a
+# static musl build of it is not verified here.
+#
+# NO WINDOWS, deliberately — see openspec/changes/windows-support. kenn does not
+# merely fail to build there, it cannot run: `atomic_flip_live` has a
+# cfg(not(unix)) arm that unconditionally returns Err, so every `kenn index`
+# would fail at the final live-pointer flip even once it compiled. Shipping a
+# binary that installs and then fails on first use is worse than shipping none.
+#
+# This also blocks the whole release when listed: a failing target skips `host`
+# and `publish-homebrew-formula`, so the three platforms that DO build never get
+# published either. Restore it only per that change's task 7.
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+]
+
+# ONE override, deliberately. dist's defaults are already native for the other
+# three; overriding them just means owning a guess that goes stale. It did:
+# pinning x86_64-apple-darwin to macos-13 queued forever with no runner ever
+# assigned, because that image has been retired — dist's own default,
+# macos-15-intel, was correct all along.
+#
+# This one is load-bearing: dist would otherwise cross-compile aarch64 linux, and
+# kenn-embed vendors llama.cpp so every build is a C++ build. Emulation is not an
+# alternative either — rustc SIGSEGVs under qemu-x86_64.
+#
+# Verify with `dist plan`, never by reading the workflow: the matrix is computed
+# at run time.
+[dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"

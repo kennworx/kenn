@@ -1,0 +1,177 @@
+# css-index Specification
+
+## Purpose
+TBD - created by archiving change index-css. Update Purpose after archive.
+## Requirements
+### Requirement: Stylesheets are indexed as nodes in the unified graph
+
+kenn SHALL index CSS/SCSS/SASS files as nodes and edges in the **same** store
+and graph as code, such that classes, ids, and custom properties are
+addressable, searchable, and navigable through the existing read APIs.
+Stylesheet ingestion SHALL emit `kenn_model` records directly (a sibling
+producer to the SCIP path); it SHALL NOT route through the SCIP `transform`
+layer.
+
+#### Scenario: A stylesheet becomes searchable nodes
+
+- **WHEN** an index run includes a `.css` file under a configured stylesheet root
+- **THEN** each class, id, and custom property it defines is present as a node in
+  the published snapshot
+- **AND** `search_symbols` / `semantic_search` can return those nodes
+- **AND** no SCIP document is produced for the stylesheet
+
+### Requirement: A single stylesheet config covers both CSS and Sass
+
+The stylesheet corpus SHALL be configured by **one** `CssConfig` (one field on the
+per-language config) covering both `.css` and Sass sources — even though the
+internal `Language` is split `css`/`sass`, the user surface is unified because
+roots, usage sources, and excludes are shared. It SHALL hold: **root globs**
+(which stylesheet files to parse), **`usage_sources` globs** (which files to scan
+for class usage, Phase 2), and **exclude globs** — all raw pattern strings compiled
+to glob sets. Sass-only settings (compiler override path, `@use`/`@import` load paths)
+SHALL live in a nested `sass` subsection of the same config. A directory glob
+SHALL mean "index every stylesheet beneath it, recursively"; a glob MAY name
+individual files. The build-output/vendor denies (`dist/`, `build/`,
+`node_modules/`) SHALL **always** apply: user-supplied `excludes` are **merged
+with** them, not replaced by them, so a user adding their own exclude cannot
+silently re-admit compiled CSS alongside its Sass source (double-counting).
+
+`usage_sources` SHALL default to **empty** — it has no broad default. The user
+SHALL explicitly declare which sources consume CSS classes, because a repository
+(often a monorepo) commonly contains projects that use no CSS, and scanning them
+is both wasteful and a source of false matches. When `usage_sources` is empty,
+stylesheet parsing, the registry, search, and the CSS-internal dependency graph
+SHALL still run (Phase 1 is independent of usage); usage mining and orphan-class
+detection SHALL be inactive, and the indexer SHALL emit a one-time hint that
+`usage_sources` is unset.
+
+#### Scenario: One config drives css and sass discovery
+
+- **WHEN** root globs match both `.css` and `.scss` files
+- **THEN** both are discovered through the single `CssConfig`
+- **AND** the producer dispatches each file to its parser by extension
+
+#### Scenario: Usage mining is off until sources are declared
+
+- **WHEN** `[language.css] enabled = true` with `usage_sources` unset
+- **THEN** stylesheets are parsed and searchable and the dependency graph is built
+- **AND** no `uses_css_class` edges are produced
+- **AND** a one-time hint notes that `usage_sources` must be set to map usage
+
+#### Scenario: Build output is excluded by default
+
+- **WHEN** a project has `src/app.scss` and a compiled `dist/app.css`
+- **THEN** the default excludes skip `dist/` so classes are not double-counted
+
+#### Scenario: A directory glob discovers stylesheets recursively
+
+- **WHEN** a root glob names a directory containing nested `.scss` files
+- **THEN** every `.scss` beneath it is discovered
+- **AND** files matching an exclude glob are skipped
+
+### Requirement: `.css` is parsed with a structured CSS parser
+
+`.css` files SHALL be parsed with a structured, error-tolerant CSS parser
+(lightningcss). The parser SHALL run in error-recovery mode so that a malformed
+or unterminated rule does not discard the rest of the file. Class and id
+selectors SHALL be extracted as **atomic** tokens (a compound `.a.b` yields two
+class nodes). Custom-property **definitions** SHALL be distinguished from
+`var()` **uses**.
+
+#### Scenario: A malformed CSS file still yields its valid nodes
+
+- **WHEN** a `.css` file contains a valid rule followed by an unterminated rule
+- **THEN** the classes/ids/custom-properties of the valid rule are indexed
+- **AND** the run does not fail
+
+#### Scenario: A compound selector yields atomic class nodes
+
+- **WHEN** a rule `.btn.btn-primary { … }` is parsed
+- **THEN** two class nodes `btn` and `btn-primary` are produced
+
+### Requirement: `.scss`/`.sass` registry is built by the dart-sass compiler
+
+`.scss`/`.sass` SHALL be processed by the **dart-sass compiler**, invoked via its
+stable CLI (not the embedded-protocol Rust client). The indexer SHALL discover
+entry points (non-`_`-prefixed stylesheets at configured roots), compile each
+with a source map, extract atomic classes/ids/custom-properties from the compiled
+CSS (including classes generated by `@each`/mixins), and map each selector's
+location back to the original source file and line via the source map. dart-sass
+SHALL handle both syntaxes (`.scss` and indented `.sass`). The indexer SHALL NOT
+ship a hand-rolled Sass parser **for selector/registry extraction** — that is the
+compiler's job. (The CSS-internal at-rule graph — `@use`/`@import`/`@extend`/
+`composes`, which compilation resolves away and which therefore must come from
+source — is built by a separate **light source scan** that spots those at-rule
+keywords by line; that is not Sass parsing and is permitted, see
+`css-usage-graph`.) When an entry fails to compile, the indexer SHALL skip that
+entry and log the reason; one failing entry SHALL NOT abort the run.
+
+#### Scenario: A generated class is in the registry
+
+- **WHEN** an entry contains `@each $n, $c in $colors { .bg-#{$n} { … } }`
+- **THEN** the compiled registry contains `bg-<n>` for each color
+- **AND** each carries a definition site mapped back into the source file
+
+#### Scenario: An indented `.sass` entry is indexed
+
+- **WHEN** a `.sass` (indented-syntax) entry is compiled
+- **THEN** its classes are extracted the same way as a `.scss` entry
+
+#### Scenario: A broken entry is skipped, not partially parsed
+
+- **WHEN** one entry has a syntax error that aborts its compile
+- **THEN** that entry is skipped and the reason is logged
+- **AND** other entries still compile and index normally
+
+### Requirement: The Sass compiler is discovered from natural project locations
+
+The indexer SHALL locate the `sass` compiler in order: a configured override
+path; the project's `node_modules` (`node_modules/.bin/sass`, and the dart-sass
+inside the `sass` / `sass-embedded` packages); `sass` on `PATH`; finally a
+kenn-bundled binary. When no compiler is found and none is bundled, `.scss`/`.sass`
+SHALL be left unindexed with a clear log message rather than failing the run.
+
+#### Scenario: The project's node_modules compiler is preferred
+
+- **WHEN** the project has `node_modules/.bin/sass` and no override is configured
+- **THEN** the indexer uses that compiler
+
+#### Scenario: No compiler available
+
+- **WHEN** no `sass` is discoverable and none is bundled
+- **THEN** stylesheets in `.scss`/`.sass` are not indexed
+- **AND** a clear message explains the compiler was not found
+
+### Requirement: Definition sites are recorded for every stylesheet node
+
+Each class/id/custom-property node SHALL carry its definition site as a file path
+and byte/line range, so it is locatable and so orphan/hygiene reports can point
+at the source.
+
+#### Scenario: A class node carries its source location
+
+- **WHEN** a class is indexed
+- **THEN** its node records the stylesheet path and the range of its selector
+
+### Requirement: A class registry is produced
+
+Phase-1 ingestion SHALL produce a **class registry**: the deduplicated set of
+atomic class names mapped to their definition sites. The registry SHALL keep all
+definitions when a name is defined in multiple places (the cascade). The registry
+is the known set the usage scanner intersects against.
+
+#### Scenario: A class defined in two files keeps both definitions
+
+- **WHEN** `.btn` is defined in two stylesheets
+- **THEN** the registry maps `btn` to both definition sites
+
+### Requirement: Stylesheet prose feeds FTS5 and embeddings
+
+Selector text and adjacent comments SHALL flow into the document/embedding
+records so stylesheet nodes participate in full-text and semantic search.
+
+#### Scenario: A commented class is semantically searchable
+
+- **WHEN** a class is preceded by a descriptive comment
+- **THEN** `semantic_search` over that description can return the class node
+

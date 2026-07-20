@@ -1,0 +1,38 @@
+---
+source: crates/kenn-indexer/tests/wire_format.rs
+expression: dump(&r)
+---
+{
+  "indexer_name": "kenn-dotnet",
+  "language": "csharp",
+  "indexer_version": "0.1.0",
+  "unit": "fixture.sln",
+  "started_at": "2026-05-02T18:00:00Z",
+  "ended_at": "2026-05-02T18:00:42Z",
+  "files_seen": 17,
+  "symbols_seen": 1234,
+  "defs_seen": 2345,
+  "def_bodies_seen": 0,
+  "edges_seen": 3210,
+  "out_of_root_seen": 0,
+  "failed_projects": [
+    "BrokenProj"
+  ],
+  "failed_overflow": 3,
+  "warnings": [],
+  "warnings_overflow": 0,
+  "status": "partial",
+  "enclosing_range_source": {
+    "scip": 0,
+    "refinement": 0,
+    "heuristic": 0,
+    "dropped": 0
+  },
+  "symbol_kind_source": {
+    "scip": 0,
+    "descriptor": 0,
+    "unknown": 0
+  },
+  "directory_build_props": null,
+  "directory_build_props_hint": false
+}
