@@ -144,7 +144,20 @@ internal sealed class IndexerCore
         // On a real multi-.sln workspace this collapses ~2x duplicated
         // Project objects down to the unique set and avoids re-doing
         // OpenSolution work for shared projects.
-        using var ws = MSBuildWorkspace.Create();
+        // EnableWindowsTargeting so projects targeting .NET Framework or old
+        // .NET Standard (net45, netstandard1.x) LOAD on Linux and macOS. The
+        // reference assemblies come from the Microsoft.NETFramework.ReferenceAssemblies
+        // packages the SDK auto-references under this property, and restore
+        // already passes it — but OpenProjectAsync evaluates the project
+        // separately, so without the same property here the reference paths do
+        // not resolve and the project loads as zero documents. Newtonsoft.Json
+        // (net45 + netstandard1.0/1.3) is the widespread case: it restored fine
+        // and still indexed nothing until the LOAD saw this too.
+        var props = new Dictionary<string, string>
+        {
+            ["EnableWindowsTargeting"] = "true",
+        };
+        using var ws = MSBuildWorkspace.Create(props);
         ws.LoadMetadataForReferencedProjects = true;
         var loadedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 

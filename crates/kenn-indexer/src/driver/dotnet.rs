@@ -77,12 +77,18 @@ impl KennDotnet {
             }
             return Ok(out);
         }
+        // Prefer a solution over loose `.csproj`s: a solution names the exact
+        // project set and lets the sidecar restore it in one call. `.slnx` is
+        // the newer XML solution format (MSBuild 17.13+) — matched alongside
+        // `.sln` because a repo that ships only it (Newtonsoft.Json) otherwise
+        // falls through to per-`.csproj`, and a bare `dotnet restore` on a
+        // nested `.csproj` fails from the workspace root.
         let mut slns = Vec::new();
         let mut csprojs = Vec::new();
         for entry in walk_for_language(workspace, Language::Csharp) {
             let entry = entry?;
             match entry.extension().and_then(|s| s.to_str()) {
-                Some("sln") => slns.push(entry),
+                Some("sln" | "slnx") => slns.push(entry),
                 Some("csproj") => csprojs.push(entry),
                 _ => {}
             }

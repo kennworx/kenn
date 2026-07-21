@@ -35,6 +35,25 @@ fn kenn_dotnet_falls_back_to_csproj() {
     assert!(projects[0].file_name().unwrap() == "Solo.csproj");
 }
 
+/// A `.slnx`-only repo (Newtonsoft.Json) must resolve to the SOLUTION, not to
+/// its loose `.csproj`s. Passing the nested csprojs made the sidecar run a bare
+/// `dotnet restore` from the workspace root, which fails — 0 files indexed.
+#[test]
+fn kenn_dotnet_prefers_slnx_over_loose_csproj() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("Src/Lib")).unwrap();
+    std::fs::write(dir.path().join("Src/App.slnx"), "").unwrap();
+    std::fs::write(dir.path().join("Src/Lib/Lib.csproj"), "").unwrap();
+    let ws = Workspace::new(dir.path(), &[]).unwrap();
+    let projects = KennDotnet::default().resolve_projects(&ws).unwrap();
+    assert_eq!(
+        projects.len(),
+        1,
+        "the solution, not the csproj: {projects:?}"
+    );
+    assert_eq!(projects[0].extension().unwrap(), "slnx");
+}
+
 /// Discovery parity: explicit `projects` list and walk-based fallback
 /// produce the same set of `.sln` paths.
 #[test]
