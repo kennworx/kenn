@@ -95,10 +95,13 @@
 - [ ] 4.3 Build and verify each of the six images by indexing a real fixture:
       csharp (pinned non-latest major), swift (the existing Linux/Alamofire run),
       typescript, rust, go, python.
-      csharp DONE: `docker buildx bake -f docker/bake.hcl --load` built all six
-      clean locally, and kenn-csharp:local provisioned SDK 9.0.316 on-demand
-      (global.json 9.0.308 latestMinor) and indexed a real repo through the
-      docker runtime. The other five still to run.
+      3/6 DONE via `docker buildx bake -f docker/bake.hcl --load` (all six built
+      clean locally): csharp — kenn-csharp:local provisioned SDK 9.0.316
+      on-demand (global.json 9.0.308 latestMinor) and indexed a real repo;
+      rust + python — `just docker-index-smoke` (fixed to bake the images rather
+      than `docker build`, which cannot supply the entrypoint context) each
+      provision their default toolchain on-demand and index a fixture, output
+      host-owned. typescript, go, swift still to run.
 - [x] 4.4 Set `kenn-toolchain` as the ENTRYPOINT of every image, execing the real
       indexer behind it, and confirm each indexer's argv still reaches it intact.
 

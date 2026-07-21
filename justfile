@@ -198,7 +198,9 @@ docker-index-smoke: build-cli
   #!/usr/bin/env bash
   set -euo pipefail
   if ! docker info >/dev/null 2>&1; then echo "  - docker unavailable; skipping"; exit 0; fi
-  docker build -q -t kenn-ra-smoke:local docker/kenn-rust >/dev/null
+  # bake, not `docker build`: the reworked Dockerfiles COPY the shared
+  # provisioning entrypoint from a named build context that only bake supplies.
+  docker buildx bake -f docker/bake.hcl --load rust >/dev/null 2>&1
   # Under the repo's ./tmp (below /Users, which Docker Desktop shares) — the mac
   # default $TMPDIR (/var/folders) is NOT shared, so the same-path mount is empty
   # there. Being nested in kenn's cargo workspace also exercises the nesting fix:
@@ -212,7 +214,7 @@ docker-index-smoke: build-cli
   printf 'fn helper(x: i32) -> i32 { x + 1 }\nfn main() { println!("{}", helper(41)); }\n' > "$ws/src/main.rs"
   # init creates the .kenn store; then pin rust to the docker runtime + image.
   ./build/kenn init -w "$ws" >/dev/null
-  printf '[language.rust]\nenabled = true\nruntime = "docker"\nimage = "kenn-ra-smoke:local"\n' > "$ws/kenn.toml"
+  printf '[language.rust]\nenabled = true\nruntime = "docker"\nimage = "ghcr.io/kennworx/kenn-rust:local"\n' > "$ws/kenn.toml"
   ./build/kenn index -w "$ws" --force
   scip=$(find "$ws/.kenn" -name rust.scip -size +0c | head -1)
   [ -n "$scip" ] || { echo "  ! no non-empty rust.scip — rust did not index in docker"; exit 1; }
@@ -223,13 +225,13 @@ docker-index-smoke: build-cli
   # `--help`. scip-python 0.6.6 shells out to `pip list` (env eval) and `git`
   # (version) at index time; the Dockerfile bundles both. This is the assertion
   # that would have caught the "python3 but no pip" regression.
-  docker build -q -t kenn-scippy-smoke:local docker/kenn-python >/dev/null
+  docker buildx bake -f docker/bake.hcl --load python >/dev/null 2>&1
   pyws="$root/pyrepo"
   mkdir -p "$pyws"
   printf '[project]\nname = "smoke_py"\nversion = "0.0.0"\n' > "$pyws/pyproject.toml"
   printf 'def add(a, b):\n    return a + b\n\n\ndef double(x):\n    return add(x, x)\n' > "$pyws/mod.py"
   ./build/kenn init -w "$pyws" >/dev/null
-  printf '[language.python]\nenabled = true\nruntime = "docker"\nimage = "kenn-scippy-smoke:local"\nproject_name = "smoke_py"\nproject_version = "0.0.0"\n' > "$pyws/kenn.toml"
+  printf '[language.python]\nenabled = true\nruntime = "docker"\nimage = "ghcr.io/kennworx/kenn-python:local"\nproject_name = "smoke_py"\nproject_version = "0.0.0"\n' > "$pyws/kenn.toml"
   pyout=$(./build/kenn index -w "$pyws" --force 2>&1); echo "$pyout"
   echo "$pyout" | grep -Eq 'python.*(failed|indexed 0 files)' && { echo "  ! python did not index in docker (pip/git missing from the image?)"; exit 1; }
   pyscip=$(find "$pyws/.kenn" -name 'python*.scip' -size +0c | head -1)
