@@ -57,10 +57,15 @@ fn no_store_path_segment_joined_outside_the_layout_module() {
         if file.starts_with(&layout_dir) {
             continue; // the layout module is the one allowed place.
         }
-        // Dedicated `tests.rs` submodule files (declared `#[cfg(test)] mod
-        // tests;` in their parent) are test-only — the file-based
-        // equivalent of the inline `#[cfg(test)]` exclusion below.
-        if file.file_name().is_some_and(|n| n == "tests.rs") {
+        // Dedicated test submodule files — `tests.rs`, or the sibling
+        // `<name>_tests.rs` a split-out module uses (`#[cfg(test)] #[path =
+        // "<name>_tests.rs"] mod tests;` in its parent) — are test-only, the
+        // file-based equivalent of the inline `#[cfg(test)]` exclusion below.
+        if file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == "tests.rs" || n.ends_with("_tests.rs"))
+        {
             continue;
         }
         let text = std::fs::read_to_string(&file).unwrap();
