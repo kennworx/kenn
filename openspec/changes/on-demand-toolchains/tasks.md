@@ -51,8 +51,12 @@
       nothing but Docker, and no aarch64-musl toolchain has to exist on it.
 - [x] 2.3 Multi-arch as today (buildx), since the entrypoint and each indexer
       binary are built inside the per-platform build.
-- [ ] 2.4 Verify a published image by pulling it and indexing a fixture — not by
+- [x] 2.4 Verify a published image by pulling it and indexing a fixture — not by
       running `--version`, which passes on an image missing its CA bundle.
+      DONE: dispatched images.yml (run 29863149401, success), then indexed
+      serilog via the freshly-published `ghcr.io/kennworx/kenn-csharp@sha256:
+      241395cf…` (pulled from GHCR by digest): 2697 symbols, on-demand SDK
+      10.0.302, `toolchains: dotnet 10.0.302`.
 
 ## 3. Per-language pin readers and installers
 
@@ -122,8 +126,12 @@
 
 - [x] 5.1 Update `.github/workflows/images.yml` for the reworked Dockerfiles;
       the existing buildx matrix stays.
-- [ ] 5.2 Republish and re-pin all six `IMG_*` digests in
-      `crates/kenn-cli/src/init/detect.rs`.
+- [x] 5.2 Republish and re-pin all six `IMG_*` digests in
+      `crates/kenn-cli/src/init/detect.rs`. Republished via images.yml
+      (workflow_dispatch, run 29863149401) and re-pinned every `IMG_*` to the
+      new merged manifest-index digest: rust 039e5483, go 24da7f48, typescript
+      d69b402b, csharp 241395cf, python adbb81b3, swift 4bf881e8. Images stay
+      private on GHCR (visibility flip is separate).
 - [x] 5.3 Document the offline story: what a pre-warmed cache volume requires and
       how to populate one. docker/README.md "Offline / air-gapped use": why an
       isolated host cannot provision (resolution + fetch both need network), the
