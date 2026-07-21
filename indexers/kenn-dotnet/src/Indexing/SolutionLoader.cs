@@ -175,6 +175,7 @@ internal static class SolutionLoader
         MSBuildWorkspace ws,
         FileInfo entry,
         HashSet<string> loadedPaths,
+        IndexOptions opts,
         ILogger log,
         CancellationToken ct)
     {
@@ -215,14 +216,26 @@ internal static class SolutionLoader
             try
             {
                 await ws.OpenProjectAsync(canon, cancellationToken: ct);
-                // Transitive ProjectReferences pulled in by OpenProjectAsync
-                // are now in the workspace; record them so the next call
-                // skips paths Roslyn already loaded for us.
-                foreach (var p in ws.CurrentSolution.Projects)
+                RecordLoaded(ws, loadedPaths);
+            }
+            catch (Exception ex) when (opts.ProvisionSdk && IsSdkResolutionFailure(ex))
+            {
+                // The project pins an SDK — often a NESTED global.json — that
+                // the entrypoint did not provision, so hostfxr refuses it. Ask
+                // kenn-toolchain to install exactly that version into the active
+                // DOTNET_ROOT, then retry ONCE. A second failure is terminal.
+                if (await TryProvisionPinnedSdkAsync(canon, log, ct))
                 {
-                    if (!string.IsNullOrEmpty(p.FilePath))
+                    try
                     {
-                        loadedPaths.Add(Path.GetFullPath(p.FilePath));
+                        await ws.OpenProjectAsync(canon, cancellationToken: ct);
+                        RecordLoaded(ws, loadedPaths);
+                    }
+                    catch (Exception retryEx)
+                    {
+                        log.LogWarning(
+                            "error: {Path} still failed to load after installing its pinned SDK: {Message}",
+                            canon, retryEx.Message);
                     }
                 }
             }
@@ -230,6 +243,100 @@ internal static class SolutionLoader
             {
                 log.LogDebug(ex, "OpenProjectAsync failed for {Path}", canon);
             }
+        }
+    }
+
+    /// Transitive ProjectReferences pulled in by OpenProjectAsync are now in the
+    /// workspace; record them so the next call skips paths Roslyn already loaded.
+    private static void RecordLoaded(MSBuildWorkspace ws, HashSet<string> loadedPaths)
+    {
+        foreach (var p in ws.CurrentSolution.Projects)
+        {
+            if (!string.IsNullOrEmpty(p.FilePath))
+            {
+                loadedPaths.Add(Path.GetFullPath(p.FilePath));
+            }
+        }
+    }
+
+    /// The one load failure we act on: the project's pinned SDK is not present,
+    /// so the BuildHost's hostfxr cannot select it. Any other failure is a real
+    /// error and must NOT trigger a download.
+    private static bool IsSdkResolutionFailure(Exception ex)
+    {
+        var m = ex.ToString();
+        return m.Contains("hostfxr_resolve_sdk2", StringComparison.Ordinal)
+            || m.Contains("A compatible .NET SDK was not found", StringComparison.Ordinal);
+    }
+
+    /// Install the SDK the project's (possibly nested) global.json pins, into the
+    /// active DOTNET_ROOT, via `kenn-toolchain provision-sdk`. Returns whether an
+    /// install happened; every failure is named, never a hang.
+    private static async Task<bool> TryProvisionPinnedSdkAsync(
+        string projectPath, ILogger log, CancellationToken ct)
+    {
+        var pin = MsBuildBootstrap.FindSdkPin(Path.GetDirectoryName(projectPath) ?? ".");
+        if (pin is null)
+        {
+            log.LogWarning("error: {Path} needs an SDK but no global.json pins one", projectPath);
+            return false;
+        }
+        var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        if (string.IsNullOrEmpty(dotnetRoot))
+        {
+            log.LogWarning(
+                "error: cannot install SDK '{Version}' pinned by {Pin}: DOTNET_ROOT is not set",
+                pin.Value.Version, pin.Value.Path);
+            return false;
+        }
+
+        log.LogInformation(
+            "$ kenn-toolchain provision-sdk {Version} (pinned in {Pin})",
+            pin.Value.Version, pin.Value.Path);
+        var psi = new ProcessStartInfo("kenn-toolchain")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add("provision-sdk");
+        psi.ArgumentList.Add(pin.Value.Version);
+        psi.ArgumentList.Add(pin.Value.RollForward ?? string.Empty);
+        psi.ArgumentList.Add(dotnetRoot);
+
+        try
+        {
+            using var p = Process.Start(psi)!;
+            var errTask = p.StandardError.ReadToEndAsync(ct);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromMinutes(5));
+            try
+            {
+                await p.WaitForExitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                try { p.Kill(entireProcessTree: true); } catch { /* already gone */ }
+                log.LogWarning(
+                    "error: installing SDK '{Version}' (pinned in {Pin}) timed out",
+                    pin.Value.Version, pin.Value.Path);
+                return false;
+            }
+            if (p.ExitCode == 0)
+            {
+                return true;
+            }
+            log.LogWarning(
+                "error: could not install SDK '{Version}' pinned by {Pin}: {Err}",
+                pin.Value.Version, pin.Value.Path, (await errTask).Trim());
+            return false;
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(
+                "error: could not run kenn-toolchain to install SDK '{Version}' pinned by {Pin}: {Message}",
+                pin.Value.Version, pin.Value.Path, ex.Message);
+            return false;
         }
     }
 

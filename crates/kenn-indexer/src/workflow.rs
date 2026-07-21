@@ -318,6 +318,7 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
             skip_restore: !config.language.csharp.restore,
             test_globs: config.tests.paths.clone(),
             test_assembly_regexes: config.tests.assembly_regex.clone(),
+            provision_sdk: config.language.csharp.provision_sdk,
         });
     }
     if config.language.rust.enabled {

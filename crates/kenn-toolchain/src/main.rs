@@ -18,6 +18,19 @@ use kenn_toolchain::run;
 
 fn main() -> std::process::ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+
+    // Subcommand mode: kenn-dotnet shells out to install one SDK into an
+    // existing DOTNET_ROOT when a project's nested global.json pins a version
+    // the entrypoint did not provision. Distinct from the language-list mode
+    // because it installs on demand rather than at exec time.
+    if let Some(rest) = args
+        .split_first()
+        .filter(|(head, _)| *head == "provision-sdk")
+        .map(|(_, rest)| rest)
+    {
+        return run_provision_sdk(rest);
+    }
+
     let Some((languages, rest)) = split_args(&args) else {
         eprintln!("kenn-toolchain: usage: kenn-toolchain <language> -- <indexer> [args...]");
         return std::process::ExitCode::from(2);
@@ -45,6 +58,40 @@ fn main() -> std::process::ExitCode {
 /// its own absolute path and sets `-w` to it.
 fn workspace_dir() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
+}
+
+/// `provision-sdk <version> <rollForward> <dotnet_root>` — install one .NET SDK
+/// into an existing root. `rollForward` may be empty. Prints the resolved
+/// version to stdout on success so the caller can point the loader at it; a
+/// failure is named on stderr and exits non-zero — never a hang, never a
+/// fallback to a different version.
+fn run_provision_sdk(args: &[std::ffi::OsString]) -> std::process::ExitCode {
+    let [version, roll_forward, dotnet_root] = args else {
+        eprintln!("kenn-toolchain: usage: provision-sdk <version> <rollForward> <dotnet_root>");
+        return std::process::ExitCode::from(2);
+    };
+    let (Some(version), Some(roll_forward)) = (version.to_str(), roll_forward.to_str()) else {
+        eprintln!("kenn-toolchain: provision-sdk: version and rollForward must be UTF-8");
+        return std::process::ExitCode::from(2);
+    };
+    match run::provision_sdk(
+        version,
+        roll_forward,
+        Path::new(dotnet_root),
+        Arch::host(),
+        &mut std::io::stderr(),
+        &run::http_text,
+        &run::http_install,
+    ) {
+        Ok(resolved) => {
+            println!("{resolved}");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("kenn-toolchain: provision-sdk {version}: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 /// Provision every requested toolchain, exporting each one's root var onto

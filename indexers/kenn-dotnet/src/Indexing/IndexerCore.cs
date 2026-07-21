@@ -168,7 +168,7 @@ internal sealed class IndexerCore
             {
                 await SolutionLoader.RunRestoreAsync(entry, _opts, _log, ct);
                 var swOpen = Stopwatch.StartNew();
-                await SolutionLoader.LoadEntryIntoSharedWorkspaceAsync(ws, entry, loadedPaths, _log, ct);
+                await SolutionLoader.LoadEntryIntoSharedWorkspaceAsync(ws, entry, loadedPaths, _opts, _log, ct);
                 swOpen.Stop();
                 EmitEntryOpenBench(entry.Name, swOpen.ElapsedMilliseconds);
             }

@@ -113,10 +113,12 @@ pub struct SymbolFrame {
     pub body: Option<FrameRange>,
     #[serde(default)]
     pub partial: bool,
+    // u16, not u8 — see SymbolRecord::nargs. A 257-arg method in Newtonsoft.Json
+    // overflowed the u8 and failed the whole C# index at parse time.
     #[serde(default)]
-    pub nargs: u8,
+    pub nargs: u16,
     #[serde(default)]
-    pub targs: u8,
+    pub targs: u16,
     #[serde(default)]
     pub test: bool,
     #[serde(default)]
@@ -272,6 +274,27 @@ mod tests {
         })
         .unwrap();
         assert!(saw_pkg && saw_sym);
+    }
+
+    /// A large arity must not fail the whole stream. `nargs`/`targs` were `u8`,
+    /// and a 257-arg method in Newtonsoft.Json failed the entire C# index at
+    /// parse time with "invalid value: integer 257, expected u8".
+    #[test]
+    fn a_symbol_with_more_than_255_args_parses() {
+        let jsonl = concat!(
+            r#"{"type":"symbol","id":1,"pkg":0,"key":"Big.M","kind":"method","name":"M","range":[0,0,1,0],"nargs":257,"targs":300}"#,
+            "\n",
+        );
+        let mut nargs = 0u16;
+        parse_jsonl_stream(&mut jsonl.as_bytes(), |f| -> Result<(), String> {
+            if let Frame::Symbol(s) = f {
+                nargs = s.nargs;
+                assert_eq!(s.targs, 300);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(nargs, 257);
     }
 
     #[test]

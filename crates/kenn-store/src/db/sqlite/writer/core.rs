@@ -39,16 +39,17 @@ pub(super) fn col_u32(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<u32> {
     Ok(r.get::<_, i64>(idx)? as u32)
 }
 
-/// Read column `idx` as a `u8`. `SQLite` stores the small `nargs`/`targs` arity
-/// counts as `i64`; they are non-negative and bounded to `u8`, so the cast is
-/// lossless.
+/// Read column `idx` as a `u16`. `SQLite` stores the `nargs`/`targs` arity
+/// counts as `i64`; they are non-negative and fit a `u16` (widened from `u8`
+/// after a 257-arg method in Newtonsoft.Json overflowed the byte), so the cast
+/// is lossless.
 #[expect(
     clippy::cast_sign_loss,
     clippy::cast_possible_truncation,
-    reason = "SQLite stores arity counts as i64; they are non-negative and fit a u8, so the cast is lossless"
+    reason = "SQLite stores arity counts as i64; they are non-negative and fit a u16, so the cast is lossless"
 )]
-pub(super) fn col_u8(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<u8> {
-    Ok(r.get::<_, i64>(idx)? as u8)
+pub(super) fn col_u16(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<u16> {
+    Ok(r.get::<_, i64>(idx)? as u16)
 }
 
 /// Build-time pragmas: a snapshot DB is written once then published by an

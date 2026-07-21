@@ -54,10 +54,14 @@ pub struct SymbolRecord {
     pub enclosing_sym_id: ShortId,
     #[serde(default)]
     pub partial: bool,
+    // u16, not u8: real generated/large-signature code exceeds 255. A method in
+    // Newtonsoft.Json overflowed a u8 here (value 257) and failed the whole
+    // C# index at parse time. The DB column is already INTEGER, so this is not
+    // a stored-format change.
     #[serde(default)]
-    pub nargs: u8,
+    pub nargs: u16,
     #[serde(default)]
-    pub targs: u8,
+    pub targs: u16,
     /// Denormalized from `packages[pkg].external`. `pkg = 0` → `false`.
     #[serde(default)]
     pub external: bool,

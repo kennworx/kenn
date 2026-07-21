@@ -11,7 +11,7 @@ use kenn_model::{
 use crate::api::types::{DbError, StatRow};
 
 use super::super::super::codes::edge_kind_code;
-use super::core::{be, col_u32, col_u8, SqliteWriter};
+use super::core::{be, col_u16, col_u32, SqliteWriter};
 
 impl SqliteWriter {
     /// Append the rolled-up `aggregate_nodes` / `aggregate_edges`.
@@ -265,8 +265,8 @@ impl SqliteWriter {
                     r.get::<_, String>(5)?,
                     col_u32(r, 6)?,
                     r.get::<_, i64>(7)? != 0,
-                    col_u8(r, 8)?,
-                    col_u8(r, 9)?,
+                    col_u16(r, 8)?,
+                    col_u16(r, 9)?,
                     r.get::<_, i64>(10)? != 0,
                     r.get::<_, i64>(11)? != 0,
                 ))

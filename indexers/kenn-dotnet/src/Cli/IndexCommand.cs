@@ -82,6 +82,12 @@ public static class IndexCommand
             DefaultValueFactory = _ => 300_000,
         };
 
+        var provisionSdkOpt = new Option<bool>("--provision-sdk")
+        {
+            Description = "Install a project's pinned SDK on demand (via kenn-toolchain) and retry when it is missing; off by default",
+            DefaultValueFactory = _ => false,
+        };
+
         var flushBytesOpt = new Option<int>("--flush-bytes")
         {
             Description = "Producer flushes stdout when buffered bytes exceed this",
@@ -117,6 +123,7 @@ public static class IndexCommand
             testAssemblyRegexOpt,
             skipRestoreOpt,
             restoreTimeoutOpt,
+            provisionSdkOpt,
             flushBytesOpt,
             flushFramesOpt,
             edgeKindsOpt,
@@ -135,6 +142,7 @@ public static class IndexCommand
                 TestAssemblyRegexes = parseResult.GetValue(testAssemblyRegexOpt) ?? new(),
                 SkipRestore = parseResult.GetValue(skipRestoreOpt),
                 RestoreTimeoutMs = parseResult.GetValue(restoreTimeoutOpt),
+                ProvisionSdk = parseResult.GetValue(provisionSdkOpt),
                 FlushBytes = parseResult.GetValue(flushBytesOpt),
                 FlushFrames = parseResult.GetValue(flushFramesOpt),
                 EdgeKinds = parseResult.GetValue(edgeKindsOpt),

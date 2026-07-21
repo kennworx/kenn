@@ -30,6 +30,8 @@ pub enum RunError {
     Cache(#[from] CacheError),
     #[error(transparent)]
     Fetch(#[from] FetchError),
+    #[error("installing the .NET SDK into the toolchain root: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// What provisioning did, for the caller to report.
@@ -162,6 +164,145 @@ pub fn provision(
     })
 }
 
+/// Install one specific .NET SDK version INTO an existing `dotnet_root`, beside
+/// whatever SDK is already there.
+///
+/// This is the nested-`global.json` case: kenn provisions the SDK the ROOT pin
+/// names, but a subdirectory's `global.json` can pin a different one, and the
+/// Roslyn `BuildHost` resolves each project's pin against the SDKs in a SINGLE
+/// `DOTNET_ROOT`. .NET is built for that — one root holds `sdk/<a>`, `sdk/<b>`,
+/// … side by side — so kenn-dotnet asks for the missing version and it lands
+/// alongside, with no re-registration.
+///
+/// Atomicity, without a whole-tree rename: the tarball is unpacked into a
+/// staging dir on the same filesystem, its runtime/host pieces are merged in
+/// first (additive — shared versioned subdirs the existing SDK also uses), and
+/// `sdk/<version>` is renamed into place LAST. hostfxr never selects an
+/// incomplete `sdk/<version>`, so a crash before that final rename leaves
+/// nothing selectable and the next run completes it.
+pub fn provision_sdk(
+    version: &str,
+    roll_forward: &str,
+    dotnet_root: &Path,
+    arch: Arch,
+    progress: &mut dyn Write,
+    fetch_text: &dyn Fn(&str) -> Result<String, String>,
+    install: &dyn Fn(Artifact<'_>, &Path) -> Result<(), FetchError>,
+) -> Result<String, RunError> {
+    let roll = (!roll_forward.is_empty()).then_some(roll_forward);
+    let resolved = resolve::resolve(
+        Language::Dotnet,
+        version,
+        "global.json",
+        roll,
+        arch,
+        fetch_text,
+    )?;
+
+    let sdk_dir = dotnet_root.join("sdk").join(&resolved.version);
+    if sdk_dir.is_dir() {
+        // Already installed by an earlier run or another project. Reuse.
+        return Ok(resolved.version);
+    }
+
+    let artifact = dotnet_tarball_artifact(&resolved.install)?;
+
+    drop(writeln!(
+        progress,
+        "kenn-toolchain: provisioning .NET SDK {} into {}",
+        resolved.version,
+        dotnet_root.display()
+    ));
+    drop(progress.flush());
+
+    let staging = dotnet_root.join(format!(
+        ".sdk-staging-{}-{}",
+        resolved.version,
+        std::process::id()
+    ));
+    drop(std::fs::remove_dir_all(&staging));
+    // fetch_verified writes the archive into `staging`, so it must exist first —
+    // the cache's own provision path creates its staging dir the same way.
+    std::fs::create_dir_all(&staging)?;
+    install(artifact, &staging)?;
+
+    let result = merge_sdk_into_root(&staging, dotnet_root, &resolved.version);
+    drop(std::fs::remove_dir_all(&staging));
+    result?;
+
+    drop(writeln!(
+        progress,
+        "kenn-toolchain: provisioned .NET SDK {}",
+        resolved.version
+    ));
+    Ok(resolved.version)
+}
+
+/// The downloadable artifact for a resolved .NET SDK. `resolve_dotnet` only ever
+/// yields a `Tarball`, so the other arm is unreachable — kept as a named error
+/// rather than an `unwrap` so a future resolver change fails loudly.
+fn dotnet_tarball_artifact(install: &resolve::Install) -> Result<Artifact<'_>, RunError> {
+    match install {
+        resolve::Install::Tarball {
+            url,
+            digest_hex,
+            digest_is_sha512,
+            strip_components,
+        } => Ok(Artifact {
+            url,
+            digest: if *digest_is_sha512 {
+                fetch::Digest::Sha512(digest_hex)
+            } else {
+                fetch::Digest::Sha256(digest_hex)
+            },
+            strip_components: *strip_components,
+        }),
+        _ => Err(RunError::Resolve(ResolveError::Unsupported {
+            language: "dotnet",
+            reason: "expected a downloadable SDK tarball".to_string(),
+        })),
+    }
+}
+
+/// Move a staged SDK into `dotnet_root`: every component EXCEPT `sdk/` merged
+/// additively first, then `sdk/<version>` renamed in as the atomic completion.
+fn merge_sdk_into_root(staging: &Path, dotnet_root: &Path, version: &str) -> Result<(), RunError> {
+    for entry in std::fs::read_dir(staging)? {
+        let entry = entry?;
+        if entry.file_name() == "sdk" {
+            continue; // the completion marker; renamed last.
+        }
+        merge_additive(&entry.path(), &dotnet_root.join(entry.file_name()))?;
+    }
+    std::fs::create_dir_all(dotnet_root.join("sdk"))?;
+    std::fs::rename(
+        staging.join("sdk").join(version),
+        dotnet_root.join("sdk").join(version),
+    )?;
+    Ok(())
+}
+
+/// Recursively move `src` into `dst` WITHOUT overwriting. A path already in
+/// `dst` is a versioned runtime/host dir the existing SDK also carries — the
+/// same content — so it is left as is. All renames are within one filesystem,
+/// so each is cheap and atomic.
+fn merge_additive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if !dst.exists() {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        return std::fs::rename(src, dst);
+    }
+    if src.is_dir() && dst.is_dir() {
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            merge_additive(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+    }
+    // A file that already exists is identical shared content — skip.
+    Ok(())
+}
+
 /// Install a Rust toolchain by driving `rustup`, with `staging` as its
 /// `RUSTUP_HOME` so the whole installation lands inside the staging tree and the
 /// atomic rename still applies.
@@ -243,6 +384,185 @@ pub fn http_text(url: &str) -> Result<String, String> {
 /// The real installer, for production use.
 pub fn http_install(artifact: Artifact<'_>, staging: &Path) -> Result<(), FetchError> {
     fetch::fetch_verified(artifact, staging)
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::{merge_sdk_into_root, Path};
+
+    fn write(root: &Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// The completion contract: `sdk/<version>` lands, and the runtime/host
+    /// pieces merge in beside the existing SDK's without overwriting them.
+    #[test]
+    fn merges_runtimes_and_lands_the_sdk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dotnet");
+        // An existing install: SDK 10 plus a shared runtime it owns.
+        write(&root, "sdk/10.0.302/dotnet.dll", "sdk10");
+        write(&root, "shared/Microsoft.NETCore.App/10.0.0/x.dll", "rt10");
+        write(&root, "host/fxr/10.0.0/libhostfxr.so", "fxr10");
+
+        // A staged SDK 9 tarball: its own sdk dir, its own runtime, and a host
+        // file that already exists (identical shared content).
+        let staging = tmp.path().join(".staging");
+        write(&staging, "sdk/9.0.316/dotnet.dll", "sdk9");
+        write(&staging, "shared/Microsoft.NETCore.App/9.0.0/y.dll", "rt9");
+        write(&staging, "host/fxr/10.0.0/libhostfxr.so", "DIFFERENT");
+
+        merge_sdk_into_root(&staging, &root, "9.0.316").unwrap();
+
+        // The new SDK is present…
+        assert!(root.join("sdk/9.0.316/dotnet.dll").is_file());
+        // …beside the old one, untouched…
+        assert_eq!(
+            std::fs::read_to_string(root.join("sdk/10.0.302/dotnet.dll")).unwrap(),
+            "sdk10"
+        );
+        // …its runtime merged in…
+        assert!(root
+            .join("shared/Microsoft.NETCore.App/9.0.0/y.dll")
+            .is_file());
+        // …the old runtime kept…
+        assert!(root
+            .join("shared/Microsoft.NETCore.App/10.0.0/x.dll")
+            .is_file());
+        // …and an already-present shared file is NOT overwritten.
+        assert_eq!(
+            std::fs::read_to_string(root.join("host/fxr/10.0.0/libhostfxr.so")).unwrap(),
+            "fxr10"
+        );
+    }
+
+    // Minimal .NET release metadata: enough for resolve_dotnet to turn pin
+    // "9.0.308" into a linux-arm64 tarball URL, with no network.
+    const INDEX: &str = r#"{"releases-index":[
+      {"channel-version":"9.0","releases.json":"https://x/9.0/releases.json"}]}"#;
+    const CHANNEL_9: &str = r#"{"releases":[
+      {"release-version":"9.0.11","sdk":{"version":"9.0.308"},"sdks":[
+        {"version":"9.0.308","files":[
+          {"name":"dotnet-sdk-linux-arm64.tar.gz","rid":"linux-arm64",
+           "url":"https://x/sdk-9.0.308-linux-arm64.tar.gz","hash":"AAA"}]}]}]}"#;
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "matches the fetch_text Fn signature provision_sdk requires"
+    )]
+    fn fake_fetch(url: &str) -> Result<String, String> {
+        Ok(if url.contains("releases-index") {
+            INDEX
+        } else {
+            CHANNEL_9
+        }
+        .to_string())
+    }
+
+    /// The whole orchestrator, injected end-to-end: resolve the pin, "download"
+    /// (a fake that lays down a staged SDK tree), and merge it into a root that
+    /// already holds another SDK. The SDK the pin names lands beside the old one.
+    #[test]
+    fn provision_sdk_resolves_downloads_and_merges() {
+        use super::{provision_sdk, Arch};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dotnet");
+        std::fs::create_dir_all(root.join("sdk/10.0.302")).unwrap();
+
+        // Fake installer: write a staged SDK layout instead of fetching.
+        let install = |_artifact: super::Artifact<'_>, staging: &Path| {
+            std::fs::create_dir_all(staging.join("sdk/9.0.308")).unwrap();
+            std::fs::write(staging.join("sdk/9.0.308/dotnet.dll"), "sdk9").unwrap();
+            std::fs::create_dir_all(staging.join("shared/App/9.0.0")).unwrap();
+            std::fs::write(staging.join("shared/App/9.0.0/x.dll"), "rt").unwrap();
+            Ok(())
+        };
+
+        let mut out = Vec::new();
+        let version = provision_sdk(
+            "9.0.308",
+            "",
+            &root,
+            Arch::Arm64,
+            &mut out,
+            &fake_fetch,
+            &install,
+        )
+        .expect("provision");
+        assert_eq!(version, "9.0.308");
+        assert!(
+            root.join("sdk/9.0.308/dotnet.dll").is_file(),
+            "new SDK landed"
+        );
+        assert!(root.join("sdk/10.0.302").is_dir(), "old SDK kept");
+        assert!(
+            root.join("shared/App/9.0.0/x.dll").is_file(),
+            "runtime merged"
+        );
+
+        // A second call reuses (installer must NOT run again).
+        let ran_again = std::cell::Cell::new(false);
+        let install2 = |_a: super::Artifact<'_>, _s: &Path| {
+            ran_again.set(true);
+            Ok(())
+        };
+        provision_sdk(
+            "9.0.308",
+            "",
+            &root,
+            Arch::Arm64,
+            &mut out,
+            &fake_fetch,
+            &install2,
+        )
+        .unwrap();
+        assert!(!ran_again.get(), "an already-installed SDK is reused");
+    }
+
+    /// The digest algorithm follows the vendor's flag — .NET publishes SHA-512,
+    /// but the wrong branch would verify with the wrong algorithm and reject a
+    /// correct download.
+    #[test]
+    fn tarball_artifact_picks_the_digest_algorithm() {
+        use super::{dotnet_tarball_artifact, fetch::Digest, resolve::Install};
+        let tarball = |is_512| Install::Tarball {
+            url: "https://x/sdk.tar.gz".into(),
+            digest_hex: "abc".into(),
+            digest_is_sha512: is_512,
+            strip_components: 0,
+        };
+        assert!(matches!(
+            dotnet_tarball_artifact(&tarball(true)).unwrap().digest,
+            Digest::Sha512(_)
+        ));
+        assert!(matches!(
+            dotnet_tarball_artifact(&tarball(false)).unwrap().digest,
+            Digest::Sha256(_)
+        ));
+        // A non-tarball install (rustup/preprovisioned) is a named error.
+        dotnet_tarball_artifact(&Install::Preprovisioned).unwrap_err();
+    }
+
+    /// `sdk/<version>` is renamed LAST, so a run interrupted before it leaves no
+    /// selectable SDK — a partial that a later run would treat as complete.
+    #[test]
+    fn a_missing_staged_sdk_is_an_error_and_lands_nothing_selectable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dotnet");
+        std::fs::create_dir_all(&root).unwrap();
+        let staging = tmp.path().join(".staging");
+        // Runtimes staged, but the sdk dir absent (as if the unpack died there).
+        write(&staging, "shared/Microsoft.NETCore.App/9.0.0/y.dll", "rt9");
+
+        let err = merge_sdk_into_root(&staging, &root, "9.0.316");
+        assert!(err.is_err(), "a missing staged sdk must error");
+        assert!(
+            !root.join("sdk/9.0.316").exists(),
+            "no selectable SDK is left"
+        );
+    }
 }
 
 #[cfg(test)]

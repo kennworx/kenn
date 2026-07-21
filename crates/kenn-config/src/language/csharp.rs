@@ -8,6 +8,10 @@ use super::Runtime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+// A config struct of independent user toggles — each maps to one kenn.toml key
+// and is set in isolation. Bundling them into an enum would obscure the 1:1
+// mapping the whole file exists to express.
+#[expect(clippy::struct_excessive_bools, reason = "independent config toggles")]
 pub struct CsharpConfig {
     /// Disabled by default — opt in via `[language.csharp] enabled = true`.
     /// Aligned with the other languages so workspaces without C# don't
@@ -50,6 +54,13 @@ pub struct CsharpConfig {
     /// modify a user's repo without consent.
     #[serde(default)]
     pub provision_directory_build_props: bool,
+    /// When true, install a project's pinned SDK on demand if it is missing,
+    /// then retry — the nested-`global.json` case, where a subdirectory pins an
+    /// SDK the entrypoint did not provision. Default false: it reaches the
+    /// network at index time, and off keeps an unsatisfiable pin the named,
+    /// terminal failure it is today.
+    #[serde(default)]
+    pub provision_sdk: bool,
     /// Workspace-relative glob patterns excluded from C# discovery AND
     /// ingest. Scoped to the C# pipeline only. User-supplied values
     /// REPLACE the default fully.
@@ -88,6 +99,7 @@ impl Default for CsharpConfig {
             projects: Vec::new(),
             restore: true,
             provision_directory_build_props: false,
+            provision_sdk: false,
             excludes: default_csharp_excludes(),
         }
     }
@@ -111,5 +123,14 @@ mod tests {
 
         // deny_unknown_fields still holds with the new field present.
         toml::from_str::<CsharpConfig>("bogus = true").unwrap_err();
+    }
+
+    #[test]
+    fn provision_sdk_defaults_off_and_opts_in() {
+        assert!(!CsharpConfig::default().provision_sdk);
+        let bare: CsharpConfig = toml::from_str("enabled = true").unwrap();
+        assert!(!bare.provision_sdk, "absent = the strict default");
+        let on: CsharpConfig = toml::from_str("provision_sdk = true").unwrap();
+        assert!(on.provision_sdk);
     }
 }

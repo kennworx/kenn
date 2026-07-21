@@ -36,6 +36,10 @@ pub struct KennDotnet {
     /// Regexes forwarded as `--test-assembly-regex`. The C# side marks a
     /// project whose assembly name matches any as test code. Empty = none.
     pub test_assembly_regexes: Vec<String>,
+    /// Forwarded as `--provision-sdk`. When set, the sidecar installs a
+    /// project's pinned SDK on demand (via kenn-toolchain) if it is missing,
+    /// then retries. Set from `[language.csharp] provision_sdk`. Default false.
+    pub provision_sdk: bool,
 }
 
 impl Default for KennDotnet {
@@ -46,6 +50,7 @@ impl Default for KennDotnet {
             projects: Vec::new(),
             test_globs: Vec::new(),
             test_assembly_regexes: Vec::new(),
+            provision_sdk: false,
         }
     }
 }
@@ -138,6 +143,9 @@ impl JsonlIndexer for KennDotnet {
         }
         if self.skip_restore {
             cmd.arg("--skip-restore");
+        }
+        if self.provision_sdk {
+            cmd.arg("--provision-sdk");
         }
         let stream_path = workspace
             .jsonl_stream_path(self.language_id())

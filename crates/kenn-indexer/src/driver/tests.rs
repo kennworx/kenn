@@ -185,6 +185,7 @@ fn kenn_dotnet_returns_unavailable_when_binary_missing() {
         projects: Vec::new(),
         test_globs: Vec::new(),
         test_assembly_regexes: Vec::new(),
+        provision_sdk: false,
     };
     let outcome = driver.run(&ws).unwrap();
     assert!(matches!(outcome, JsonlOutcome::Unavailable { .. }));

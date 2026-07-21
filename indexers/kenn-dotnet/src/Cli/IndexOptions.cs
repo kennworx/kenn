@@ -52,6 +52,15 @@ public sealed class IndexOptions
     public required int RestoreTimeoutMs { get; init; }
 
     /// <summary>
+    /// When a project fails to load because its (possibly nested) global.json
+    /// pins an SDK that is not installed, install that SDK on demand via
+    /// `kenn-toolchain provision-sdk` and retry. Off by default: it reaches the
+    /// network at index time, and with it off an unsatisfiable pin stays the
+    /// named, terminal failure it is today.
+    /// </summary>
+    public bool ProvisionSdk { get; init; }
+
+    /// <summary>
     /// Stdout flush threshold in bytes. The JSONL sink buffers frames and
     /// flushes when buffered bytes reach this value (or <see cref="FlushFrames"/>).
     /// Larger values reduce syscall overhead at the cost of latency.
