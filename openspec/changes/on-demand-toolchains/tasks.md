@@ -117,8 +117,11 @@
       the existing buildx matrix stays.
 - [ ] 5.2 Republish and re-pin all six `IMG_*` digests in
       `crates/kenn-cli/src/init/detect.rs`.
-- [ ] 5.3 Document the offline story: what a pre-warmed cache volume requires and
-      how to populate one.
+- [x] 5.3 Document the offline story: what a pre-warmed cache volume requires and
+      how to populate one. docker/README.md "Offline / air-gapped use": why an
+      isolated host cannot provision (resolution + fetch both need network), the
+      content-addressed volume layout, and the export/import (`docker run … tar`)
+      procedure to pre-warm `kenn-toolchains`, incl. the swift-image caveat.
 - [x] 5.4 Record measured before/after image size, first-index timing, and
       warm-cache timing per language, so the trade is verifiable rather than
       asserted. Recorded in design.md "Measured results": C# image 1.03 GB →

@@ -57,13 +57,45 @@ never the reverse. A builder may drop below the runtime floor, never above it.
 
 ## Two constraints that are easy to break
 
-**Nothing may write to stdout.** It is the JSONL wire. The entrypoint logs to
-stderr; `kenn-ts` forces the TypeScript compiler's `traceResolution` off for the
-same reason.
+**Nothing may write junk to stdout.** It is the JSONL wire. The entrypoint logs
+diagnostics to stderr; the only thing it writes to stdout is one valid
+`toolchain` frame naming the version it provisioned (the run summary reads it
+back). `kenn-ts` forces the TypeScript compiler's `traceResolution` off for the
+same reason a stray log line would corrupt the wire.
 
 **The entrypoint `exec`s rather than spawns.** As PID 1 a spawn-and-wait parent
 never reaps orphaned grandchildren, and indexers that shell out — `go list`,
 `dotnet restore` — then fail while still reporting success.
+
+## Offline / air-gapped use
+
+Provisioning needs the network twice, and neither half can happen on an isolated
+host: resolving a pin to a concrete artifact reads the vendor's release metadata
+(that is where the download URL and checksum live), and fetching then downloads
+the toolchain. So an air-gapped host cannot provision — it runs only against a
+**pre-warmed** `kenn-toolchains` volume that already holds every version its
+repositories pin. The volume is content-addressed by resolved version and
+architecture:
+
+```
+kenn-toolchains/
+  dotnet/9.0.316/   go/1.26.5/   rust/1.97.1/   python/3.14.6/   swift/6.3/
+```
+
+`kenn docker-cache ls` lists what is provisioned, with sizes; `clean --toolchain
+<lang>[@<version>]` drops one. To populate a volume for an offline host:
+
+1. On a networked machine of the **same architecture**, index repos pinning
+   every version the offline host needs; confirm with `kenn docker-cache ls`.
+2. Export: `docker run --rm -v kenn-toolchains:/v -v "$PWD":/out alpine \`
+   `tar czf /out/kenn-toolchains.tgz -C /v .`
+3. On the isolated host: `docker volume create kenn-toolchains`, then the same
+   `tar xzf … -C /v` into it. Load the six images from a `docker save` tarball too.
+
+**Swift needs one more thing.** Its toolchain is copied from the official
+`swift:<tag>` image on the host at preflight, so that image must also be present
+in the offline host's docker store (`docker save`/`load` it). Once the toolchain
+is in the volume, preflight finds it and does no docker work.
 
 ## Verifying a change
 
