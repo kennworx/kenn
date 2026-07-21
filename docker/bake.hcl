@@ -22,9 +22,9 @@
 #
 # Not auto-discovered from the repo root, so it is always passed explicitly:
 #
-#   docker buildx bake -f docker/bake.hcl                 # everything, local
-#   docker buildx bake -f docker/bake.hcl csharp          # one image
-#   docker buildx bake -f docker/bake.hcl --push default  # publish
+#   docker buildx bake -f docker/bake.hcl --load                 # everything, local (into `docker images`)
+#   docker buildx bake -f docker/bake.hcl --load csharp          # one image, local
+#   CACHE=gha docker buildx bake -f docker/bake.hcl --push default   # publish (CI)
 #
 # `context = "."` is relative to the INVOCATION directory, not this file, so
 # every command above runs from the repository root.
@@ -42,9 +42,28 @@ variable "PLATFORMS" {
   default = ""
 }
 
+variable "CACHE" {
+  # External build-cache backend. Empty locally: a local build carries no gha
+  # token, and `cache-to type=gha` is a HARD error without one, not a skipped
+  # warning — so a hardcoded gha cache makes the one local command unrunnable.
+  # CI sets `CACHE=gha` to restore the cross-run layer cache.
+  default = ""
+}
+
 function "platforms" {
   params = []
   result = PLATFORMS == "" ? [] : split(",", PLATFORMS)
+}
+
+# gha cache lines only when CI asked for them; empty (no external cache) locally.
+function "cache_from" {
+  params = [scope]
+  result = CACHE == "gha" ? ["type=gha,scope=${scope}"] : []
+}
+
+function "cache_to" {
+  params = [scope]
+  result = CACHE == "gha" ? ["type=gha,scope=${scope},mode=max"] : []
 }
 
 group "default" {
@@ -61,8 +80,8 @@ target "entrypoint" {
   # `contexts = { entrypoint = "target:entrypoint" }`, never something a user
   # pulls, and `bake default` builds it as a dependency without pushing it — so
   # a tag here only produces a merge step that fails on an image nobody wrote.
-  cache-from = ["type=gha,scope=entrypoint"]
-  cache-to   = ["type=gha,scope=entrypoint,mode=max"]
+  cache-from = cache_from("entrypoint")
+  cache-to   = cache_to("entrypoint")
 }
 
 # ---------------------------------------------------------------------- images
@@ -77,8 +96,8 @@ target "csharp" {
   dockerfile = "docker/kenn-csharp/Dockerfile"
   contexts   = { entrypoint = "target:entrypoint" }
   tags       = ["${REGISTRY}/kenn-csharp:${TAG}"]
-  cache-from = ["type=gha,scope=csharp"]
-  cache-to   = ["type=gha,scope=csharp,mode=max"]
+  cache-from = cache_from("csharp")
+  cache-to   = cache_to("csharp")
 }
 
 target "typescript" {
@@ -86,8 +105,8 @@ target "typescript" {
   dockerfile = "docker/kenn-typescript/Dockerfile"
   contexts   = { entrypoint = "target:entrypoint" }
   tags       = ["${REGISTRY}/kenn-typescript:${TAG}"]
-  cache-from = ["type=gha,scope=typescript"]
-  cache-to   = ["type=gha,scope=typescript,mode=max"]
+  cache-from = cache_from("typescript")
+  cache-to   = cache_to("typescript")
 }
 
 target "go" {
@@ -95,8 +114,8 @@ target "go" {
   dockerfile = "docker/kenn-go/Dockerfile"
   contexts   = { entrypoint = "target:entrypoint" }
   tags       = ["${REGISTRY}/kenn-go:${TAG}"]
-  cache-from = ["type=gha,scope=go"]
-  cache-to   = ["type=gha,scope=go,mode=max"]
+  cache-from = cache_from("go")
+  cache-to   = cache_to("go")
 }
 
 target "rust" {
@@ -104,8 +123,8 @@ target "rust" {
   dockerfile = "docker/kenn-rust/Dockerfile"
   contexts   = { entrypoint = "target:entrypoint" }
   tags       = ["${REGISTRY}/kenn-rust:${TAG}"]
-  cache-from = ["type=gha,scope=rust"]
-  cache-to   = ["type=gha,scope=rust,mode=max"]
+  cache-from = cache_from("rust")
+  cache-to   = cache_to("rust")
 }
 
 target "python" {
@@ -113,8 +132,8 @@ target "python" {
   dockerfile = "docker/kenn-python/Dockerfile"
   contexts   = { entrypoint = "target:entrypoint" }
   tags       = ["${REGISTRY}/kenn-python:${TAG}"]
-  cache-from = ["type=gha,scope=python"]
-  cache-to   = ["type=gha,scope=python,mode=max"]
+  cache-from = cache_from("python")
+  cache-to   = cache_to("python")
 }
 
 target "swift" {
@@ -122,6 +141,6 @@ target "swift" {
   dockerfile = "docker/kenn-swift/Dockerfile"
   contexts   = { entrypoint = "target:entrypoint" }
   tags       = ["${REGISTRY}/kenn-swift:${TAG}"]
-  cache-from = ["type=gha,scope=swift"]
-  cache-to   = ["type=gha,scope=swift,mode=max"]
+  cache-from = cache_from("swift")
+  cache-to   = cache_to("swift")
 }
