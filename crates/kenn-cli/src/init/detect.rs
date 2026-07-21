@@ -137,7 +137,10 @@ pub const SPECS: &[LanguageSpec] = &[
     },
     LanguageSpec {
         name: "csharp",
-        marker: Marker::Extension(&[".sln", ".csproj"]),
+        // `.slnx` is the newer XML solution format (MSBuild 17.13+). Real repos
+        // ship only it (Newtonsoft.Json), and without it here they were not even
+        // detected — `.sln` matches the literal extension, not `.slnx`.
+        marker: Marker::Extension(&[".sln", ".slnx", ".csproj"]),
         source_globs: &["**/*.cs"],
         // Match test PROJECTS by directory suffix (`*.Test`/`*.Tests`) so a
         // project flags every file in it — fixtures, `*TestHost.cs`,
@@ -161,8 +164,10 @@ pub const SPECS: &[LanguageSpec] = &[
     LanguageSpec {
         name: "python",
         // Strong markers only. `requirements.txt` alone fires on repos with
-        // Python docs/CI tooling but no Python source to index.
-        marker: Marker::Basename(&["pyproject.toml", "setup.py"]),
+        // Python docs/CI tooling but no Python source to index — `.python-version`
+        // (pyenv) is included because it pins the interpreter for a source tree
+        // and rarely appears without one, unlike `requirements.txt`.
+        marker: Marker::Basename(&["pyproject.toml", "setup.py", ".python-version"]),
         source_globs: &["**/*.py"],
         test_globs: &["**/test_*.py", "**/*_test.py"],
         excludes: PythonConfig::DEFAULT_EXCLUDES,
@@ -550,6 +555,25 @@ mod tests {
         let d = TempDir::new().unwrap();
         touch(d.path(), "src/App/App.csproj");
         assert_eq!(names(d.path()), vec!["csharp"]);
+    }
+
+    /// The newer XML solution format. A repo shipping only `.slnx`
+    /// (Newtonsoft.Json) was not detected at all before it was a marker.
+    #[test]
+    fn slnx_alone_detects_csharp() {
+        let d = TempDir::new().unwrap();
+        touch(d.path(), "Src/App.slnx");
+        assert_eq!(names(d.path()), vec!["csharp"]);
+    }
+
+    /// A pyenv-pinned tree with no pyproject/setup.py. The interpreter pin is a
+    /// strong-enough signal, unlike `requirements.txt`.
+    #[test]
+    fn python_version_file_detects_python() {
+        let d = TempDir::new().unwrap();
+        touch(d.path(), ".python-version");
+        touch(d.path(), "app.py");
+        assert!(names(d.path()).contains(&"python"), "{:?}", names(d.path()));
     }
 
     #[test]

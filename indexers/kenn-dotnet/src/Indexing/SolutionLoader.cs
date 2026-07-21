@@ -17,12 +17,22 @@ internal static class SolutionLoader
             .Where(f =>
             {
                 var ext = Path.GetExtension(f);
-                return ext.Equals(".sln", StringComparison.OrdinalIgnoreCase)
+                return IsSolution(ext)
                     || ext.Equals(".csproj", StringComparison.OrdinalIgnoreCase);
             })
             .Select(p => new FileInfo(p))
             .ToList();
     }
+
+    /// <summary>
+    /// A solution file: the classic <c>.sln</c> or the newer XML <c>.slnx</c>
+    /// (MSBuild 17.13+). Some real repos ship only the latter (Newtonsoft.Json),
+    /// and treating it as unknown means discovering, restoring, and loading
+    /// nothing — a zero-file index at exit 0.
+    /// </summary>
+    private static bool IsSolution(string ext) =>
+        ext.Equals(".sln", StringComparison.OrdinalIgnoreCase)
+        || ext.Equals(".slnx", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Run `dotnet restore` for <paramref name="project"/>. Async because
@@ -46,7 +56,7 @@ internal static class SolutionLoader
     {
         if (opts.SkipRestore) return;
 
-        var args = project.Extension.Equals(".sln", StringComparison.OrdinalIgnoreCase)
+        var args = IsSolution(project.Extension)
             ? $"restore \"{project.FullName}\" /p:EnableWindowsTargeting=true"
             : "restore /p:EnableWindowsTargeting=true";
 
@@ -170,12 +180,17 @@ internal static class SolutionLoader
     {
         var ext = entry.Extension.ToLowerInvariant();
 
-        // Fast path: the workspace is empty AND the entry is a .sln. Use
-        // OpenSolutionAsync — one batched BuildHost call instead of N
+        // Fast path: the workspace is empty AND the entry is a classic .sln.
+        // Use OpenSolutionAsync — one batched BuildHost call instead of N
         // per-csproj round-trips. Roslyn 4.7's BuildHost has a known AVE
         // race in System.Net.Sockets when it gets hit with many rapid
         // OpenProjectAsync calls, so we keep BuildHost interactions to a
         // minimum on the cold path.
+        //
+        // Deliberately NOT extended to .slnx: whether this Roslyn's
+        // OpenSolutionAsync reads the XML format is unverified, and a throw here
+        // fails the whole run. .slnx takes the per-csproj slow path below, which
+        // resolves projects from disk and works regardless.
         if (loadedPaths.Count == 0 && ext == ".sln")
         {
             var sln = await ws.OpenSolutionAsync(entry.FullName, cancellationToken: ct);
@@ -226,27 +241,53 @@ internal static class SolutionLoader
             yield return entry.FullName;
             yield break;
         }
-        if (ext != ".sln")
+        if (!IsSolution(ext))
         {
             log.LogWarning("Unknown project file extension: {Path}", entry.FullName);
             yield break;
         }
-        SolutionFile sln;
+
+        // SolutionFile.Parse reads the classic .sln grammar; on a .slnx it
+        // throws (or with a newer MSBuild, may read it). Either way, when it
+        // yields no project we fall back to discovering the .csproj files on
+        // disk under the solution directory: a solution only references projects
+        // that physically exist, so the glob is a sound superset.
+        var parsed = TryParseSolutionProjects(entry, log);
+        if (parsed.Count > 0)
+        {
+            foreach (var p in parsed) yield return p;
+            yield break;
+        }
+
+        var root = entry.DirectoryName ?? Directory.GetCurrentDirectory();
+        foreach (var csproj in Directory.EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories))
+        {
+            yield return csproj;
+        }
+    }
+
+    /// MSBuild-format project paths from a solution, or an empty list when the
+    /// parser cannot read it (the .slnx-on-an-older-parser case) so the caller
+    /// falls back to a disk glob.
+    private static List<string> TryParseSolutionProjects(FileInfo entry, ILogger log)
+    {
         try
         {
-            sln = SolutionFile.Parse(entry.FullName);
+            var sln = SolutionFile.Parse(entry.FullName);
+            return sln.ProjectsInOrder
+                // SolutionFolder / WebSite / etc. — only KnownToBeMSBuildFormat
+                // entries are real .csproj/.vbproj files we can load.
+                .Where(p => p.ProjectType == SolutionProjectType.KnownToBeMSBuildFormat)
+                .Select(p => p.AbsolutePath)
+                .ToList();
         }
         catch (Exception ex)
         {
-            log.LogWarning(ex, "Failed to parse solution {Path}", entry.FullName);
-            yield break;
-        }
-        foreach (var p in sln.ProjectsInOrder)
-        {
-            // SolutionFolder / WebSite / etc. — only KnownToBeMSBuildFormat
-            // projects are real .csproj/.vbproj files we can load.
-            if (p.ProjectType != SolutionProjectType.KnownToBeMSBuildFormat) continue;
-            yield return p.AbsolutePath;
+            log.LogInformation(
+                ex,
+                "SolutionFile.Parse could not read {Path}; discovering .csproj on disk",
+                entry.FullName);
+            return new List<string>();
         }
     }
 
