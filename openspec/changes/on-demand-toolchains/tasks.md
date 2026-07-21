@@ -29,10 +29,11 @@
       tracked, so the existing staleness key already covers edits.
       DONE for the JSONL-wire languages (C#/Swift): the entrypoint emits a
       `toolchain` frame → kenn-indexer captures it → SnapshotMeta.toolchains →
-      `kenn status` / overview.md / meta.json. Verified e2e on a real C# repo
-      pinning global.json 9.0.308 (rollForward latestMinor): status shows
-      `toolchains: dotnet 9.0.316` — the version ACTUALLY provisioned, not the
-      pin. SCIP producers (rust/go/python/node) still report nothing — their
+      `kenn status` / overview.md / meta.json. Verified e2e through BOTH
+      provisioning paths: C# (on-demand SDK download) on a real repo pinning
+      9.0.308 latestMinor shows `toolchains: dotnet 9.0.316` — the version
+      ACTUALLY provisioned, not the pin; Swift (host-side image copy) on
+      Alamofire shows `toolchains: swift 6.3`. SCIP producers (rust/go/python/node) still report nothing — their
       stdout is not the wire, so they need a separate provenance channel (a
       follow-up, tracked as a non-goal here).
 - [x] 1.8 Make an unresolvable or uninstallable pin a **fatal, named** failure —
@@ -92,16 +93,21 @@
       index run (strace/dtrace or equivalent), not by reading code. Known so far:
       kenn-ts spawns `git worktree list`; scip-python spawns `pip list` and reads
       the project version from `git`. Ship what each actually spawns.
-- [ ] 4.3 Build and verify each of the six images by indexing a real fixture:
+- [x] 4.3 Build and verify each of the six images by indexing a real fixture:
       csharp (pinned non-latest major), swift (the existing Linux/Alamofire run),
       typescript, rust, go, python.
-      3/6 DONE via `docker buildx bake -f docker/bake.hcl --load` (all six built
-      clean locally): csharp — kenn-csharp:local provisioned SDK 9.0.316
-      on-demand (global.json 9.0.308 latestMinor) and indexed a real repo;
-      rust + python — `just docker-index-smoke` (fixed to bake the images rather
-      than `docker build`, which cannot supply the entrypoint context) each
-      provision their default toolchain on-demand and index a fixture, output
-      host-owned. typescript, go, swift still to run.
+      ALL SIX DONE via `docker buildx bake -f docker/bake.hcl --load` (built
+      clean locally), each indexing a REAL repo through the docker runtime with
+      on-demand provisioning:
+      - csharp: kenn-csharp:local provisioned SDK 9.0.316 (global.json 9.0.308
+        latestMinor) → indexed a real C# solution.
+      - swift: Alamofire → 3148 symbols; host-side preflight provisioned swift
+        6.3 (partial only because its iOS/watchOS xcodeproj examples need
+        xcodebuild, unavailable on Linux).
+      - typescript: colinhacks/zod → 4707 symbols (embedded runtime, no provision).
+      - rust: `just docker-index-smoke` → provisions `stable`, output host-owned.
+      - go: google/uuid → 219 symbols (provisions latest go).
+      - python: `just docker-index-smoke` → provisions latest + node.
 - [x] 4.4 Set `kenn-toolchain` as the ENTRYPOINT of every image, execing the real
       indexer behind it, and confirm each indexer's argv still reaches it intact.
 
