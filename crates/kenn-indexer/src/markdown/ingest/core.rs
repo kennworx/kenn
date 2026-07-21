@@ -429,4 +429,5 @@ fn external_stub(id: ShortId, pub_id: &str, name: String) -> SymbolRecord {
 }
 
 #[cfg(test)]
+#[path = "core_tests.rs"]
 mod tests;

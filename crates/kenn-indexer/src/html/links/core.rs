@@ -625,4 +625,5 @@ fn stub_kind(name: &str) -> Kind {
 }
 
 #[cfg(test)]
+#[path = "core_tests.rs"]
 mod tests;

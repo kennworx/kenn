@@ -601,4 +601,5 @@ fn emit_progress(json: bool, kind: &str, message: &str) {
 }
 
 #[cfg(test)]
+#[path = "core_tests.rs"]
 mod tests;

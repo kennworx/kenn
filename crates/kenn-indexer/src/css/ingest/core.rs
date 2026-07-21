@@ -634,4 +634,5 @@ fn emit_internal_imports(
 }
 
 #[cfg(test)]
+#[path = "core_tests.rs"]
 mod tests;

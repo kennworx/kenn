@@ -415,4 +415,5 @@ fn find_gitdir(cwd: &Path) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(test)]
+#[path = "core_tests.rs"]
 mod tests;
