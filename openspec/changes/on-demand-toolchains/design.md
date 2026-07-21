@@ -321,3 +321,25 @@ tarball (~4.5 MB/s). Every subsequent index of ANY workspace on that version is
 warm: **8–13 s**. The bundled-SDK image re-fetched its whole toolchain on every
 image pull; this pays once per version per machine, only for versions actually
 used.
+
+**Spawned executables, observed (task 4.2).** `strace -f -e trace=execve` on a
+wrapper image built FROM each thin image (identical payload + strace), indexing
+a real repo. Each indexer `exec`s only its provisioned toolchain driver plus
+payload the image already ships:
+
+| indexer | exec'd (beyond loader/libc) |
+|---|---|
+| scip-python | `git rev-parse`, `pip3 list`, `node` (runs scip-python), `python3`, `sh` |
+| kenn-ts | `git worktree list` |
+| scip-go | `git` (remote / rev-parse / tag), `go list` |
+| rust-analyzer | `cargo` (check / metadata), `rustc` (+ build scripts → `cc`) |
+| kenn-dotnet | `dotnet` (BuildHost, MSBuild, `restore`), `sh` |
+| kenn-swift | `git` (describe / rev-parse / status), `swift build`, `swiftc` |
+
+`git` is payload in every image; `sh` is in the base; the language driver
+(`go`/`cargo`/`rustc`/`dotnet`/`swift(c)`/`node`/`pip3`/`python3`) comes from the
+provisioned toolchain. Nothing spawned is absent — which is why 4.3 indexed all
+six. This is the empirical form of "the payload is what the indexer executes":
+`git` earns its place in every image, and rust/go keep `gcc`+`libc6-dev` because
+build scripts and cgo compile native code (seen as the `rustc … build_script`
+execs).

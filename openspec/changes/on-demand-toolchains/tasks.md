@@ -89,10 +89,17 @@
       (Node publishes no official musl build) and swift (no musl toolchain
       exists at all). Do not force alpine where it costs more than it saves.
       csharp DONE and verified; five remain.
-- [ ] 4.2 Determine each indexer's spawned-executable set by OBSERVING a real
+- [x] 4.2 Determine each indexer's spawned-executable set by OBSERVING a real
       index run (strace/dtrace or equivalent), not by reading code. Known so far:
       kenn-ts spawns `git worktree list`; scip-python spawns `pip list` and reads
       the project version from `git`. Ship what each actually spawns.
+      DONE for all six via `strace -f -e trace=execve` on a wrapper image built
+      FROM each thin image, indexing a real repo — table in design.md "Spawned
+      executables". Confirmed the two known cases (ts `git worktree list`,
+      scip-python `pip3 list` + `git`) and captured the rest: go `git`+`go list`,
+      rust `cargo`+`rustc`(+build-script `cc`), csharp `dotnet` restore/BuildHost,
+      swift `git`+`swift build`+`swiftc`. Every spawn is git (payload) / sh
+      (base) / the provisioned toolchain driver — nothing missing.
 - [x] 4.3 Build and verify each of the six images by indexing a real fixture:
       csharp (pinned non-latest major), swift (the existing Linux/Alamofire run),
       typescript, rust, go, python.
