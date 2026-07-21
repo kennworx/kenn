@@ -119,6 +119,11 @@
       `crates/kenn-cli/src/init/detect.rs`.
 - [ ] 5.3 Document the offline story: what a pre-warmed cache volume requires and
       how to populate one.
-- [ ] 5.4 Record measured before/after image size, first-index timing, and
+- [x] 5.4 Record measured before/after image size, first-index timing, and
       warm-cache timing per language, so the trade is verifiable rather than
-      asserted.
+      asserted. Recorded in design.md "Measured results": C# image 1.03 GB →
+      408 MB (old five totalled 5.56 GB for ~204 MB payload); per-toolchain
+      sizes; and cold-vs-warm timings — go 67 s → 8 s (264 MB toolchain),
+      csharp 384 s → 13 s (849 MB SDK). Cold/warm measured for two
+      representative languages (one SCIP, one JSONL/on-demand-SDK); the
+      remaining four scale with their recorded toolchain sizes.

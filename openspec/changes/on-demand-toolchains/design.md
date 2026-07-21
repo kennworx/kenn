@@ -282,3 +282,42 @@ be present — that fallback is precisely the bug this change exists to remove.
   breaks all six languages at once, where previously each image failed
   independently. It is small and heavily tested for that reason, and it execs the
   real indexer rather than wrapping its I/O, so it cannot corrupt the wire.
+
+## Measured results (task 5.4)
+
+Measured on arm64 / macOS Docker Desktop. Image sizes are the per-image
+`docker images` figure — do NOT sum them: the `ubuntu:noble` base is shared but
+counted once per image. Timings evict a toolchain with
+`kenn docker-cache clean --toolchain <lang>`, then run a cold `kenn index
+--force` (re-provisions) and a warm one (cache hit) on a real cloned repo.
+
+**Image size, fat → thin.** The one before/after pair measured directly is C#:
+**1.03 GB → 408 MB**. The old five images totalled **5.56 GB** carrying only
+**~204 MB** of payload; the rest was bundled toolchain. Thin images now:
+
+| image | csharp | typescript | go | python | rust | swift |
+|---|---|---|---|---|---|---|
+| size | 408 MB | 405 MB | 538 MB | 520 MB | 598 MB | 877 MB |
+
+**Payload per image** (indexer + its runtime deps, the part that is not
+toolchain): kenn-ts 98 MB, kenn-swift 38.8 MB, kenn-dotnet 28.5 MB,
+rust-analyzer 20.9 MB, scip-go 17.3 MB, scip-python 31 MB.
+
+**Provisioned toolchain size** (in the shared volume, provisioned ONCE per
+version across every workspace on the machine): dotnet 604 MB (9.0.316) /
+849 MB (10.0.302), rust 600 MB, go 264 MB, python 94 MB, swift 2.4 GB.
+
+**First-index (cold) vs warm-cache, measured:**
+
+| language | repo | toolchain | cold | warm | provision Δ |
+|---|---|---|---|---|---|
+| go | google/uuid | go 264 MB | 67 s | 8 s | ~59 s |
+| csharp | serilog | dotnet 849 MB | 384 s | 13 s | ~371 s |
+
+The trade holds as designed. The first index of an unseen toolchain version pays
+a one-time download+unpack that scales with toolchain size — and .NET's
+many-file SDK unpacks slower per byte (~2.3 MB/s effective) than Go's single
+tarball (~4.5 MB/s). Every subsequent index of ANY workspace on that version is
+warm: **8–13 s**. The bundled-SDK image re-fetched its whole toolchain on every
+image pull; this pays once per version per machine, only for versions actually
+used.
