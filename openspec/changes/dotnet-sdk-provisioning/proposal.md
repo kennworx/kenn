@@ -28,16 +28,21 @@ entrypoint can see. It has no answer for a pin the entrypoint never looked at.
 demand, behind an opt-in flag** — the mechanism the user proposed.
 
 When the BuildHost reports "no compatible SDK", the sidecar reads the effective
-`global.json` for that project, installs the pinned SDK version into the shared
-toolchain cache via the official `dotnet-install` script, adds it to the SDK
-search path, and retries the load. Off by default; enabled with
-`--provision-sdk` (and the matching `kenn.toml` key).
+`global.json` for that project and shells out to `kenn-toolchain provision-sdk
+<version>` — our own entrypoint binary, already in the image, which already
+downloads, verifies (SHA-512), and atomically installs .NET SDKs. It installs
+into the active `DOTNET_ROOT` so the BuildHost finds it, and the sidecar retries
+the load. Off by default; enabled with `--provision-sdk` (and the matching
+`kenn.toml` key).
 
-Why the sidecar rather than the entrypoint: a repo can carry several nested
-`global.json` files pinning different SDKs, and the BuildHost selects per
-project. Installing "the pin" is a per-project question the sidecar answers as
-it loads; the entrypoint, provisioning once up front from a single root pin,
-structurally cannot.
+The sidecar triggers, `kenn-toolchain` installs. Research settled why:
+`dotnet` has no first-party install command (only `dotnet sdk check`), the C#
+image has no `curl`/`wget` to run `dotnet-install.sh`, and the one community
+global tool that reads `global.json` is unmaintained since 2019. `kenn-toolchain`
+is the maintained, curl-free, already-present mechanism. The sidecar is still
+where the per-project pin is seen — a repo can carry several nested
+`global.json`s pinning different SDKs, and the BuildHost picks per project, which
+a once-up-front entrypoint pass cannot.
 
 **Opt-in, not default**, because it makes the indexer reach the network at
 index time and download an SDK (~200MB), and because it softens the

@@ -62,18 +62,26 @@ wrong or empty result.
 
 ### Requirement: installs are atomic, shared, and reclaimable
 
-An installed SDK SHALL land in the shared toolchain cache under the same
-`<arch>/dotnet/<version>` layout the entrypoint uses, written via a
-stage-then-rename so a partial download is never seen as complete.
+An installed SDK SHALL be written into the active `DOTNET_ROOT` via a
+stage-then-rename, so a partial download is never seen as a complete SDK, and so
+the Roslyn BuildHost — which resolves from a single root — finds it without
+re-registration.
 
 A version once installed SHALL be reused by later runs and by other projects
-needing it, and SHALL be visible to `kenn docker-cache` like any other
-provisioned toolchain.
+needing it, and SHALL be reclaimable through `kenn docker-cache` like any other
+toolchain-cache content.
 
 #### Scenario: a second run reuses the installed SDK
 
 - **WHEN** a run installs a pinned SDK, and the same workspace is indexed again
 - **THEN** the second run does not re-download it
+
+#### Scenario: the BuildHost finds the newly installed SDK
+
+- **WHEN** the pinned SDK is installed into the active `DOTNET_ROOT` and the
+  load is retried
+- **THEN** the project resolves its SDK and loads
+- **AND** no MSBuild re-registration was required
 
 #### Scenario: an interrupted install leaves nothing usable
 

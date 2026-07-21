@@ -16,26 +16,30 @@
   it. → verify: the version read for a `Src/**` project is `Src/global.json`'s,
   not the root's.
 
-## 3. Install into the shared cache, atomically
+## 3. Install via kenn-toolchain, into the active DOTNET_ROOT
 
-- [ ] 3.1 Install the pinned SDK via the official `dotnet-install` script into
-  `<cache>/<arch>/dotnet/<version>`, staged-and-renamed. → verify: an
-  interrupted install leaves no directory a later run treats as complete.
-- [ ] 3.2 Point the BuildHost's SDK search at the installed SDK and retry the
-  load ONCE. A second failure for the same version is terminal and named (D5).
-  → verify: after install, the project loads; a deliberately-corrupt install
-  fails named, not looping.
+- [ ] 3.1 Add a `kenn-toolchain provision-sdk <version>` subcommand (Rust) that
+  reuses the existing .NET SDK download+verify code and installs into the
+  DOTNET_ROOT it is given, atomically (stage a temp `sdk/<version>` dir, rename
+  into place). → verify: interrupted install leaves no dir a later run treats as
+  complete; a completed install adds `sdk/<version>/` to the root.
+- [ ] 3.2 From the sidecar, shell out to `kenn-toolchain provision-sdk` on the
+  detected failure (2.1) with the wanted version (2.2), then retry the load
+  ONCE. A second failure for the same version is terminal and named (D5). →
+  verify: after install the project loads; a corrupt install fails named, not
+  looping.
 - [ ] 3.3 Bound the install (timeout) and name every failure with the pin and
-  its `global.json` path — never a raw script error, never a hang (D5). →
+  its `global.json` path — never a raw downloader error, never a hang (D5). →
   verify: a pin naming a nonexistent version fails named and bounded.
 
 ## 4. Reuse and visibility
 
 - [ ] 4.1 An already-installed version is reused, not re-downloaded. → verify: a
   second index of the same workspace does not re-install.
-- [ ] 4.2 An SDK installed this way is listed by `kenn docker-cache` like any
-  entrypoint-provisioned toolchain. → verify: it appears in the toolchain
-  listing with its arch and version.
+- [ ] 4.2 The extra SDK is reclaimable — it lives under the toolchain volume, so
+  `kenn docker-cache clean --toolchains` reclaims it. Per-SDK listing accuracy
+  (an SDK shown nested under the root's version) is a follow-in, not a blocker
+  (D3). → verify: removing the toolchain volume reclaims the installed SDK.
 
 ## 5. Verify the motivating case end-to-end
 

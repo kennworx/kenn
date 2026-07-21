@@ -31,23 +31,30 @@ pin was unsatisfied.
 
 ## Decisions
 
-### D1 — Sidecar-side install, not entrypoint-side
+### D1 — Sidecar TRIGGERS, `kenn-toolchain` INSTALLS
 
-Two designs solve the nested pin:
+The first cut of this design had the sidecar download and install the SDK
+itself. Implementation and research killed that:
 
-- **A (this change): the sidecar installs on BuildHost failure.** It sees the
-  exact project and its effective `global.json`, so it installs precisely what
-  was needed, and it handles a repo with several different nested pins
-  naturally — each miss installs its own version.
-- **B: the entrypoint discovers nested `global.json` files and pre-provisions
-  them.** Keeps provisioning in one place, consistent with the current model,
-  but must find and reconcile every nested pin up front, provision all of them,
-  and still leave the BuildHost to pick — more work done eagerly, some of it
-  wasted on pins no loaded project actually uses.
+- The C# runtime image has no `curl`/`wget`, so it cannot run
+  `dotnet-install.sh`.
+- `dotnet` has no first-party install command — `dotnet sdk` exposes only
+  `check`, in both SDK 10 and the SDK 11 preview.
+- The one community global tool that installs from `global.json`
+  (`installsdkglobaltool`) is a 2019, single-author, unmaintained package —
+  unacceptable as a dependency in the core indexing path.
+- `kenn-toolchain`, our own entrypoint binary, is ALREADY in the image and
+  ALREADY downloads, SHA-512-verifies, and atomically installs .NET SDKs.
 
-A is chosen because installing is inherently a per-project, on-demand question
-and the sidecar is where that question is asked. B remains the right home if
-this is ever wanted for the third-party languages, which have no sidecar.
+So the split is: the **sidecar detects and triggers** (it sees the exact project
+and its effective `global.json` — the per-project question D2 needs), and
+**`kenn-toolchain` installs** (the tested, curl-free, first-party mechanism).
+The sidecar shells out to a new `kenn-toolchain provision-sdk <version>`
+subcommand on the specific BuildHost SDK-resolution failure, then retries.
+
+This is neither pure-sidecar nor pure-entrypoint: it uses each for what it is
+good at, and reuses the download/verify/atomic-cache code that already exists
+rather than reimplementing it in a language and image that cannot download.
 
 ### D2 — Reactive on BuildHost failure, not a proactive pre-scan
 
@@ -60,16 +67,28 @@ project. A pre-scan would install pins that no reachable project uses.
 The failure is identified by the `hostfxr_resolve_sdk2` / "compatible .NET SDK
 was not found" signature; anything else is a real load error and is NOT retried.
 
-### D3 — Install into the shared toolchain cache, atomically
+### D3 — One shared `DOTNET_ROOT`, many SDKs — not a root per version
 
-The SDK lands in the same `/kenn-toolchains/<arch>/dotnet/<version>` layout the
-entrypoint uses, via the official `dotnet-install` script, staged-and-renamed so
-a partial download is never seen as a complete SDK — the same atomic-install
-contract the entrypoint's cache already relies on. A second run, or another
-project needing the same version, reuses it.
+The current cache gives each toolchain version its own root
+(`<arch>/dotnet/<version>/`, a complete install). That does NOT work here: the
+Roslyn BuildHost resolves the SDK from a SINGLE `DOTNET_ROOT`, and MSBuildLocator
+registers it once per process, so an SDK installed as a separate root is never
+found on the retry — verified against the running container.
 
-The docker launcher must therefore mount the toolchain cache writable by the
-sidecar's uid, which it already does for the entrypoint.
+.NET is built for the opposite layout: ONE root holding `sdk/9.0.316/`,
+`sdk/10.0.302/`, … side by side, with `hostfxr` resolving each project's
+`global.json` against all of them. So `kenn-toolchain provision-sdk` installs the
+pinned SDK INTO the already-exported `DOTNET_ROOT` (`dotnet-install --install-dir
+$DOTNET_ROOT`), atomically — stage a temp SDK dir, rename into `sdk/<version>/` —
+and the BuildHost finds it on the next evaluation with no re-registration.
+
+Minimal form: `provision-sdk` installs into whatever `DOTNET_ROOT` the entrypoint
+already exported (the root-pin SDK's dir), which then holds more than one SDK.
+This needs no change to the cache KEY scheme — the extra SDKs live under the
+existing root — at the cost that `kenn docker-cache` sees them nested under that
+root's version rather than as their own entries. Accurate per-SDK accounting is
+a follow-in, not a blocker; the reclaim unit (the whole toolchain volume, or the
+root) still works.
 
 ### D4 — Off by default; the strict contract is the default
 
