@@ -60,6 +60,10 @@ pub struct JsonlIngestStats {
     /// The producer's self-reported version, from the `meta` frame. Fills the
     /// unit report's `indexer_version`, which would otherwise stay `"?"`.
     pub tool_version: Option<String>,
+    /// Toolchains the entrypoint provisioned, from `toolchain` frames. One per
+    /// provisioned toolchain — an image may provision more than one (python +
+    /// node). Fills the unit report's `toolchains`.
+    pub toolchains: Vec<crate::report::ToolchainVersion>,
 }
 
 /// Read the JSONL stream from `reader` and push records into `sink`.

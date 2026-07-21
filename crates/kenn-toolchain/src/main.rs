@@ -3,11 +3,14 @@
 //! Usage: `kenn-toolchain <language> -- <indexer> [args…]`
 //!
 //! Provisions the workspace's pinned toolchain into the mounted cache, exports
-//! the language's toolchain-root env var, then execs `<indexer>`.
+//! the language's toolchain-root env var, announces each provisioned toolchain
+//! on the JSONL wire (a `toolchain` frame, for the languages whose stdout IS
+//! that wire), then execs `<indexer>`.
 //!
 //! Diagnostics go to stderr only: three of the six indexers stream JSONL on
 //! stdout and kenn parses it, so a stray byte there would corrupt a frame and
-//! look like an indexer bug.
+//! look like an indexer bug. The one intentional stdout write is the `toolchain`
+//! frame above — valid wire data, not a diagnostic, emitted before the exec.
 
 use std::path::Path;
 use std::process::Command;
@@ -115,9 +118,52 @@ fn provision_all(
             &run::http_install,
         )
         .map_err(|e| e.to_string())?;
+        if emits_jsonl_wire(language) {
+            if let Some(version) = outcome.version() {
+                emit_toolchain_frame(language, version);
+            }
+        }
         path = apply_toolchain(language, outcome.path(), command, path);
     }
     Ok(path)
+}
+
+/// The indexers whose stdout IS the JSONL wire kenn parses (C#, Swift, and the
+/// toolchain-free TypeScript). Only for these can a `toolchain` frame ride the
+/// stream. The SCIP producers (rust, go, python, node) write a `.scip` file and
+/// their stdout is not the data channel, so a frame there would be lost — they
+/// need a separate provenance channel, not yet built.
+fn emits_jsonl_wire(language: Language) -> bool {
+    matches!(
+        language,
+        Language::Dotnet | Language::TypeScript | Language::Swift
+    )
+}
+
+/// Announce a provisioned toolchain on the JSONL wire, so the pipeline records
+/// it in the run's `meta.json` and reports it — a result change is then
+/// attributable to the toolchain that produced it. Written BEFORE the indexer
+/// execs and flushed, so the frame precedes the indexer's own frames in the
+/// same stdout stream. This is the one place the entrypoint writes to stdout;
+/// it is a valid frame, not the "stray byte" the module warns about.
+fn emit_toolchain_frame(language: Language, version: &str) {
+    // stdout is the JSONL wire for the languages that reach here; a valid frame
+    // is flushed by the trailing newline (line-buffered stdout) before the
+    // indexer execs, so it precedes the indexer's own frames. `println!` matches
+    // the entrypoint's other stdout write (`provision-sdk`).
+    println!("{}", toolchain_frame_json(language, version));
+}
+
+/// The `toolchain` wire frame as one compact JSON line. Split from the write so
+/// its shape is unit-testable without capturing stdout — it must deserialize
+/// into `kenn_indexer`'s `ToolchainFrame` (`type`/`language`/`version`).
+fn toolchain_frame_json(language: Language, version: &str) -> String {
+    serde_json::json!({
+        "type": "toolchain",
+        "language": language.key(),
+        "version": version,
+    })
+    .to_string()
 }
 
 /// Point `command` at one provisioned toolchain: its root var where the language
@@ -239,6 +285,35 @@ mod tests {
 
     fn os(v: &[&str]) -> Vec<std::ffi::OsString> {
         v.iter().map(Into::into).collect()
+    }
+
+    /// The emitted frame must deserialize into what the pipeline parses: type
+    /// `toolchain`, the language key, and the resolved version.
+    #[test]
+    fn toolchain_frame_json_matches_the_wire() {
+        let line = toolchain_frame_json(Language::Dotnet, "9.0.308");
+        let v: serde_json::Value = serde_json::from_str(&line).expect("valid json line");
+        assert_eq!(v["type"], "toolchain");
+        assert_eq!(v["language"], "dotnet");
+        assert_eq!(v["version"], "9.0.308");
+    }
+
+    /// Only the JSONL-wire indexers may carry a toolchain frame on stdout; a
+    /// frame on a SCIP producer's stdout (rust/go/python/node) would corrupt or
+    /// vanish, so those must be gated out.
+    #[test]
+    fn only_jsonl_wire_languages_emit_a_toolchain_frame() {
+        for l in [Language::Dotnet, Language::Swift, Language::TypeScript] {
+            assert!(emits_jsonl_wire(l), "{l:?} should emit");
+        }
+        for l in [
+            Language::Rust,
+            Language::Go,
+            Language::Python,
+            Language::Node,
+        ] {
+            assert!(!emits_jsonl_wire(l), "{l:?} must NOT emit");
+        }
     }
 
     #[test]

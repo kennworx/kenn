@@ -554,6 +554,7 @@ fn ingest_jsonl_subprocess(
     if let Some(v) = &stats.tool_version {
         report.indexer_version.clone_from(v);
     }
+    report.toolchains.clone_from(&stats.toolchains);
     record_frame_diagnostics(&stats, report);
     let stderr_tail = drain_stderr_capture(stderr);
     record_jsonl_exit_status(child.wait(), &stderr_tail, report);

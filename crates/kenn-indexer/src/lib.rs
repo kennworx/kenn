@@ -55,7 +55,7 @@ pub use canonicalize::{
 };
 pub use driver::KennDotnet;
 pub use pipeline::{run_pipeline, run_pipeline_with_progress, PipelineError};
-pub use report::{ProvisionResult, RunReport, RunStatus};
+pub use report::{render_toolchains, ProvisionResult, RunReport, RunStatus, ToolchainVersion};
 pub use snapshot::{
     aggregate_counts, build_snapshot_meta, persist_run_artifacts, RegressionWarning,
     SnapshotCounts, SnapshotMeta, SNAPSHOT_META_FILE,

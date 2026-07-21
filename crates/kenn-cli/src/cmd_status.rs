@@ -95,6 +95,18 @@ enum StatusReport {
     },
 }
 
+/// The provisioned-toolchain line of the run summary, shown only when a
+/// toolchain was recorded (the docker/on-demand path) — a plain `kenn index`
+/// with everything on `PATH` records none, so the line stays absent there.
+fn print_toolchains(m: &SnapshotMeta) {
+    if !m.toolchains.is_empty() {
+        println!(
+            "toolchains: {}",
+            kenn_indexer::render_toolchains(&m.toolchains)
+        );
+    }
+}
+
 fn print_human(r: &StatusReport) {
     match r {
         StatusReport::Available {
@@ -118,6 +130,7 @@ fn print_human(r: &StatusReport) {
                     "counts:   documents={} symbols={} definitions={} edges={}",
                     m.documents, m.symbols, m.definitions, m.edges
                 );
+                print_toolchains(m);
                 // The true counts include attributions dropped past the
                 // per-unit retention cap; the overflow renders as `+N more`.
                 let failed_total = m.failed_total();

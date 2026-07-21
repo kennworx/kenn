@@ -57,6 +57,19 @@ impl Outcome {
             Outcome::NoCache | Outcome::NotPinned => None,
         }
     }
+
+    /// The resolved toolchain version, when one was provisioned or already
+    /// present. `None` when nothing was provisioned (no cache, or the workspace
+    /// pins nothing) — there is then no version to attribute the index to.
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            Outcome::AlreadyPresent { version, .. } | Outcome::Provisioned { version, .. } => {
+                Some(version)
+            }
+            Outcome::NoCache | Outcome::NotPinned => None,
+        }
+    }
 }
 
 /// Resolve and provision `language`'s toolchain for the workspace at `workspace`.

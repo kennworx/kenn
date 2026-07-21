@@ -33,6 +33,7 @@ pub(crate) fn handle_frame(
             counts.tool_version = Some(m.tool_version.clone());
             state.on_meta(&m);
         }
+        Frame::Toolchain(t) => note_toolchain_frame(t, counts),
         Frame::File(f) => {
             if let Some(rec) = state.on_file(&f, registry) {
                 let file_id = rec.id;
@@ -90,6 +91,16 @@ pub(crate) fn note_error_frame(e: &ErrorFrame, counts: &mut JsonlIngestStats) {
     if counts.failed.len() < super::JSONL_FAILED_ATTRIBUTION_CAP {
         counts.failed.push(attribution());
     }
+}
+
+/// Record a provisioned toolchain (from the entrypoint's `toolchain` frame) on
+/// the unit's stats, to be lifted onto the run report and shown in the run
+/// summary. Mirrors [`note_error_frame`] — a per-frame recorder tested directly.
+fn note_toolchain_frame(t: crate::parse_jsonl::ToolchainFrame, counts: &mut JsonlIngestStats) {
+    counts.toolchains.push(crate::report::ToolchainVersion {
+        language: t.language,
+        version: t.version,
+    });
 }
 
 /// Flush any stubs the registry buffered during ingest that never
@@ -422,7 +433,7 @@ impl<'ws> StreamState<'ws> {
 
 #[cfg(test)]
 mod error_frame_tests {
-    use super::{note_error_frame, ErrorFrame};
+    use super::{note_error_frame, note_toolchain_frame, ErrorFrame};
     use crate::parse_jsonl::Severity;
     use crate::transform_jsonl::{JsonlIngestStats, JSONL_FAILED_ATTRIBUTION_CAP};
 
@@ -466,6 +477,27 @@ mod error_frame_tests {
         assert_eq!(
             counts.failed_errors, 1,
             "unknown severity attributes like an error"
+        );
+    }
+
+    /// A `toolchain` frame lands on the unit's stats so the pipeline can lift it
+    /// onto the run report and into the run summary.
+    #[test]
+    fn a_toolchain_frame_is_recorded_on_the_stats() {
+        let mut counts = JsonlIngestStats::default();
+        note_toolchain_frame(
+            crate::parse_jsonl::ToolchainFrame {
+                language: "dotnet".into(),
+                version: "9.0.308".into(),
+            },
+            &mut counts,
+        );
+        assert_eq!(
+            counts.toolchains,
+            vec![crate::report::ToolchainVersion {
+                language: "dotnet".into(),
+                version: "9.0.308".into(),
+            }]
         );
     }
 

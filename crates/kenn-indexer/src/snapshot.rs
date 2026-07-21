@@ -14,7 +14,7 @@ use kenn_store::staleness::StalenessKey;
 
 use crate::report::{
     collect_failed_overflow, collect_failed_projects, collect_warnings, collect_warnings_overflow,
-    render_overview_md, render_with_overflow, RunReport, RunStatus,
+    render_overview_md, render_with_overflow, RunReport, RunStatus, ToolchainVersion,
 };
 
 /// The run-local metadata file, written into every published snapshot.
@@ -79,6 +79,12 @@ pub struct SnapshotMeta {
     pub warnings_overflow: u64,
     #[serde(default)]
     pub regression_warnings: Vec<RegressionWarning>,
+    /// Toolchains the entrypoint provisioned for this run, deduplicated across
+    /// units (language + resolved version). Diagnostic provenance, not a
+    /// staleness input. `None`/empty for older snapshots and toolchain-free
+    /// producers.
+    #[serde(default)]
+    pub toolchains: Vec<ToolchainVersion>,
     #[serde(default)]
     pub staleness_key: Option<serde_json::Value>,
 }
@@ -192,10 +198,28 @@ pub fn build_snapshot_meta(
                 drop_pct: w.drop_pct,
             })
             .collect(),
+        toolchains: collect_toolchains(reports),
         // `to_value` on a plain serializable key does not realistically fail;
         // fall back to `None` rather than propagate an error just for that.
         staleness_key: serde_json::to_value(staleness).ok(),
     }
+}
+
+/// Union of every unit's provisioned toolchains, deduplicated on
+/// (language, version) and ordered by language then version, so the run
+/// summary lists each provisioned toolchain once regardless of how many units
+/// shared it.
+fn collect_toolchains(reports: &[RunReport]) -> Vec<ToolchainVersion> {
+    let mut seen: Vec<ToolchainVersion> = Vec::new();
+    for report in reports {
+        for tc in &report.toolchains {
+            if !seen.contains(tc) {
+                seen.push(tc.clone());
+            }
+        }
+    }
+    seen.sort_by(|a, b| a.language.cmp(&b.language).then(a.version.cmp(&b.version)));
+    seen
 }
 
 /// Write the run's three artifacts into `run_dir`: `meta.json` (lifecycle
@@ -225,7 +249,49 @@ pub fn persist_run_artifacts(
             meta.edges,
             meta.source_root.as_deref().unwrap_or("unknown"),
             &render_with_overflow(&meta.failed_projects, meta.failed_overflow),
+            &meta.toolchains,
         ),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report_with(toolchains: &[(&str, &str)]) -> RunReport {
+        let mut r = RunReport::started("csharp", "0.1.0", "unit");
+        r.toolchains = toolchains
+            .iter()
+            .map(|(l, v)| ToolchainVersion {
+                language: (*l).into(),
+                version: (*v).into(),
+            })
+            .collect();
+        r
+    }
+
+    /// The run summary lists each provisioned toolchain ONCE, ordered by
+    /// language, even when several units shared it and reported it out of order.
+    #[test]
+    fn collect_toolchains_dedups_and_sorts() {
+        let reports = [
+            report_with(&[("go", "1.24.5")]),
+            report_with(&[("dotnet", "9.0.308"), ("go", "1.24.5")]),
+        ];
+        let got = collect_toolchains(&reports);
+        assert_eq!(
+            got,
+            vec![
+                ToolchainVersion {
+                    language: "dotnet".into(),
+                    version: "9.0.308".into()
+                },
+                ToolchainVersion {
+                    language: "go".into(),
+                    version: "1.24.5".into()
+                },
+            ]
+        );
+    }
 }

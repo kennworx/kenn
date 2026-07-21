@@ -32,6 +32,7 @@ pub type Ref = u32;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Frame {
     Meta(MetaFrame),
+    Toolchain(ToolchainFrame),
     File(FileFrame),
     Package(PackageFrame),
     Stub(StubFrame),
@@ -51,6 +52,22 @@ pub struct MetaFrame {
     /// ISO 8601 UTC timestamp when the producer wrote this frame
     /// (millisecond precision, `YYYY-MM-DDTHH:mm:ss.sssZ`).
     pub ts: String,
+}
+
+/// A toolchain the provisioning entrypoint resolved from the workspace's pin
+/// file and made available before exec'ing the indexer.
+///
+/// Emitted by `kenn-toolchain` (our entrypoint), NOT by the indexer: the
+/// indexer runs as a separate exec'd process and reports only its OWN version
+/// in [`MetaFrame::tool_version`]. This carries the *provisioned* toolchain —
+/// the .NET SDK / Go / Rust the workspace pinned — so a result change is
+/// attributable to the toolchain that produced it. One frame per provisioned
+/// toolchain: an image may provision more than one (python + node for
+/// scip-python).
+#[derive(Debug, Deserialize)]
+pub struct ToolchainFrame {
+    pub language: String,
+    pub version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,6 +260,22 @@ mod tests {
         })
         .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn parses_a_toolchain_frame() {
+        // The entrypoint emits this before the indexer's own frames; the wire
+        // must recognize `type:"toolchain"` and carry language + version.
+        let jsonl = "{\"type\":\"toolchain\",\"language\":\"dotnet\",\"version\":\"9.0.308\"}\n";
+        let mut got: Option<(String, String)> = None;
+        parse_jsonl_stream(&mut jsonl.as_bytes(), |f| -> Result<(), String> {
+            if let Frame::Toolchain(t) = f {
+                got = Some((t.language, t.version));
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got, Some(("dotnet".to_string(), "9.0.308".to_string())));
     }
 
     #[test]
