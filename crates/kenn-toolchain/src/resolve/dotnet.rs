@@ -29,44 +29,90 @@ fn parse_sdk_version(s: &str) -> Option<SdkVersion> {
     })
 }
 
-/// Whether `cand` may satisfy `want` under `policy`.
+/// A global.json `rollForward` policy, parsed once from the raw string.
 ///
-/// The default when `rollForward` is absent is `patch` — NOT `latestMajor`,
-/// which only applies when no version is given at all. Getting this wrong is how
-/// a repo pinning 9.0.308 silently ends up on an 10.x SDK, which is the exact
-/// failure this whole change exists to remove.
-#[expect(
-    clippy::match_same_arms,
-    reason = "a policy mapping table: `disable` and the unknown-policy fallback \
-              share a body by intent, and merging them would hide that the \
-              strict reading is a deliberate choice for unknown input"
-)]
-fn roll_forward_allows(policy: &str, want: SdkVersion, cand: SdkVersion) -> bool {
-    match policy {
-        "disable" => cand == want,
-        "patch" | "latestPatch" => {
-            (cand.major, cand.minor, cand.band) == (want.major, want.minor, want.band)
-                && cand.patch >= want.patch
+/// Two axes the resolver reads independently: how far a candidate may roll
+/// forward ([`Self::allows`]), and — when several satisfy — whether to take the
+/// highest or the lowest ([`Self::prefer_highest`]). So `patch` and `latestPatch`
+/// are NOT the same: both accept the same versions, but `latestPatch` picks the
+/// highest where `patch` rolls forward as little as possible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RollForward {
+    Disable,
+    Patch,
+    LatestPatch,
+    Feature,
+    LatestFeature,
+    Minor,
+    LatestMinor,
+    Major,
+    LatestMajor,
+}
+
+impl RollForward {
+    /// Parse a raw `rollForward` value. An unknown value maps to [`Disable`] —
+    /// the STRICTEST reading — because silently widening the search is how the
+    /// wrong SDK gets picked. The absent-value default (`patch`) is applied by
+    /// the caller, not here.
+    ///
+    /// [`Disable`]: Self::Disable
+    fn parse(s: &str) -> Self {
+        match s {
+            "patch" => Self::Patch,
+            "latestPatch" => Self::LatestPatch,
+            "feature" => Self::Feature,
+            "latestFeature" => Self::LatestFeature,
+            "minor" => Self::Minor,
+            "latestMinor" => Self::LatestMinor,
+            "major" => Self::Major,
+            "latestMajor" => Self::LatestMajor,
+            // "disable" and every unknown value: exact match only.
+            _ => Self::Disable,
         }
-        "feature" | "latestFeature" => {
-            (cand.major, cand.minor) == (want.major, want.minor)
-                && (cand.band, cand.patch) >= (want.band, want.patch)
+    }
+
+    /// Whether `cand` may satisfy `want` under this policy.
+    ///
+    /// The default when `rollForward` is absent is `patch` — NOT `latestMajor`,
+    /// which only applies when no version is given at all. Getting this wrong is
+    /// how a repo pinning 9.0.308 silently ends up on a 10.x SDK.
+    fn allows(self, want: SdkVersion, cand: SdkVersion) -> bool {
+        match self {
+            Self::Disable => cand == want,
+            Self::Patch | Self::LatestPatch => {
+                (cand.major, cand.minor, cand.band) == (want.major, want.minor, want.band)
+                    && cand.patch >= want.patch
+            }
+            Self::Feature | Self::LatestFeature => {
+                (cand.major, cand.minor) == (want.major, want.minor)
+                    && (cand.band, cand.patch) >= (want.band, want.patch)
+            }
+            Self::Minor | Self::LatestMinor => {
+                cand.major == want.major
+                    && (cand.minor, cand.band, cand.patch) >= (want.minor, want.band, want.patch)
+            }
+            Self::Major | Self::LatestMajor => cand >= want,
         }
-        "minor" | "latestMinor" => {
-            cand.major == want.major
-                && (cand.minor, cand.band, cand.patch) >= (want.minor, want.band, want.patch)
-        }
-        "major" | "latestMajor" => cand >= want,
-        // An unknown policy is treated as the strictest reading rather than the
-        // loosest: silently widening the search is how the wrong SDK gets picked.
-        _ => cand == want,
+    }
+
+    /// Among candidates that all [`allow`](Self::allows), take the highest
+    /// (`latest*`) rather than rolling forward as little as possible.
+    fn prefer_highest(self) -> bool {
+        matches!(
+            self,
+            Self::LatestPatch | Self::LatestFeature | Self::LatestMinor | Self::LatestMajor
+        )
     }
 }
 
 /// The `releases.json` URLs whose channel could hold a satisfying SDK. Each is
 /// about a megabyte, so fetching every channel to search it would be wasteful —
 /// and under `disable`/`patch` all but one are provably irrelevant.
-fn reachable_channels(index: &serde_json::Value, policy: &str, want: SdkVersion) -> Vec<String> {
+fn reachable_channels(
+    index: &serde_json::Value,
+    policy: RollForward,
+    want: SdkVersion,
+) -> Vec<String> {
     index
         .get("releases-index")
         .and_then(serde_json::Value::as_array)
@@ -86,8 +132,8 @@ fn reachable_channels(index: &serde_json::Value, policy: &str, want: SdkVersion)
                 band: 99,
                 patch: 99,
             };
-            let reachable = roll_forward_allows(policy, want, ceiling)
-                || (major, minor) == (want.major, want.minor);
+            let reachable =
+                policy.allows(want, ceiling) || (major, minor) == (want.major, want.minor);
             reachable.then(|| e.get("releases.json")?.as_str().map(str::to_string))?
         })
         .collect()
@@ -96,7 +142,7 @@ fn reachable_channels(index: &serde_json::Value, policy: &str, want: SdkVersion)
 /// The best SDK in one channel: `(version, url, hash)`.
 fn best_sdk_in(
     channel: &serde_json::Value,
-    policy: &str,
+    policy: RollForward,
     want: SdkVersion,
     arch: Arch,
     want_prerelease: bool,
@@ -131,7 +177,7 @@ fn best_sdk_in(
             let Some(cand) = parse_sdk_version(version_str) else {
                 continue;
             };
-            if !roll_forward_allows(policy, want, cand) {
+            if !policy.allows(want, cand) {
                 continue;
             }
             let Some((url, hash)) = tarball_for(sdk, arch) else {
@@ -166,10 +212,10 @@ fn tarball_for(sdk: &serde_json::Value, arch: Arch) -> Option<(String, String)> 
 /// `latest*` ones.
 fn merge_best_with(
     best: &mut Option<(SdkVersion, String, String)>,
-    policy: &str,
+    policy: RollForward,
     cand: (SdkVersion, String, String),
 ) {
-    let prefer_highest = policy.starts_with("latest");
+    let prefer_highest = policy.prefer_highest();
     let better = best.as_ref().is_none_or(|(current, _, _)| {
         if prefer_highest {
             cand.0 > *current
@@ -185,7 +231,7 @@ fn merge_best_with(
 /// Fold a channel's best into the running best, preserving whichever wins.
 fn merge_best(
     best: &mut Option<(SdkVersion, String, String)>,
-    policy: &str,
+    policy: RollForward,
     candidate: Option<(SdkVersion, String, String)>,
 ) {
     if let Some(c) = candidate {
@@ -210,9 +256,9 @@ pub(super) fn resolve_dotnet(
     // publishes; `major` scope makes every candidate acceptable, and the
     // `latest*` preference then picks the highest.
     let (pin, policy) = if pin == LATEST {
-        ("0.0.0", "latestMajor")
+        ("0.0.0", RollForward::LatestMajor)
     } else {
-        (pin, roll_forward.unwrap_or("patch"))
+        (pin, RollForward::parse(roll_forward.unwrap_or("patch")))
     };
     let want_prerelease = pin.contains('-');
     let want = parse_sdk_version(pin).ok_or_else(|| ResolveError::NoMatch {
@@ -517,16 +563,27 @@ mod tests {
         let other_band = parse_sdk_version("9.0.412").unwrap();
         let next_major = parse_sdk_version("10.0.302").unwrap();
 
-        assert!(roll_forward_allows("patch", want, same_band_newer));
-        assert!(!roll_forward_allows("patch", want, other_band));
-        assert!(roll_forward_allows("feature", want, other_band));
-        assert!(
-            !roll_forward_allows("latestMinor", want, next_major),
-            "must not cross a major"
-        );
-        assert!(roll_forward_allows("latestMajor", want, next_major));
-        assert!(!roll_forward_allows("disable", want, same_band_newer));
+        let allows = |p: &str, cand| RollForward::parse(p).allows(want, cand);
+        assert!(allows("patch", same_band_newer));
+        assert!(!allows("patch", other_band));
+        assert!(allows("feature", other_band));
+        assert!(!allows("latestMinor", next_major), "must not cross a major");
+        assert!(allows("latestMajor", next_major));
+        assert!(!allows("disable", same_band_newer));
         // An unknown policy is read strictly, not loosely.
-        assert!(!roll_forward_allows("bogus", want, same_band_newer));
+        assert!(!allows("bogus", same_band_newer));
+    }
+
+    /// `latest*` differs from its base in tie-breaking: same acceptance set, but
+    /// `latestPatch` takes the highest satisfying version where `patch` takes the
+    /// lowest. Losing this distinction silently picks the wrong SDK.
+    #[test]
+    fn latest_prefixes_prefer_the_highest() {
+        assert!(!RollForward::parse("patch").prefer_highest());
+        assert!(RollForward::parse("latestPatch").prefer_highest());
+        assert!(RollForward::parse("latestMajor").prefer_highest());
+        // A bogus policy is Disable, which does not roll forward at all.
+        assert!(!RollForward::parse("bogus").prefer_highest());
+        assert_eq!(RollForward::parse("bogus"), RollForward::Disable);
     }
 }
