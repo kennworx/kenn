@@ -161,22 +161,43 @@ kenn SHALL provide a container image per indexer, published to a registry by CI,
 and its default and `kenn init --docker` image references SHALL be pinned by
 digest rather than by mutable tag.
 
+An image SHALL NOT carry a language toolchain: the toolchain version is a
+property of the workspace being indexed, not of the image, and is supplied at run
+time from the shared toolchain cache. An image MAY carry the auxiliary tools its
+indexer spawns — `git` for the TypeScript and Python indexers, for example — and
+those are part of its payload, not a toolchain.
+
 #### Scenario: Default images resolve to a digest
 
 - **WHEN** `kenn init --docker` writes a default image for a language
 - **THEN** the written `image` is a digest-pinned reference
 
+#### Scenario: An image carries no toolchain
+
+- **WHEN** a published indexer image is inspected
+- **THEN** no language toolchain is present in it
+
+#### Scenario: One image serves every declared toolchain version
+
+- **WHEN** two workspaces declaring different toolchain versions for the same
+  language are indexed
+- **THEN** both use the same digest-pinned image
+- **AND** each is indexed with its own declared toolchain version
+
 ### Requirement: kenn can reclaim its Docker cache volumes
 
 kenn SHALL provide a `kenn docker-cache` command to list and remove the named Docker
 volumes its container runtime creates but Docker never garbage-collects. They are of
-two kinds, each **bound to a directory** and named by a one-way hash of it: a
+three kinds. Two are **bound to a directory** and named by a one-way hash of it: a
 per-worktree **build** volume (`kenn-build-<hash>`, bound to the worktree, created
 only under `persist_build_cache`) and a per-repository **dependency** volume
 (`kenn-deps-<hash>`, bound to the repository's main worktree — unless a shared
-cross-repository volume is configured, which is bound to nothing). Each hash SHALL be
-produced by a single function shared by the indexer that creates the volume and the
-command that removes it, so the two never disagree.
+cross-repository volume is configured, which is bound to nothing). The third is the
+machine-wide **toolchain** volume (`kenn-toolchains`), which holds provisioned
+language toolchains, is shared by every workspace on the machine, and is therefore
+bound to no directory. Each hash SHALL be produced by a single function shared by the
+indexer that creates the volume and the command that removes it, so the two never
+disagree.
 
 Because the name is a one-way hash, kenn SHALL label the volumes it creates so the
 command can find and reason about them with no reversible name, no external registry,
@@ -186,13 +207,17 @@ all of kenn's volumes (anything without it is not kenn's concern). Each **bound*
 volume (a build volume, and a per-repository dependency volume) SHALL additionally
 carry a `kenn.workspace` label holding its bound directory's absolute path — the
 **orphan-binding** key, by which cleanup tells whether that directory still exists. A
-configured shared cross-repository dependency volume is `kenn.managed` but bound to no
-directory, so it carries no `kenn.workspace` label and is therefore never an orphan.
+configured shared cross-repository dependency volume, and the toolchain volume, are
+`kenn.managed` but bound to no directory, so they carry no `kenn.workspace` label and
+are therefore never orphans.
 
 `kenn docker-cache ls` SHALL list every `kenn.managed` volume — each with its kind
-(read from the `kenn-build-`/`kenn-deps-` name prefix), its bound `kenn.workspace`
-path (or `shared`), whether that path still exists on disk, and whether the volume is
-attached to a container (in-use) — with a `--json` form for tooling.
+(read from the `kenn-build-`/`kenn-deps-`/`kenn-toolchains` name), its bound
+`kenn.workspace` path (or `shared`), whether that path still exists on disk, and
+whether the volume is attached to a container (in-use) — with a `--json` form for
+tooling. For the toolchain volume, `ls` SHALL additionally report the provisioned
+toolchains it holds, by language and resolved version, with their sizes, so a user
+can see what is consuming the space before deciding what to reclaim.
 
 `kenn docker-cache clean` SHALL remove volumes, scoped by exactly one (mutually
 exclusive) mode: no flag removes only the **current worktree's build** volume;
@@ -202,10 +227,14 @@ build volume while the repository's dependency volume (bound to the still-presen
 worktree) survives, and deleting the whole repository reclaims both its build and its
 dependency volumes, besides self-healing any volume leaked by an earlier crash;
 `--all` removes every `kenn.managed` volume regardless of binding (including a
-configured shared volume); `--workspace <path>` removes the build volume for an
-existing worktree at `<path>` — targeting a repository's dependency volume directly is
-out of scope (it is reclaimed by `--orphans` on repository deletion, or removed with
-`docker volume rm`). Because `--orphans` keys on on-disk existence, a directory whose
+configured shared volume and the toolchain volume); `--workspace <path>` removes the
+build volume for an existing worktree at `<path>` — targeting a repository's dependency
+volume directly is out of scope (it is reclaimed by `--orphans` on repository deletion,
+or removed with `docker volume rm`). Because the toolchain volume is the largest and is
+expensive to repopulate, it SHALL also be targetable on its own: `--toolchains`
+removes it entirely, and `--toolchain <language>[@<version>]` removes only the named
+provisioned toolchains, leaving the volume and its other occupants intact. Because
+`--orphans` keys on on-disk existence, a directory whose
 drive or network mount is currently detached is treated as gone and its volume
 reclaimed — accepted, since caches rebuild; likewise, deleting a repository's main
 worktree while linked worktrees remain (which already breaks git, since the shared
@@ -238,6 +267,21 @@ removing nothing, whereas `ls` SHALL fail with an actionable error.
 - **AND** a configured shared cross-repository dependency volume, bound to nothing, is
   never treated as an orphan
 
+#### Scenario: The toolchain volume survives orphan sweeps
+
+- **WHEN** `kenn docker-cache clean --orphans` runs after a repository is deleted
+- **THEN** the toolchain volume is left intact, because it is bound to no directory
+- **AND** a subsequent index of another workspace still finds its toolchains
+  provisioned
+
+#### Scenario: Toolchains are listed and reclaimed individually
+
+- **WHEN** `kenn docker-cache ls` runs with two provisioned toolchains
+- **THEN** the toolchain volume is listed with each toolchain's language, resolved
+  version, and size
+- **AND WHEN** `kenn docker-cache clean --toolchain <language>@<version>` is run
+- **THEN** only that toolchain is removed and the others remain provisioned
+
 #### Scenario: ls shows kind, binding, existence, and in-use
 
 - **WHEN** `kenn docker-cache ls` runs with a build volume for a live worktree
@@ -250,13 +294,14 @@ removing nothing, whereas `ls` SHALL fail with an actionable error.
 
 - **WHEN** `kenn docker-cache clean` runs with no flags inside a worktree
 - **THEN** only that worktree's `kenn-build-<hash>` volume is removed
-- **AND** other worktrees' build volumes and the repository's dependency volume are
-  left intact
+- **AND** other worktrees' build volumes, the repository's dependency volume, and the
+  toolchain volume are left intact
 
 #### Scenario: --all sweeps every kenn volume
 
 - **WHEN** `kenn docker-cache clean --all` runs
-- **THEN** every kenn volume — build and dependency, bound or shared — is removed
+- **THEN** every kenn volume — build, dependency, and toolchain, bound or shared — is
+  removed
 - **AND** a volume attached to a running container is skipped, not removed
 
 #### Scenario: Cleaning is idempotent, in-use-safe, and error-honest
@@ -274,4 +319,67 @@ removing nothing, whereas `ls` SHALL fail with an actionable error.
 - **THEN** it reports docker unavailable and exits 0 without removing anything
 - **AND WHEN** `kenn docker-cache ls` is invoked while `docker` is not runnable
 - **THEN** it fails with an actionable error
+
+### Requirement: Container indexers mount the shared toolchain cache
+
+When running an indexer in a container, kenn SHALL mount the kenn-managed
+toolchain cache and point the language's toolchain root at it, so a provisioned
+toolchain is shared across every workspace on the machine. This cache is distinct
+from the per-repository dependency cache: dependencies belong to a repository,
+toolchains do not.
+
+#### Scenario: A toolchain provisioned for one repository serves another
+
+- **WHEN** two different repositories resolving to the same toolchain version are
+  indexed in sequence
+- **THEN** the second run reuses the provisioned toolchain without downloading it
+
+#### Scenario: Toolchain and dependency caches are separate
+
+- **WHEN** a repository's dependency cache is reclaimed
+- **THEN** the shared toolchain cache is unaffected
+- **AND** a subsequent index still finds its toolchain provisioned
+
+### Requirement: Provisioning happens inside the indexer container
+
+Every indexer image SHALL run a kenn-authored entrypoint that resolves the
+workspace's pinned toolchain, provisions it into the mounted cache when absent,
+and then execs the indexer. kenn SHALL NOT orchestrate toolchain downloads from
+the host; its only use of `docker` beyond running indexers is building images.
+
+The entrypoint SHALL be present in every image, including those whose indexer is
+a third-party binary with no kenn code in it — that is the only uniform place
+provisioning can happen for those languages.
+
+#### Scenario: A third-party indexer still gets its toolchain
+
+- **WHEN** a language whose indexer is a third-party binary is indexed and its
+  pinned toolchain is absent from the cache
+- **THEN** the entrypoint provisions it before the indexer runs
+- **AND** indexing completes using that toolchain
+
+#### Scenario: The host does not download toolchains
+
+- **WHEN** a containerized language is indexed
+- **THEN** kenn performs no toolchain download on the host
+
+### Requirement: A changed toolchain pin forces a reindex
+
+An index SHALL record the resolved toolchain version it was produced with, and
+SHALL report it in the index run summary. A workspace's pin files are tracked
+content, so editing one already changes the staleness key and triggers a reindex;
+this requirement adds no separate signature mechanism, and the recorded version
+exists so a change is visible and attributable rather than silent.
+
+#### Scenario: Editing the pin file makes the workspace stale
+
+- **WHEN** a workspace's toolchain pin file is edited to name a different version
+- **THEN** the workspace is reported stale
+- **AND** the next index runs against the newly resolved toolchain
+
+#### Scenario: The run summary names the toolchain it used
+
+- **WHEN** an index run completes
+- **THEN** the summary reports the resolved toolchain version used for each
+  containerized language
 

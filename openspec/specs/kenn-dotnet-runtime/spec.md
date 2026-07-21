@@ -12,17 +12,39 @@ runtime and the MSBuild assemblies it hosts share a major version. Mixing a
 process runtime with MSBuild assemblies of a different major version is
 prohibited: it is the mismatch that produced `AccessViolationException` crashes.
 
-#### Scenario: Framework-dependent binary runs on the SDK-10 base
+The indexer's own runtime alignment is independent of the SDK it drives. The
+indexer SHALL be published self-contained, so it carries its net10 runtime and
+runs unchanged regardless of which SDK major the target workspace pins. The SDK
+used to evaluate the target is determined by the workspace's `global.json` and
+provisioned into the shared toolchain cache before the indexer starts; the
+indexer SHALL locate it through `DOTNET_ROOT` and SHALL NOT install it itself.
 
-- **WHEN** kenn-dotnet is published framework-dependent and run on a
-  `mcr.microsoft.com/dotnet/sdk:10.0` image
-- **THEN** the binary launches (the net10 shared runtime is present)
-- **AND** indexing a C# project emits symbol frames without error
+Self-contained does not imply single-file. There are two distributions and they
+differ deliberately: the host artifact in `./build` is the single-file native
+build governed by the single-file requirement, which self-extracts its BuildHost
+on every start; the image payload is self-contained **multi-file**, laid out as a
+directory so nothing is extracted at run time. Consolidating them would pay the
+self-extraction cost on every containerized index for no benefit.
+
+#### Scenario: The self-contained binary runs where no SDK major matches it
+
+- **WHEN** kenn-dotnet runs against a workspace whose provisioned SDK is an older
+  major than the indexer's own runtime
+- **THEN** the binary launches (it carries its own runtime)
+- **AND** indexing that workspace emits symbol frames without error
 
 #### Scenario: A net10 target project is indexed
 
-- **WHEN** the docker image indexes a project targeting `net10.0`
+- **WHEN** the indexer indexes a project targeting `net10.0`
 - **THEN** the C# package appears in the workspace index with its type symbols
+
+#### Scenario: The SDK comes from the cache, not the image
+
+- **WHEN** the indexer starts in a container carrying no .NET SDK
+- **THEN** it resolves the SDK through `DOTNET_ROOT` from the shared toolchain
+  cache
+- **AND** `dotnet restore` binds package assemblies so package types resolve to
+  their fully-qualified names
 
 ### Requirement: Out-of-process project evaluation
 
