@@ -24,9 +24,17 @@
       provisioned toolchain's language, resolved version, and size; add
       `clean --toolchains` and `clean --toolchain <lang>[@<version>]`. Confirm
       `--orphans` leaves it intact (it is bound to no directory).
-- [ ] 1.7 Record the resolved toolchain version with the index and report it in
+- [x] 1.7 Record the resolved toolchain version with the index and report it in
       the run summary. Do NOT add a second staleness input — pin files are
       tracked, so the existing staleness key already covers edits.
+      DONE for the JSONL-wire languages (C#/Swift): the entrypoint emits a
+      `toolchain` frame → kenn-indexer captures it → SnapshotMeta.toolchains →
+      `kenn status` / overview.md / meta.json. Verified e2e on a real C# repo
+      pinning global.json 9.0.308 (rollForward latestMinor): status shows
+      `toolchains: dotnet 9.0.316` — the version ACTUALLY provisioned, not the
+      pin. SCIP producers (rust/go/python/node) still report nothing — their
+      stdout is not the wire, so they need a separate provenance channel (a
+      follow-up, tracked as a non-goal here).
 - [x] 1.8 Make an unresolvable or uninstallable pin a **fatal, named** failure —
       quote the pin and its source file; never fall back to a present toolchain.
       Mutation-check: break resolution, confirm non-zero exit and the pin in the
@@ -87,6 +95,10 @@
 - [ ] 4.3 Build and verify each of the six images by indexing a real fixture:
       csharp (pinned non-latest major), swift (the existing Linux/Alamofire run),
       typescript, rust, go, python.
+      csharp DONE: `docker buildx bake -f docker/bake.hcl --load` built all six
+      clean locally, and kenn-csharp:local provisioned SDK 9.0.316 on-demand
+      (global.json 9.0.308 latestMinor) and indexed a real repo through the
+      docker runtime. The other five still to run.
 - [x] 4.4 Set `kenn-toolchain` as the ENTRYPOINT of every image, execing the real
       indexer behind it, and confirm each indexer's argv still reaches it intact.
 
