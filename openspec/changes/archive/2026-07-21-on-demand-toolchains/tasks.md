@@ -116,9 +116,11 @@
         6.3 (partial only because its iOS/watchOS xcodeproj examples need
         xcodebuild, unavailable on Linux).
       - typescript: colinhacks/zod → 4707 symbols (embedded runtime, no provision).
-      - rust: `just docker-index-smoke` → provisions `stable`, output host-owned.
+      - rust: BurntSushi/byteorder → 358 symbols (provisions `stable`; also
+        smoke-checked via `just docker-index-smoke`, output host-owned).
       - go: google/uuid → 219 symbols (provisions latest go).
-      - python: `just docker-index-smoke` → provisions latest + node.
+      - python: psf/requests → 462 symbols (provisions latest + node; also
+        smoke-checked via `just docker-index-smoke`).
 - [x] 4.4 Set `kenn-toolchain` as the ENTRYPOINT of every image, execing the real
       indexer behind it, and confirm each indexer's argv still reaches it intact.
 
