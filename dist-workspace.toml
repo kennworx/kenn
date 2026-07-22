@@ -14,6 +14,14 @@ publish-jobs = ["homebrew"]
 install-path = "CARGO_HOME"
 hosting = "github"
 install-updater = false
+# llama.cpp (vendored by kenn-embed) compiles its C++ against the DYNAMIC MSVC
+# CRT (/MD), so dist's default `+crt-static` Rust link left 18 unresolved
+# `__imp_*` CRT symbols (LNK1120) on x86_64-pc-windows-msvc — the C++ objects
+# want dynamic-CRT imports the static UCRT can't provide. Link the dynamic CRT
+# to match. The .exe then needs the VC++ runtime (vcruntime140.dll), which
+# essentially every dev machine has; a fully-static build would instead force
+# llama's C++ to /MT (CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded).
+msvc-crt-static = false
 
 # No x86_64-apple-darwin: Intel Macs are not a target worth carrying a build for.
 # No musl: kenn-embed vendors llama.cpp, so every build is a C++ build, and a
