@@ -50,26 +50,6 @@ fn atlas_context(
     }
 }
 
-/// Maintain a stable `.kenn/atlas -> local/live/atlas` symlink (through the
-/// maintained `live` pointer, so it tracks the current run) and return that
-/// stable dir. Best-effort; `None` when unlinkable or off unix.
-#[cfg(unix)]
-fn atlas_pointer(layout: &Layout) -> Option<std::path::PathBuf> {
-    let link = layout.committed_root().join("atlas");
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "best-effort: remove a possibly-absent stale symlink before recreating it"
-    )]
-    let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink("local/live/atlas", &link).ok()?;
-    Some(link)
-}
-
-#[cfg(not(unix))]
-fn atlas_pointer(_layout: &Layout) -> Option<std::path::PathBuf> {
-    None
-}
-
 pub fn run(
     layout: Layout,
     config: Config,
@@ -295,16 +275,14 @@ async fn run_async(
         &format!("live → {}", snap_path.display()),
     );
 
-    // Atlas handle (`atlas` capability): maintain a stable convenience pointer
-    // `.kenn/atlas -> local/live/atlas` (through the maintained `live` symlink,
-    // so it tracks the current run), then announce that stable `index.md` path on
-    // a marked, greppable line — human mode only, so a `--json` run's stream isn't
-    // corrupted (the JSON field is a fast-follow).
-    if snap_path.join("atlas").join("index.md").exists() {
-        let announced = atlas_pointer(&layout).unwrap_or_else(|| snap_path.join("atlas"));
-        if !json {
-            println!("atlas: {}", announced.join("index.md").display());
-        }
+    // Atlas handle (`atlas` capability): announce the just-published run's
+    // atlas `index.md` on a marked, greppable line — human mode only, so a
+    // `--json` run's stream isn't corrupted (the JSON field is a fast-follow).
+    // `live` is a pointer file now (no traversable symlink to hang a stable
+    // `.kenn/atlas` off), so the path names the published run directly.
+    let atlas_index = snap_path.join("atlas").join("index.md");
+    if atlas_index.exists() && !json {
+        println!("atlas: {}", atlas_index.display());
     }
 
     // Capability probe: a Rust unit that produced definitions but zero body

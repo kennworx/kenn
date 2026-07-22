@@ -73,12 +73,16 @@ pub fn is_alive(pid: u32) -> bool {
 
 #[must_use]
 #[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "windows-sys process-handle FFI (OpenProcess/CloseHandle); a failed open returns a null handle, checked before use and never dereferenced"
+)]
 pub fn is_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-    // Safety: OpenProcess returns 0 on failure; we don't dereference.
+    // Safety: OpenProcess returns a null handle on failure; we don't dereference.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle == 0 {
+    if handle.is_null() {
         return false;
     }
     // Safety: handle is a valid HANDLE just returned by OpenProcess.

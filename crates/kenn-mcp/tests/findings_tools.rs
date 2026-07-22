@@ -85,7 +85,7 @@ async fn publish_empty_findings_live(workspace: &Path) {
         .expect("stage findings");
     let live = layout.live_path();
     drop(std::fs::remove_file(&live));
-    std::os::unix::fs::symlink("runs/findings-test-run", &live).expect("live symlink");
+    std::fs::write(&live, "runs/findings-test-run").expect("live pointer");
     drop(lock);
 }
 

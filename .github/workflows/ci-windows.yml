@@ -1,0 +1,36 @@
+# Windows compile gate (openspec: windows-support, D5).
+#
+# kenn's Windows support cannot be checked from a macOS/Linux dev machine: the
+# `cfg(windows)` paths and the vendored llama.cpp MSVC/bindgen build only ever
+# compile here, and `rustc` segfaults under `qemu-x86_64` on an arm64 host. This
+# job is the substitute — treat "green locally" as saying nothing about Windows.
+#
+# `cargo check`, not test: the suite needs an embedding model and Docker. The
+# failure mode being gated is "does not compile on Windows" (the first thing the
+# v0.1.0 release run hit: kenn-store E0433/E0599), which `check` catches. This
+# does NOT prove `kenn index` works — the earlier symlink-flip bug compiled fine
+# and failed at runtime; that is task 7.3's manual smoke, not CI's job.
+name: ci-windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install LLVM (libclang for the llama-cpp-sys bindgen build)
+        run: choco install llvm --no-progress -y
+      - name: cargo check --workspace --all-targets
+        env:
+          # bindgen locates libclang here; cmake ships on the windows-2022 image.
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: cargo check --workspace --all-targets

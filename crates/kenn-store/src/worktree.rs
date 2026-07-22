@@ -313,7 +313,7 @@ mod tests {
 
         let parent_store = Store::open_default(repo.path()).unwrap();
         let parent_lock = parent_store.lock_path();
-        let parent_live_meta_before = fs::symlink_metadata(parent_store.live_path()).unwrap();
+        let parent_live_meta_before = fs::metadata(parent_store.live_path()).unwrap();
         let parent_lock_meta_before = fs::metadata(&parent_lock)
             .ok()
             .map(|m| m.modified().unwrap());
@@ -325,7 +325,7 @@ mod tests {
 
         // Parent live still points at the same snapshot, untouched.
         assert_eq!(parent_store.live_target().unwrap(), parent_snap);
-        let parent_live_meta_after = fs::symlink_metadata(parent_store.live_path()).unwrap();
+        let parent_live_meta_after = fs::metadata(parent_store.live_path()).unwrap();
         assert_eq!(
             parent_live_meta_before.modified().unwrap(),
             parent_live_meta_after.modified().unwrap()

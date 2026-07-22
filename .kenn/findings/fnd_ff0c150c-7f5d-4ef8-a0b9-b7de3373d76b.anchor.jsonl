@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"crates/kenn-server/src/pid.rs","ts":"2026-07-22T15:43:27.676178Z","sha":"e744e48458f259a7"}
+{"op":"attach","anchor":"crates/kenn-server/src/runtime.rs","ts":"2026-07-22T15:43:27.676178Z","sha":"75db47ec5a3cff78"}
+{"op":"attach","anchor":"crates/kenn-store/src/layout/resolve.rs","ts":"2026-07-22T15:43:27.676178Z","sha":"9287a4125dcba4ed"}

@@ -25,6 +25,14 @@ ship in the image.
 | swift | kenn-swift | Swift toolchain (see below) |
 | typescript | kenn-ts (bun embedded) | — |
 
+## Platform support
+
+The images are **Linux-only** — one `linux/<arch>` payload per language, no
+Windows variant. On Windows the docker runtime is unsupported: `kenn init
+--docker` declines and points at local toolchains, or Docker Desktop with the
+WSL2 backend, where these same Linux images run unchanged. macOS and Linux run
+them natively.
+
 ## Shape
 
 Every image is `ubuntu:noble` or a noble-based vendor image, and runs

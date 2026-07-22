@@ -235,18 +235,30 @@ impl Layout {
         self.derived_root.join("findings")
     }
 
-    /// `<derived_root>/live` — relative symlink to the active run.
+    /// `<derived_root>/live` — a small text pointer file naming the active
+    /// run by a path relative to this directory (D1).
     #[must_use]
     pub fn live_path(&self) -> PathBuf {
         self.derived_root.join("live")
     }
 
-    /// Resolve `live` to its target run directory.
+    /// Resolve `live` to its target run directory. The single `live` reader
+    /// in the workspace (`Store::live_target` delegates here, D2).
+    ///
+    /// Degrades to `None` — never panics — when `live` is absent, empty, or
+    /// (on an old store) still a symlink: `read_to_string` follows a symlink
+    /// to a directory and errors, so the user sees a reindex, per the
+    /// no-migration policy (D3).
     #[must_use]
     pub fn live_target(&self) -> Option<PathBuf> {
-        let target = fs::read_link(self.live_path()).ok()?;
+        let contents = fs::read_to_string(self.live_path()).ok()?;
+        let target = contents.trim();
+        if target.is_empty() {
+            return None;
+        }
+        let target = Path::new(target);
         let resolved = if target.is_absolute() {
-            target
+            target.to_path_buf()
         } else {
             self.derived_root.join(target)
         };

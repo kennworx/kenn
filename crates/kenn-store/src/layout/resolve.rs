@@ -51,15 +51,20 @@ pub(super) fn resolve_location_spec(
     }
 }
 
-/// Walk up to the nearest existing ancestor of `path`, return its
-/// `stat.dev`. The starting path may not yet exist (e.g.,
-/// `[vectors] location` set to a directory we haven't created yet),
-/// so we look at the closest existing parent — device id is a mount
-/// property, so any existing ancestor on the same mount gives the
-/// right answer (per design D8).
+/// A filesystem-identity token for `path`'s nearest existing ancestor. The
+/// starting path may not yet exist (e.g., `[vectors] location` set to a
+/// directory we haven't created yet), so we look at the closest existing
+/// parent — filesystem identity is a mount property, so any existing
+/// ancestor on the same mount gives the right answer (per design D8).
 ///
-/// Returns `None` only if no ancestor up to `/` exists, which would
+/// On unix this is `stat.dev`. Windows has no `st_dev`; its analogue is the
+/// volume (drive letter or UNC share), so the Windows arm hashes the
+/// canonicalised volume prefix to a `u64` — same comparison, stable std
+/// only (D4).
+///
+/// Returns `None` only when no ancestor up to the root exists, which would
 /// indicate a pathologically broken filesystem.
+#[cfg(unix)]
 fn ancestor_device_id(path: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     let mut cur: Option<&Path> = Some(path);
@@ -72,8 +77,29 @@ fn ancestor_device_id(path: &Path) -> Option<u64> {
     None
 }
 
-/// `true` when `a` and `b` resolve to the same filesystem (same
-/// `stat.dev` on their nearest existing ancestors). Used at
+#[cfg(not(unix))]
+fn ancestor_device_id(path: &Path) -> Option<u64> {
+    use std::path::Component;
+    let mut cur: Option<&Path> = Some(path);
+    while let Some(p) = cur {
+        if let Ok(canon) = fs::canonicalize(p) {
+            // Fall through to the parent if this ancestor has no volume prefix,
+            // mirroring the unix arm's walk-up on a failed probe (rather than
+            // aborting the whole lookup to `None`).
+            if let Some(prefix) = canon.components().find_map(|c| match c {
+                Component::Prefix(pre) => Some(pre.as_os_str().to_os_string()),
+                _ => None,
+            }) {
+                return Some(xxh3_64(prefix.as_encoded_bytes()));
+            }
+        }
+        cur = p.parent();
+    }
+    None
+}
+
+/// `true` when `a` and `b` resolve to the same filesystem (equal
+/// `ancestor_device_id` on their nearest existing ancestors). Used at
 /// `Layout::resolve()` time to cache the writer-tmp-dir choice (D8).
 /// Returns `true` defensively when either device id cannot be
 /// determined; the worst case is a misclassification that surfaces

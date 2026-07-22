@@ -91,17 +91,12 @@ impl Store {
         self.run_dir(run_id).join("report.json")
     }
 
-    /// Resolve `live` to its target snapshot directory.
+    /// Resolve `live` to its target snapshot directory. Delegates to the
+    /// single reader on [`Layout`] so the pointer-file format is read in
+    /// exactly one place (D2).
     #[must_use]
     pub fn live_target(&self) -> Option<PathBuf> {
-        let live = self.live_path();
-        let target = fs::read_link(&live).ok()?;
-        let resolved = if target.is_absolute() {
-            target
-        } else {
-            self.local_dir().join(target)
-        };
-        resolved.is_dir().then_some(resolved)
+        self.layout.live_target()
     }
 
     /// Run directories under `runs/`, sorted ascending by id.
@@ -159,14 +154,32 @@ mod tests {
         let store = Store::open_default(ws.path()).unwrap();
         let run_dir = store.runs_dir().join("2026-05-01T15-30-00Z");
         fs::create_dir_all(&run_dir).unwrap();
-        std::os::unix::fs::symlink(Path::new("runs/2026-05-01T15-30-00Z"), store.live_path())
-            .unwrap();
+        fs::write(store.live_path(), "runs/2026-05-01T15-30-00Z").unwrap();
 
-        assert!(store.live_path().is_symlink());
+        assert!(store.live_path().is_file());
+        assert!(!store.live_path().is_symlink());
         assert_eq!(store.live_target().unwrap(), run_dir);
         let runs = store.list_runs().unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id, "2026-05-01T15-30-00Z");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn old_symlink_live_degrades_to_none() {
+        // D3: a store upgraded from a pre-pointer-file binary has `live` as a
+        // symlink into the run dir. The pointer-file reader must resolve it to
+        // None (→ reindex), not panic and not follow the symlink.
+        let ws = workspace();
+        let store = Store::open_default(ws.path()).unwrap();
+        let run_dir = store.runs_dir().join("2026-05-01T15-30-00Z");
+        fs::create_dir_all(&run_dir).unwrap();
+        std::os::unix::fs::symlink("runs/2026-05-01T15-30-00Z", store.live_path()).unwrap();
+        assert!(store.live_path().is_symlink());
+        assert!(
+            store.live_target().is_none(),
+            "an old-store `live` symlink must degrade to None, not be followed"
+        );
     }
 
     #[test]

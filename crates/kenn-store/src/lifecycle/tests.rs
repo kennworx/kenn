@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tempfile::TempDir;
 
@@ -208,8 +208,7 @@ fn gc_keeps_n_and_drops_the_rest() {
         mark_complete(&dir);
     }
     // Point live at the newest.
-    let live_target = "runs/2026-05-03T00-00-00Z";
-    std::os::unix::fs::symlink(Path::new(live_target), s.live_path()).unwrap();
+    fs::write(s.live_path(), "runs/2026-05-03T00-00-00Z").unwrap();
 
     // Retain 2 → keep the 2 most-recently-accessed (which tiebreaks
     // on id), drop the third. Live is exempt from eviction in
@@ -312,26 +311,23 @@ fn decide_startup_state_reindexes_on_stale_schema_despite_key_match() {
 }
 
 /// Repoint `live` from `runs/A` to `runs/B` at index-pass cadence
-/// (one flip per 50 ms — far faster than any real `kenn index`
-/// pass, which is minutes apart) while a reader polls at the same
-/// cadence (one `read_link` per 100 ms — far faster than the
-/// indexer, which resolves `live` once per startup). Every
-/// observed target MUST be one of the two valid relative paths
-/// and no `read_link` call MUST error. This locks in the
-/// `symlink(...) → rename(...)` pattern from D7 against
-/// realistic readers.
+/// (one flip per 50 ms — far faster than any real `kenn index` pass,
+/// which is minutes apart) while a reader resolves the pointer at the
+/// same cadence (one `read_to_string` per 100 ms — far faster than the
+/// indexer, which resolves `live` once per startup). Every observed
+/// pointer MUST be one of the two valid relative paths, and no read
+/// MUST fail OR observe an absent, empty, or truncated pointer. This
+/// locks in the write-temp-then-`rename` pattern (D1) against realistic
+/// readers.
 ///
-/// **macOS APFS note.** A *hot-loop* reader (no sleep, kHz rate)
-/// does see transient `EINVAL` from `readlink(2)` during the
-/// rename window — the rename syscall is atomic at the dirent
-/// level but the kernel exposes a brief moment where path
-/// resolution returns "not a symbolic link." The window is roughly
-/// the duration of the rename itself (~1 ms here), so any reader
-/// polling slower than the rename completes avoids it. No kenn
-/// consumer polls anywhere near this rate; the strict no-error
-/// guarantee against an unbounded hot-loop reader is out of scope.
+/// Empty/truncated is the failure a symlink could not produce and a
+/// pointer file could: `atomic_flip_live` writes a complete temp file
+/// and renames it over `live`, so a reader sees the whole old file or
+/// the whole new one, never a partial write. Mutation-checked by
+/// writing the pointer in place instead of via rename — that turns this
+/// test red (task 4.2).
 #[test]
-fn live_symlink_repoint_is_atomic_for_realistic_readers() {
+fn live_pointer_repoint_is_atomic_for_realistic_readers() {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -348,13 +344,13 @@ fn live_symlink_repoint_is_atomic_for_realistic_readers() {
     fs::create_dir_all(&run_a).unwrap();
     fs::create_dir_all(&run_b).unwrap();
 
-    // Bootstrap `live` → A so the reader thread sees a valid
-    // symlink from its very first read.
+    // Bootstrap `live` → A so the reader sees a valid pointer from its
+    // very first read.
     atomic_flip_live(&s.live_path(), &run_a).unwrap();
 
     // Stored relative to `derived_root` (live's own parent).
-    let expected_a: PathBuf = "runs/2026-05-01T00-00-00Z".into();
-    let expected_b: PathBuf = "runs/2026-05-02T00-00-00Z".into();
+    let expected_a = "runs/2026-05-01T00-00-00Z";
+    let expected_b = "runs/2026-05-02T00-00-00Z";
 
     let stop = Arc::new(AtomicBool::new(false));
     let read_errors = Arc::new(AtomicUsize::new(0));
@@ -367,12 +363,22 @@ fn live_symlink_repoint_is_atomic_for_realistic_readers() {
     let reads_r = Arc::clone(&reads);
     let report_err = Arc::clone(&first_error);
     let reader = thread::spawn(move || {
-        let mut observed: HashSet<PathBuf> = HashSet::new();
+        let mut observed: HashSet<String> = HashSet::new();
         while !stop_r.load(Ordering::Relaxed) {
-            match fs::read_link(&live_path) {
-                Ok(t) => {
-                    observed.insert(t);
-                    reads_r.fetch_add(1, Ordering::Relaxed);
+            match fs::read_to_string(&live_path) {
+                Ok(raw) => {
+                    let t = raw.trim();
+                    if t.is_empty() {
+                        // Absent-content read: an empty or truncated pointer,
+                        // the failure a symlink could not produce.
+                        if errs_r.fetch_add(1, Ordering::Relaxed) == 0 {
+                            *report_err.lock().unwrap() =
+                                Some("empty/truncated pointer".to_string());
+                        }
+                    } else {
+                        observed.insert(t.to_string());
+                        reads_r.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 Err(e) => {
                     if errs_r.fetch_add(1, Ordering::Relaxed) == 0 {
@@ -402,16 +408,16 @@ fn live_symlink_repoint_is_atomic_for_realistic_readers() {
     let first_err = first_error.lock().unwrap().clone();
     assert_eq!(
         err_count, 0,
-        "reader observed {err_count} broken-symlink read(s) at 100ms cadence; first error: {first_err:?}",
+        "reader observed {err_count} failed/empty pointer read(s) at 100ms cadence; first error: {first_err:?}",
     );
     assert!(
         reads.load(Ordering::Relaxed) > 0,
-        "reader thread never ran a successful read_link",
+        "reader thread never ran a successful pointer read",
     );
     for t in &observed {
         assert!(
-            t == &expected_a || t == &expected_b,
-            "observed unexpected symlink target {t:?}; expected {expected_a:?} or {expected_b:?}",
+            t == expected_a || t == expected_b,
+            "observed unexpected pointer {t:?}; expected {expected_a:?} or {expected_b:?}",
         );
     }
 }

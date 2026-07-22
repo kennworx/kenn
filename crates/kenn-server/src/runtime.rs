@@ -123,6 +123,10 @@ fn wait_until_dead(pid_u: u32, total: Duration, interval: Duration) -> bool {
 }
 
 #[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "windows-sys process FFI (OpenProcess/TerminateProcess/CloseHandle) on a validated PID; handles are checked non-null before use"
+)]
 pub fn stop(pid_path: &Path) -> Result<bool, ServerError> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
@@ -133,9 +137,9 @@ pub fn stop(pid_path: &Path) -> Result<bool, ServerError> {
         pid::remove(pid_path)?;
         return Ok(false);
     }
-    // Safety: passing a u32 PID; OpenProcess returns 0 on failure.
+    // Safety: passing a u32 PID; OpenProcess returns a null handle on failure.
     let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid_u) };
-    if handle == 0 {
+    if handle.is_null() {
         return Err(ServerError::Other(format!("OpenProcess({pid_u}) failed")));
     }
     // Safety: handle is a valid HANDLE just returned by OpenProcess.

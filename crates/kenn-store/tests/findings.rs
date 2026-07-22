@@ -46,7 +46,7 @@ async fn publish_live_run(workspace: &Path) {
         .expect("stage findings");
     let live = layout.live_path();
     drop(std::fs::remove_file(&live));
-    std::os::unix::fs::symlink(format!("runs/{run_id}"), &live).expect("live symlink");
+    std::fs::write(&live, format!("runs/{run_id}")).expect("live pointer");
     drop(lock);
 }
 

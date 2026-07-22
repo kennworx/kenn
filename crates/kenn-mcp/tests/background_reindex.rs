@@ -62,7 +62,7 @@ async fn corrupt_newer_snapshot_does_not_blank_server() {
     std::fs::create_dir_all(&bogus).unwrap();
     let live = store.live_path();
     drop(std::fs::remove_file(&live)); // OK if it doesn't exist yet
-    std::os::unix::fs::symlink(std::path::Path::new("runs/2099-01-01T00-00-00Z"), &live).unwrap();
+    std::fs::write(&live, "runs/2099-01-01T00-00-00Z").unwrap();
 
     poll_once(&state, &state.layout(), false, 0).await;
     // Reader stayed on snap_a because opening the bogus dir failed.

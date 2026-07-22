@@ -92,6 +92,10 @@ volume — because an image with a baked toolchain and a repo that pins a
 different one don't fail loudly, they index zero files and exit 0. See
 [`docker/README.md`](docker/README.md).
 
+The images are Linux-only. On **Windows** the docker runtime is unsupported —
+`kenn init --docker` declines and names local toolchains or WSL2 (where the
+Linux images run unchanged); native Windows uses local toolchains.
+
 ### Installing kenn's indexers
 
 `kenn-ts`, `kenn-dotnet` and `kenn-swift` are kenn's own — opt in per language,

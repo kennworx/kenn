@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"crates/kenn-store/src/lifecycle/atomic.rs","ts":"2026-07-22T14:54:45.171593Z","sha":"f400a8ca68bae46d"}
+{"op":"attach","anchor":"crates/kenn-store/src/layout/types.rs","ts":"2026-07-22T14:54:45.171593Z","sha":"86f5a4abd6b7a7e8"}
+{"op":"attach","anchor":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-22T14:54:45.171593Z","sha":"bdbd9c761098656f"}

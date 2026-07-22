@@ -28,12 +28,19 @@ Every target builds on its **own architecture** — see
 | `aarch64-apple-darwin` | `macos-14` |
 | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` |
 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` |
+| `x86_64-pc-windows-msvc` | dist default (verify with `dist plan`) |
 
-**No Windows, and no Intel macOS.** Intel Macs are not worth carrying a build
-for. Windows is deliberately absent because kenn cannot *run* there yet —
-`atomic_flip_live` has a `cfg(not(unix))` arm that always returns an error, so
-every `kenn index` fails at the final live-pointer flip. See
-`openspec/changes/windows-support`; the target returns per that change's task 7.
+**No Intel macOS** — not worth carrying a build for.
+
+**Windows returned** (windows-support task 7). `live` is a pointer file now, so
+`atomic_flip_live` no longer has a POSIX-only arm, and the whole workspace
+compiles on Windows — the `ci-windows.yml` `cargo check` gate is green (after
+fixing kenn-store's device-id arm and kenn-server's stale windows-sys FFI). Two
+things `cargo check` does NOT prove: (1) the release build links + packages —
+heavier than a check, so watch the first tagged Windows build; a broken target
+still blocks publication for every platform (below); (2) that `kenn index`
+actually runs — that is a manual smoke on a real unelevated Windows host
+(task 7.3).
 
 A listed target that fails does not fail alone: `host` and
 `publish-homebrew-formula` run after the full matrix, so one broken target

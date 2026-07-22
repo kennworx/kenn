@@ -6,8 +6,9 @@ members = ["cargo:."]
 [dist]
 cargo-dist-version = "0.32.0"
 ci = "github"
-# No powershell installer while there is no windows target for it to install.
-installers = ["shell", "homebrew"]
+# The powershell installer returns with the Windows target (task 7) — the shell
+# installer is a bash script, so Windows users need this one.
+installers = ["shell", "powershell", "homebrew"]
 tap = "kennworx/homebrew-tap"
 publish-jobs = ["homebrew"]
 install-path = "CARGO_HOME"
@@ -18,18 +19,21 @@ install-updater = false
 # No musl: kenn-embed vendors llama.cpp, so every build is a C++ build, and a
 # static musl build of it is not verified here.
 #
-# NO WINDOWS, deliberately — see openspec/changes/windows-support. kenn does not
-# merely fail to build there, it cannot run: `atomic_flip_live` has a
-# cfg(not(unix)) arm that unconditionally returns Err, so every `kenn index`
-# would fail at the final live-pointer flip even once it compiled. Shipping a
-# binary that installs and then fails on first use is worse than shipping none.
+# Windows returned in windows-support task 7. Both original blockers are gone:
+# `live` is now a pointer file (no unprivileged-symlink flip), and the whole
+# workspace compiles on windows-2022 — the `ci-windows.yml` gate (cargo check)
+# is green after fixing kenn-store's device-id arm and kenn-server's stale
+# windows-sys FFI. `kenn init --docker` also declines cleanly there.
 #
-# This also blocks the whole release when listed: a failing target skips `host`
-# and `publish-homebrew-formula`, so the three platforms that DO build never get
-# published either. Restore it only per that change's task 7.
+# CAVEAT: a failing target still skips `host` and `publish-homebrew-formula`, so
+# if a Windows *release build* (heavier than `cargo check` — it links and
+# packages) breaks where CI didn't, it blocks the other three platforms too.
+# Watch the first tagged release. And CI proves compilation, not that `kenn
+# index` runs — that is task 7.3's manual smoke on a real Windows host.
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
 ]
 
