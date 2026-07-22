@@ -13,10 +13,12 @@ tap="kennworx/homebrew-tap"
 
 # 1. Wait for the release. dist creates it on the same tag but may still be
 #    building — cross-workflow ordering is not expressible, so poll, do not
-#    assume (D4). ~20 min ceiling, then fail loudly rather than hang.
-for i in $(seq 1 60); do
+#    assume (D4). ~40 min ceiling: once Windows joined the matrix the release
+#    build runs ~25 min, and the old 20 min ceiling lost the race by ~4 min.
+#    Then fail loudly rather than hang.
+for i in $(seq 1 120); do
   if gh release view "$tag" >/dev/null 2>&1; then break; fi
-  echo "publish($sidecar): waiting for release $tag ($i/60)"; sleep 20
+  echo "publish($sidecar): waiting for release $tag ($i/120)"; sleep 20
 done
 gh release view "$tag" >/dev/null || { echo "publish($sidecar): release $tag never appeared" >&2; exit 1; }
 

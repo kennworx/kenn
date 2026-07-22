@@ -83,7 +83,9 @@ jobs:
 
   kenn-swift:
     # macOS arm64 only — libIndexStore has no out-of-container Linux story (D3).
-    runs-on: macos-14
+    # macos-15 (Xcode 16 / Swift 6): swift-index-store uses `@retroactive`, a
+    # Swift 6 attribute the macos-14 runner's older Swift rejected.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Build kenn-swift
