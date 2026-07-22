@@ -1,0 +1,121 @@
+# Release the three sidecar indexers kenn ships — kenn-ts, kenn-dotnet,
+# kenn-swift — that `dist` cannot see (none is a cargo package). Triggers on the
+# same v* tag as the dist release, builds each per-platform, uploads to the
+# release dist creates, and pushes a generated Homebrew formula to the tap.
+# See openspec/changes/indexer-formulas and docs/releasing.md.
+#
+# Each sidecar is its OWN job with no cross-sidecar `needs` (D5): a missing Swift
+# toolchain on a runner costs the Swift formula, not the C# one. A partial
+# release is expected, not a fault.
+name: sidecars
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build sidecars for, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write # upload archives to the release
+
+jobs:
+  kenn-ts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Build kenn-ts for every target
+        # bun --compile cross-compiles, so one runner emits all three.
+        run: |
+          set -euo pipefail
+          (cd indexers/kenn-ts && bun install --frozen-lockfile)
+          mkdir -p art
+          for pair in aarch64-apple-darwin:bun-darwin-arm64 \
+                      aarch64-unknown-linux-gnu:bun-linux-arm64 \
+                      x86_64-unknown-linux-gnu:bun-linux-x64; do
+            triple="${pair%%:*}"; bt="${pair#*:}"
+            bun build indexers/kenn-ts/src/main.ts --compile --target="$bt" --outfile kenn-ts
+            tar czf "art/kenn-ts-$triple.tar.gz" kenn-ts
+            shasum -a 256 "art/kenn-ts-$triple.tar.gz" > "art/kenn-ts-$triple.tar.gz.sha256"
+            rm -f kenn-ts
+          done
+      - name: Publish + push formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          .github/scripts/publish-sidecar.sh kenn-ts "${tag#v}" "$tag" art
+
+  kenn-dotnet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build kenn-dotnet per RID (single-file, self-contained)
+        # dotnet cross-publishes any RID from one host; single-file so the
+        # formula installs one binary.
+        run: |
+          set -euo pipefail
+          mkdir -p art
+          for pair in aarch64-apple-darwin:osx-arm64 \
+                      aarch64-unknown-linux-gnu:linux-arm64 \
+                      x86_64-unknown-linux-gnu:linux-x64; do
+            triple="${pair%%:*}"; rid="${pair#*:}"
+            dotnet publish indexers/kenn-dotnet -c Release -r "$rid" --self-contained true \
+              -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+              --nologo -o "pub-$rid"
+            tar czf "art/kenn-dotnet-$triple.tar.gz" -C "pub-$rid" kenn-dotnet
+            shasum -a 256 "art/kenn-dotnet-$triple.tar.gz" > "art/kenn-dotnet-$triple.tar.gz.sha256"
+          done
+      - name: Publish + push formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          .github/scripts/publish-sidecar.sh kenn-dotnet "${tag#v}" "$tag" art
+
+  kenn-swift:
+    # macOS arm64 only — libIndexStore has no out-of-container Linux story (D3).
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build kenn-swift
+        run: swift build -c release --package-path indexers/kenn-swift
+      - name: Retarget libIndexStore rpath to the Command Line Tools (D3)
+        # The build bakes this runner's Xcode-absolute rpaths; drop them and add
+        # the CLT path, which every brew user has (Homebrew requires the CLT) and
+        # which carries the same-ABI libIndexStore.
+        run: |
+          set -euo pipefail
+          bin=indexers/kenn-swift/.build/release/kenn-swift
+          otool -l "$bin" | awk '/LC_RPATH/{g=1;next} g&&/ path /{print $2;g=0}' \
+            | grep '/Applications/Xcode' | while read -r rp; do
+                install_name_tool -delete_rpath "$rp" "$bin"
+              done
+          install_name_tool -add_rpath /Library/Developer/CommandLineTools/usr/lib "$bin"
+          # install_name_tool invalidates the ad-hoc signature; AMFI SIGKILLs an
+          # unsigned binary at exec with no message, so re-sign it (3.3).
+          codesign --force --sign - "$bin"
+          otool -l "$bin" | grep -A2 LC_RPATH | grep ' path '
+      - name: Archive
+        run: |
+          set -euo pipefail
+          mkdir -p art
+          tar czf art/kenn-swift-aarch64-apple-darwin.tar.gz \
+            -C indexers/kenn-swift/.build/release kenn-swift
+          shasum -a 256 art/kenn-swift-aarch64-apple-darwin.tar.gz \
+            > art/kenn-swift-aarch64-apple-darwin.tar.gz.sha256
+      - name: Publish + push formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          .github/scripts/publish-sidecar.sh kenn-swift "${tag#v}" "$tag" art

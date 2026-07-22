@@ -90,6 +90,24 @@ further setup, and is the default recommendation — but the licensing of
 redistributing a toolchain library has to be checked before committing to it.
 That check is a task, not an assumption.
 
+**RESOLVED — option 3, strengthened.** Measured on this repo's build/kenn-swift
+(`otool`): it loads `@rpath/libIndexStore.dylib` and bakes the build machine's
+Xcode-absolute rpaths (`/Applications/Xcode.app/…/usr/lib`), so it breaks off
+that machine. But `libIndexStore.dylib` also ships in the Command Line Tools at
+`/Library/Developer/CommandLineTools/usr/lib/`, same ABI (compat 1.0.0), and
+**Homebrew itself requires the CLT** — so every `brew install kenn-swift` user
+already has it. That makes option 3 as setup-free as vendoring (option 1)
+without owning a redistributed toolchain library or its licensing/version drift.
+
+Implementation: the build/formula post-processes the binary with
+`install_name_tool` — delete the build-machine Xcode rpaths (they name a
+version-specific path a user may not have) and add
+`/Library/Developer/CommandLineTools/usr/lib`. Verified mechanically here (the
+rewritten binary carries the CLT rpath and still loads); the one thing this
+machine cannot prove is loading with NO Xcode present, since Xcode is installed
+— that final check needs a CLT-only runner. Vendoring (option 1) is therefore
+NOT chosen, so its license task (2.3a) does not apply.
+
 Linux stays out of scope regardless: it needs the runtime *and* the index-store
 library, and `runtime = "docker"` already delivers both.
 

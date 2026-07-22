@@ -74,6 +74,31 @@ gh api orgs/kennworx/actions/secrets/HOMEBREW_TAP_TOKEN/repositories \
   --jq '.repositories[].full_name'
 ```
 
+## Sidecar indexers (kenn-ts, kenn-dotnet, kenn-swift)
+
+None of the three is a cargo package — `kenn-ts` is `bun build --compile`,
+`kenn-dotnet` is `dotnet publish --self-contained`, `kenn-swift` is
+`swift build` — so `dist` neither sees nor builds them, and its
+`extra-artifacts` does not help: those build in the GLOBAL job (verified with
+`dist plan`), so they cannot emit per-platform binaries.
+
+A separate workflow (`.github/workflows/sidecars.yml`) triggers on the same
+`v*` tag, builds each sidecar in its own job, waits for the release `dist`
+created — cross-workflow ordering is not expressible in Actions, so it polls
+with a bounded wait rather than assuming order — uploads the per-platform
+archives, then renders each formula from the uploaded `.sha256` files
+(`.github/scripts/render-sidecar-formulas.sh`, which validates every checksum
+before it writes anything) and pushes to the same tap with `HOMEBREW_TAP_TOKEN`.
+
+**A partial release is expected, not a fault.** Each sidecar job is independent
+(`fail-fast: false`, no cross-sidecar `needs`), so a missing Swift toolchain on
+a runner costs the Swift formula, not the C# one. "The release succeeded" does
+NOT imply every sidecar formula updated — the tap can hold a `kenn-swift` older
+than `kenn`. That is acceptable only because the sidecars version in lockstep
+with the CLI (one tag) and the JSONL wire is stable across a patch; a skew is a
+version mismatch, not a protocol break. `kenn-swift` ships macOS arm64 only —
+its `libIndexStore` dependency has no out-of-container Linux story.
+
 ## Container images
 
 Indexer images are published separately by `.github/workflows/images.yml`, on

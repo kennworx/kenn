@@ -92,6 +92,23 @@ volume — because an image with a baked toolchain and a repo that pins a
 different one don't fail loudly, they index zero files and exit 0. See
 [`docker/README.md`](docker/README.md).
 
+### Installing kenn's indexers
+
+`kenn-ts`, `kenn-dotnet` and `kenn-swift` are kenn's own — opt in per language,
+from the same tap as the CLI. Each formula installs one binary under the name
+`kenn init` probes for, so installing it is enough — no config, no post-install
+step. `runtime = "docker"` needs none of this.
+
+```console
+brew install kennworx/tap/kenn-ts       # TypeScript / JavaScript
+brew install kennworx/tap/kenn-dotnet   # C#
+brew install kennworx/tap/kenn-swift    # Swift — macOS only
+```
+
+`kenn-swift` is macOS-only: it needs Swift's `libIndexStore`, which the Command
+Line Tools provide (and Homebrew already requires) on macOS but has no
+out-of-container story on Linux — there, use `runtime = "docker"`.
+
 ### Installing the third-party indexers
 
 Rust, Go and Python are indexed by tools kenn does not ship — they're

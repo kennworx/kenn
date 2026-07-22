@@ -132,7 +132,9 @@ pub const SPECS: &[LanguageSpec] = &[
         test_globs: &["**/*.test.ts", "**/*.spec.ts", "**/*.test.tsx"],
         excludes: TypescriptConfig::DEFAULT_EXCLUDES,
         probe_command: Some(|| TypescriptConfig::default().command),
-        install_hint: Some("install kenn-ts on PATH (just build-indexer-ts)"),
+        install_hint: Some(
+            "brew install kennworx/tap/kenn-ts (from source: just build-indexer-ts)",
+        ),
         default_image: Some(IMG_TYPESCRIPT),
     },
     LanguageSpec {
@@ -158,7 +160,9 @@ pub const SPECS: &[LanguageSpec] = &[
         ],
         excludes: CsharpConfig::DEFAULT_EXCLUDES,
         probe_command: Some(|| CsharpConfig::default().command),
-        install_hint: Some("install kenn-dotnet on PATH (just build-indexer-dotnet)"),
+        install_hint: Some(
+            "brew install kennworx/tap/kenn-dotnet (from source: just build-indexer-dotnet)",
+        ),
         default_image: Some(IMG_CSHARP),
     },
     LanguageSpec {
@@ -182,7 +186,9 @@ pub const SPECS: &[LanguageSpec] = &[
         test_globs: &["**/*Tests.swift", "**/*Test.swift"],
         excludes: SwiftConfig::DEFAULT_EXCLUDES,
         probe_command: Some(|| SwiftConfig::default().command),
-        install_hint: Some("install kenn-swift on PATH (just build-indexer-swift)"),
+        install_hint: Some(
+            "brew install kennworx/tap/kenn-swift (from source: just build-indexer-swift)",
+        ),
         default_image: Some(IMG_SWIFT),
     },
     LanguageSpec {
@@ -711,6 +717,41 @@ mod tests {
                 assert!(hint.contains("scip-go"), "hint names the tool: {hint}");
             }
             other => panic!("a failing probe must degrade: {other:?}"),
+        }
+    }
+
+    /// The three sidecars kenn ships are installable from its Homebrew tap; a
+    /// failing probe must name the formula so a `brew` user knows exactly what
+    /// to install. Third-party indexers keep their upstream install hint —
+    /// they are not ours to package.
+    #[test]
+    fn kenn_authored_hints_name_the_homebrew_formula() {
+        let fail = |_: &[String]| Probe::Failed {
+            stderr: String::new(),
+        };
+        for (lang, formula) in [
+            ("csharp", "kenn-dotnet"),
+            ("typescript", "kenn-ts"),
+            ("swift", "kenn-swift"),
+        ] {
+            match classify_with(spec(lang), fail, false).availability {
+                Availability::Degraded { hint, .. } => assert!(
+                    hint.contains(&format!("brew install kennworx/tap/{formula}")),
+                    "{lang} hint must name its formula: {hint}"
+                ),
+                other => panic!("{lang} failing probe must degrade: {other:?}"),
+            }
+        }
+        // Third-party indexers must NOT be advertised as a kenn tap formula.
+        for lang in ["rust", "go", "python"] {
+            if let Availability::Degraded { hint, .. } =
+                classify_with(spec(lang), fail, false).availability
+            {
+                assert!(
+                    !hint.contains("kennworx/tap"),
+                    "{lang} is third-party; hint must not name a kenn formula: {hint}"
+                );
+            }
         }
     }
 
