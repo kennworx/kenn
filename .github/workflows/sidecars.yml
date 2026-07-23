@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: write # upload archives to the release
+  actions: read # poll the dist Release run so the tap push serializes after it
 
 jobs:
   kenn-ts:

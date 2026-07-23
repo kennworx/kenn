@@ -31,6 +31,24 @@ gh release upload "$tag" \
 outdir="$(mktemp -d)"
 "$(dirname "$0")/render-sidecar-formulas.sh" "$version" "$artdir" "$outdir" "$sidecar"
 
+# 3.5. Serialize with dist's Homebrew publish before touching the tap. dist's
+#      `publish-homebrew-formula` job pushes kenn.rb to this SAME tap and, unlike
+#      step 4, does NOT rebase-retry — so if a sidecar pushes first, dist loses
+#      the race (non-fast-forward) and kenn.rb goes stale (it did on v0.2.1).
+#      Wait for the dist Release run to finish so its push is uncontended. On a
+#      `workflow_dispatch` rebuild the run is already `completed`, so this returns
+#      at once. Best-effort with a ceiling: if the run never resolves, fall
+#      through to step 4's retry — no worse than before.
+echo "publish($sidecar): waiting for the dist Release run before pushing to the tap"
+for i in $(seq 1 90); do
+  st="$(gh run list --workflow Release --branch "$tag" --json status --jq '.[0].status // "not_found"' 2>/dev/null || echo "query_failed")"
+  if [ "$st" = "completed" ]; then
+    echo "publish($sidecar): dist Release run completed — pushing is now uncontended"
+    break
+  fi
+  echo "publish($sidecar): dist Release run $st ($i/90)"; sleep 20
+done
+
 # 4. Push the formula to the tap. Three jobs may push concurrently to different
 #    files in the same repo, so rebase-and-retry on a non-fast-forward.
 work="$(mktemp -d)"
