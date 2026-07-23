@@ -67,18 +67,3 @@ that limitation belongs in a specification, not in an error string.
   a misclassification surfaces as a loud rename failure rather than a
   silent fallback
 
-### Requirement: The Docker indexer runtime is unsupported on Windows
-
-kenn SHALL NOT select `runtime = "docker"` on Windows: the published
-indexer images are Linux-only.
-
-Windows users SHALL use local toolchains, or Docker Desktop with a WSL2
-backend where the Linux images run unchanged.
-
-#### Scenario: init does not offer docker on Windows
-
-- **WHEN** `kenn init --docker` runs on Windows
-- **THEN** the docker runtime is not selected for any language
-- **AND** the output states that the indexer images are Linux-only and
-  names the alternatives
-

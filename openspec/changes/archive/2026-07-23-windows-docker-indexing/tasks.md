@@ -10,6 +10,9 @@
 - [ ] 1.2 Settle the Docker Desktop `-v` host-path spelling (`C:\…` vs `C:/…`)
   against a real Docker Desktop (design Decision 5). → verify: `docker run` with
   the chosen form mounts a Windows workspace read/write.
+  CARRIED FORWARD (postponed): needs a live Docker Desktop daemon on Windows. The
+  launcher currently emits `{root}:/work` (host path verbatim); confirm/adjust the
+  spelling during the 5.2 smoke.
 - [x] 1.3 Select `Translate` on Windows and `SamePath` on POSIX in
   `maybe_docker_command` (replace the hardcoded `MountStrategy::SamePath`). →
   verify: `cfg!(windows)` chooses `Translate`; POSIX unit tests still green.
@@ -77,10 +80,12 @@
 
 ## 4. Cross-change bookkeeping
 
-- [ ] 4.1 When this archives, REMOVE windows-support's requirement "The Docker
+- [x] 4.1 When this archives, REMOVE windows-support's requirement "The Docker
   indexer runtime is unsupported on Windows" (windows-platform-support) — this
   change supersedes it. → verify: `openspec validate` clean after archive; no
-  contradictory requirement remains.
+  contradictory requirement remains. DONE: authored
+  `specs/windows-platform-support/spec.md` with a `## REMOVED Requirements` delta;
+  archive applies the removal.
 - [x] 4.2 Update the `--docker` docs (docker/README.md, README.md) that say docker
   is unsupported on Windows → now supported via Docker Desktop. → verify: docs
   name Docker Desktop as the Windows path. DONE: both rewritten — docker is the
@@ -101,6 +106,10 @@
   repo; `kenn status` / `kenn get`. → verify: each language is containerized (not
   degraded), symbols are produced, and relative paths resolve — Swift included,
   proving the docker route covers what no native binary could.
+  CARRIED FORWARD (postponed, unverified at archive): needs a real Windows host
+  with Docker Desktop, not runnable in-sandbox. `ci-windows` proves the change
+  COMPILES on Windows; it does NOT prove `docker run` with the `/work` mount
+  actually indexes — that is this smoke. Settle task 1.2's `-v` spelling here too.
 - [x] 5.3 Confirm no reindex/format impact — a workspace indexed via docker on
   Windows stores the same relative canonical paths as any host. → verify: a
   `files.path` sample is `/`-relative and identical in shape to a POSIX index.
