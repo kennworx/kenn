@@ -100,6 +100,10 @@ and text's defaults do not cover vendored or build trees such as `vendor/**`,
 `init` SHALL report each degraded language, naming both the failing command and
 the install hint that would upgrade it.
 
+Where kenn publishes a Homebrew formula for the missing indexer, the hint SHALL
+name that formula. A hint that describes a different installation route than
+the one the user took to get kenn is a hint they cannot follow.
+
 #### Scenario: A Go repository without a working scip-go
 
 - **WHEN** `kenn init -w ./tmp/repo` runs against a workspace containing `go.mod`
@@ -109,6 +113,13 @@ the install hint that would upgrade it.
 - **AND** `[language.text] excludes` contains `vendor/**` and `**/testdata/**`
 - **AND** the report names `scip-go` as missing and states the install command
 - **AND** a subsequent `kenn index -w ./tmp/repo` makes `.go` files semantically searchable
+
+#### Scenario: A C# repository without kenn-dotnet names the formula
+
+- **WHEN** `kenn init` runs against a workspace containing `global.json`
+- **AND** `kenn-dotnet` fails its version probe
+- **THEN** the report names `kenn-dotnet` as missing
+- **AND** the install hint names the Homebrew formula that provides it
 
 #### Scenario: Vendored sources are not fallback-indexed
 
