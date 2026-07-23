@@ -16,6 +16,13 @@
     <RootNamespace>Kenn.Dotnet</RootNamespace>
     <AssemblyName>kenn-dotnet</AssemblyName>
     <LangVersion>latest</LangVersion>
+    <!-- Run without ICU. kenn-dotnet extracts symbols with ordinal string ops
+         and needs no culture-aware collation, so invariant globalization drops
+         the libicu runtime dependency — otherwise the self-contained Linux binary
+         aborts at startup ("Couldn't find a valid ICU package") on a clean host
+         that has no system libicu (verified in a bare ubuntu:noble container).
+         The out-of-process Roslyn BuildHost runs on the user's SDK, unaffected. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
     <!-- Needed by FileTracker.TryHashFile for memory-mapped zero-copy
          hashing (SafeBuffer.AcquirePointer requires unsafe blocks). -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
