@@ -156,9 +156,16 @@
   surfaced that **kenn-server** (pid.rs/runtime.rs) also blocked Windows (stale
   windows-sys FFI: `handle == 0` on a now-`*mut c_void` HANDLE, and 5 `unsafe`
   blocks lacking the `deny(unsafe_code)` opt-out) — both fixed and CI-confirmed.
-- [ ] 7.2 Tag a release and confirm a Windows artifact is produced AND
+- [x] 7.2 Tag a release and confirm a Windows artifact is produced AND
   the Homebrew formula still publishes. → verify: the release page lists
   a Windows archive; `Formula/kenn.rb` is updated in the tap.
+  DONE: v0.2.0 published `kenn-x86_64-pc-windows-msvc.zip` (+ `.sha256`) and
+  `Formula/kenn.rb` in `kennworx/homebrew-tap`.
 - [ ] 7.3 Manually smoke `kenn init` → `kenn index` → `kenn status` on a
   real Windows machine as an unelevated user. CI `cargo check` proves
   compilation, NOT that indexing works — the flip bug compiled fine.
+  CARRIED FORWARD (unverified at archive): needs a real unelevated Windows host,
+  not runnable in-sandbox. Under current code `kenn index` on Windows has no
+  available indexer (docker declines, no native sidecar), so this smokes only the
+  native store/layout/live-flip/query path. The meaningful indexer smoke moves to
+  windows-docker-indexing task 5.2 (TS/C#/Swift via docker on Windows).
