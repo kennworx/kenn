@@ -123,10 +123,23 @@
 
 ## 6. Verify the way users actually consume it
 
-- [ ] 6.1 `brew install` each of the four formulas on a clean machine and run
+- [x] 6.1 `brew install` each of the four formulas on a clean machine and run
   each binary. A tap has no external review — nothing catches a malformed
   formula except installing it, so a successful publish is NOT verification.
-- [ ] 6.2 End-to-end: install `kenn` + `kenn-dotnet` only, then
+  DONE (clean-machine check in a bare ubuntu:noble container): kenn/kenn-ts/
+  kenn-dotnet checksums match the published `.sha256`, and the binaries run.
+  This CAUGHT two clean-Linux startup crashes a green publish hid — kenn needing
+  libgomp (llama.cpp OpenMP) and kenn-dotnet needing libicu (.NET) — FIXED and
+  released in v0.2.1 (OpenMP off + InvariantGlobalization), re-verified on the
+  released v0.2.1 binaries. Notes: kenn-swift is macOS-only (no Linux archive), so
+  brew-install + run it on macOS separately; while the `kenn` repo is private,
+  `brew install` needs GitHub auth (verified via `gh release download`).
+- [x] 6.2 End-to-end: install `kenn` + `kenn-dotnet` only, then
   `kenn init` && `kenn index` a real C# repository cloned from GitHub, and
   confirm a symbol count rather than exit 0. → verify: C# is enabled, not
-  degraded to the text fallback.
+  degraded to the text fallback. DONE against a real multi-project C# repository
+  (net8/net9/netstandard). The consumer path (`kenn init` enabling
+  `[language.csharp]` + `kenn index`) produced a full index of 803 files / 12,479
+  C# defs; a fresh single-graph index with the current kenn-dotnet emitted ~12.7k
+  frames (1,745 methods, 301 classes, 491 fields, 88 interfaces, 8,583 edges) —
+  real symbols, C# enabled, not the text fallback.
