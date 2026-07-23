@@ -35,17 +35,17 @@ const MAX_DEPTH: usize = 64;
 // to. To refresh after a republish: `docker buildx imagetools inspect
 // ghcr.io/kennworx/<name>:latest` and copy the top-level manifest digest.
 const IMG_RUST: &str =
-    "ghcr.io/kennworx/kenn-rust@sha256:039e54835a7a775eb862a1367d292945d8e6675e8dc8320aa3dddf26f1ff10a9";
+    "ghcr.io/kennworx/kenn-rust@sha256:5a0413fc7a759ec39b6246e5ee90e61476a72083d307398bf7312ceba0561984";
 const IMG_GO: &str =
-    "ghcr.io/kennworx/kenn-go@sha256:24da7f488a42f277a040b112fed31e7510b573eb8e43df44a7d2481f8ff5f63d";
+    "ghcr.io/kennworx/kenn-go@sha256:8e225d3bb9456a07d943dd26087b9e3533c478810e1344a31fc0ffb43a77f743";
 const IMG_TYPESCRIPT: &str =
-    "ghcr.io/kennworx/kenn-typescript@sha256:d69b402b9271d63232db22d9b18cb153f7eb2dd1cf89fabb321dfd7ca781fa0c";
+    "ghcr.io/kennworx/kenn-typescript@sha256:e006d4f6b31e15740b0bddd5b77cfa8dd14f222940631f597dc9e1e1e437a243";
 const IMG_CSHARP: &str =
-    "ghcr.io/kennworx/kenn-csharp@sha256:241395cf4a1e0bc096aa7f7d48c3782ec5a9a0a78221c4277542340c1c094a38";
+    "ghcr.io/kennworx/kenn-csharp@sha256:88cb311234d3b25e6fa95c89f6bb6d13e7f5245cf89e5b594ed54d704e28d564";
 const IMG_PYTHON: &str =
-    "ghcr.io/kennworx/kenn-python@sha256:adbb81b3d14e1b5126a2fb20cf3406f8b097a5bd0d736e73c2c318f25b294f0a";
+    "ghcr.io/kennworx/kenn-python@sha256:d5ba81ee5b1de52bc96be6753e6f9598ff9cb76d87dcbb39e0dec02092f12206";
 const IMG_SWIFT: &str =
-    "ghcr.io/kennworx/kenn-swift@sha256:4bf881e8f3075e2eeed4a59cc6cb489942113ee5c23dae3c3e10087ade764612";
+    "ghcr.io/kennworx/kenn-swift@sha256:dfb1967a45bf9efcff3c638571dcb45c28135a35c09ccda23453f53c7e98b8b5";
 
 /// How a language's presence is recognized on disk.
 enum Marker {
