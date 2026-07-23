@@ -28,24 +28,20 @@ const AMBIGUOUS_PRUNE: &[&str] = &["build/**", "**/build/**", "dist/**", "**/dis
 /// or a symlink cycle that slips past the within-root guard.
 const MAX_DEPTH: usize = 64;
 
-// Digest-pinned default images for `kenn init --docker` (task 4.3). These are
-// the manifest-list digests of the `ghcr.io/kennworx/*` images published by
-// `.github/workflows/images.yml`; pinning by digest (not a `:latest` tag) means
-// republishing an image can't silently change what an authored config resolves
-// to. To refresh after a republish: `docker buildx imagetools inspect
-// ghcr.io/kennworx/<name>:latest` and copy the top-level manifest digest.
-const IMG_RUST: &str =
-    "ghcr.io/kennworx/kenn-rust@sha256:5a0413fc7a759ec39b6246e5ee90e61476a72083d307398bf7312ceba0561984";
-const IMG_GO: &str =
-    "ghcr.io/kennworx/kenn-go@sha256:8e225d3bb9456a07d943dd26087b9e3533c478810e1344a31fc0ffb43a77f743";
-const IMG_TYPESCRIPT: &str =
-    "ghcr.io/kennworx/kenn-typescript@sha256:e006d4f6b31e15740b0bddd5b77cfa8dd14f222940631f597dc9e1e1e437a243";
-const IMG_CSHARP: &str =
-    "ghcr.io/kennworx/kenn-csharp@sha256:88cb311234d3b25e6fa95c89f6bb6d13e7f5245cf89e5b594ed54d704e28d564";
-const IMG_PYTHON: &str =
-    "ghcr.io/kennworx/kenn-python@sha256:d5ba81ee5b1de52bc96be6753e6f9598ff9cb76d87dcbb39e0dec02092f12206";
-const IMG_SWIFT: &str =
-    "ghcr.io/kennworx/kenn-swift@sha256:dfb1967a45bf9efcff3c638571dcb45c28135a35c09ccda23453f53c7e98b8b5";
+// Default images for `kenn init --docker`, pinned to the kenn MINOR line
+// (`:v0.2`), NOT a digest. A minor tag decouples operational image fixes (a base
+// or dependency patch, a rebuilt sidecar) from a kenn release: republishing the
+// `:v0.2` images via `.github/workflows/images.yml` reaches docker users on their
+// next index with no re-pin here. The trade-off is that a repushed `:v0.2` can
+// change indexing output within a kenn patch — kenn re-indexes on staleness, and
+// a user who needs a hard pin can set `image = "…@sha256:…"` in kenn.toml. Bump
+// these only on a MINOR release (0.2 → 0.3); patch releases leave them untouched.
+const IMG_RUST: &str = "ghcr.io/kennworx/kenn-rust:v0.2";
+const IMG_GO: &str = "ghcr.io/kennworx/kenn-go:v0.2";
+const IMG_TYPESCRIPT: &str = "ghcr.io/kennworx/kenn-typescript:v0.2";
+const IMG_CSHARP: &str = "ghcr.io/kennworx/kenn-csharp:v0.2";
+const IMG_PYTHON: &str = "ghcr.io/kennworx/kenn-python:v0.2";
+const IMG_SWIFT: &str = "ghcr.io/kennworx/kenn-swift:v0.2";
 
 /// How a language's presence is recognized on disk.
 enum Marker {
@@ -802,7 +798,7 @@ mod tests {
     #[test]
     fn a_failing_probe_with_docker_containerizes_to_the_default_image() {
         // `--docker` active + probe fails + a published image ⇒ Containerized
-        // with that language's digest-pinned default, not Degraded.
+        // with that language's minor-tag-pinned default, not Degraded.
         let c = classify_with(
             spec("rust"),
             |_| Probe::Failed {
@@ -814,8 +810,8 @@ mod tests {
             Availability::Containerized { image } => {
                 assert_eq!(image, IMG_RUST);
                 assert!(
-                    image.starts_with("ghcr.io/kennworx/kenn-rust@sha256:"),
-                    "digest-pinned kennworx ref: {image}"
+                    image.starts_with("ghcr.io/kennworx/kenn-rust:v") && !image.contains("@sha256:"),
+                    "minor-tag-pinned kennworx ref: {image}"
                 );
             }
             other => panic!("--docker on a failing probe must containerize: {other:?}"),

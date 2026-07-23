@@ -92,6 +92,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5 # read the version to derive the minor tag
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -101,11 +102,20 @@ jobs:
       # users actually pull is assembled here. `imagetools create` fails if
       # either arch tag is missing, which is the behaviour we want: a tag that
       # silently carries one architecture is worse than no tag.
+      #
+      # Two tags: `:latest` (convenience) and `:vMAJOR.MINOR` — the latter is
+      # what `detect.rs` pins for `kenn init --docker`, so a republish of the
+      # minor tag ships an image fix to docker users without a kenn re-pin. Patch
+      # releases reuse the same minor tag; bump it only on a minor release.
       - name: Assemble manifest lists
         run: |
+          ver="$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          minor="v$(echo "$ver" | cut -d. -f1,2)"
+          echo "publishing tags :latest and :$minor (kenn $ver)"
           for image in $IMAGES; do
             name="${REGISTRY}/kenn-${image}"
-            docker buildx imagetools create -t "${name}:latest" \
+            docker buildx imagetools create \
+              -t "${name}:latest" -t "${name}:${minor}" \
               "${name}:latest-amd64" "${name}:latest-arm64"
           done
       - name: Report what was published
