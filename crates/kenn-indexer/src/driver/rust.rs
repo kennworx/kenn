@@ -4,11 +4,12 @@ use std::process::{Command, Stdio};
 use serde::Deserialize;
 
 use crate::canonicalize::Workspace;
+use crate::docker::ContainerMount;
 use crate::report::{RunReport, RunStatus};
 
 use super::{
-    error_reason, make_scip_output_path, walk_for_language, DriverError, ScipDriver, ScipOutcome,
-    Unit,
+    container_arg, error_reason, make_scip_output_path, walk_for_language, DriverError, ScipDriver,
+    ScipOutcome, Unit,
 };
 
 /// rust-analyzer SCIP driver. Runs `rust-analyzer scip <dir> --output …`
@@ -33,6 +34,9 @@ pub struct RustAnalyzer {
     /// Lower scheduler priority via `setpriority` for the subprocess
     /// (Unix). Equivalent to `nice -n 10`. Windows: no-op.
     pub low_priority: bool,
+    /// Host→container path translation for the Windows docker `Translate` mount.
+    /// `None` (local, or POSIX same-path) passes host paths through.
+    pub mount: Option<ContainerMount>,
 }
 
 impl Default for RustAnalyzer {
@@ -42,6 +46,7 @@ impl Default for RustAnalyzer {
             exclude_vendored_libraries: true,
             max_threads: None,
             low_priority: false,
+            mount: None,
         }
     }
 }
@@ -53,6 +58,10 @@ impl ScipDriver for RustAnalyzer {
 
     fn command(&self) -> PathBuf {
         PathBuf::from(self.command.first().map_or("rust-analyzer", String::as_str))
+    }
+
+    fn container_mount(&self) -> Option<&ContainerMount> {
+        self.mount.as_ref()
     }
 
     fn discover_units(&self, workspace: &Workspace) -> Result<Vec<Unit>, DriverError> {
@@ -119,7 +128,12 @@ impl ScipDriver for RustAnalyzer {
 
         let mut cmd = Command::new(program);
         cmd.args(self.command.iter().skip(1));
-        cmd.arg("scip").arg(&unit.path).arg("--output").arg(&output);
+        // Translate the args the container sees; `output` itself stays the host
+        // path — the driver reads the .scip back there after the run.
+        cmd.arg("scip")
+            .arg(container_arg(self.mount.as_ref(), &unit.path))
+            .arg("--output")
+            .arg(container_arg(self.mount.as_ref(), &output));
         if self.exclude_vendored_libraries {
             cmd.arg("--exclude-vendored-libraries");
         }

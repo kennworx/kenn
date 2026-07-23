@@ -50,15 +50,14 @@ pub fn run(workspace: &Path, config_path: &Path, force: bool, docker: bool) -> R
 
     // Decide the docker fallback only once we're past the broken-config guard
     // above, so a scripted `init && index` on an unparseable config bails on the
-    // actionable hint without first probing the daemon. `--docker` routes a
-    // language whose local toolchain is missing to a container image (task 5.1)
-    // instead of degrading to text — but only when the daemon is runnable AND we
-    // are not on Windows (the runtime images are Linux-only); otherwise report
-    // and fall back to the degrade path (5.2). The `docker && !windows`
-    // short-circuits the probe so a plain `kenn init` — or any Windows run —
-    // never spawns `docker info`.
+    // actionable hint without first probing the daemon. A missing local toolchain
+    // routes to a container image instead of degrading to text — on POSIX only
+    // when `--docker` opts in, and on Windows by DEFAULT (kenn ships no native
+    // Windows indexer, so docker via Docker Desktop is the indexing path). Probe
+    // the daemon when it could matter — `--docker` on any host, or Windows — so a
+    // plain POSIX `kenn init` still never spawns `docker info`.
     let windows = cfg!(windows);
-    let daemon_up = docker && !windows && kenn_indexer::docker::daemon_available();
+    let daemon_up = (docker || windows) && kenn_indexer::docker::daemon_available();
     let (containerize, docker_error) = containerize_decision(docker, windows, daemon_up);
     if let Some(msg) = docker_error {
         eprintln!("{msg}");
@@ -99,31 +98,34 @@ pub fn run(workspace: &Path, config_path: &Path, force: bool, docker: bool) -> R
 }
 
 /// Decide whether `init` should containerize a language whose local toolchain is
-/// missing (task 5.1), and — when it won't — the actionable message to print
-/// before falling back to the normal degrade-to-text report (task 5.2). Pure
-/// over `(opt_in, windows, daemon_up)` so every case is unit-testable without a
-/// real daemon or a Windows host.
+/// missing, and — when it won't — the actionable message to print before falling
+/// back to the normal degrade-to-text report. Pure over `(opt_in, windows,
+/// daemon_up)` so every case is unit-testable without a real daemon or a Windows
+/// host.
 ///
-/// The docker runtime is unsupported on Windows (windows-support): the six
-/// published images are Linux-only, so `--docker` there declines and points at
-/// local toolchains or WSL2 (where the same Linux images run unchanged) rather
-/// than the runtime.
+/// Platform-differentiated (windows-docker-indexing): on Windows docker is the
+/// DEFAULT fallback — a failed local probe containerizes when Docker Desktop is
+/// running, WITHOUT `--docker`, because kenn ships no native Windows indexer
+/// binary. Without a runnable daemon a Windows run degrades to text (the
+/// per-language hint points the user at Docker Desktop). POSIX keeps `--docker`
+/// opt-in, degrading to text otherwise.
 fn containerize_decision(
     docker_opt_in: bool,
     windows: bool,
     daemon_up: bool,
 ) -> (bool, Option<&'static str>) {
     match (docker_opt_in, windows, daemon_up) {
-        (false, _, _) => (false, None),
-        (true, true, _) => (
+        // Daemon runnable → containerize: `--docker` on any host, or the Windows
+        // default (no flag needed).
+        (true, _, true) | (false, true, true) => (true, None),
+        // Explicit `--docker` but no daemon → error. Windows names Docker Desktop.
+        (true, true, false) => (
             false,
             Some(
-                "kenn: --docker is unsupported on Windows — the runtime images are Linux-only. \
-                 Index with local language toolchains, or run kenn under WSL2 where the \
-                 published Linux images work unchanged",
+                "kenn: --docker requested but Docker Desktop is not running — start it, \
+                 or omit --docker to degrade missing-toolchain languages to text",
             ),
         ),
-        (true, false, true) => (true, None),
         (true, false, false) => (
             false,
             Some(
@@ -131,6 +133,11 @@ fn containerize_decision(
                  falling back to text for languages whose local toolchain is missing",
             ),
         ),
+        // No containerization otherwise → degrade missing-toolchain languages to
+        // text: a Windows run with no Docker Desktop (the per-language degrade hint
+        // carries the pointer), or any POSIX run without `--docker`. The Windows
+        // daemon-up default already containerized in the first arm.
+        (false, _, _) => (false, None),
     }
 }
 
@@ -308,33 +315,34 @@ mod tests {
 
     #[test]
     fn containerize_decision_cases() {
-        // No opt-in ⇒ never containerize, no error (windows/daemon irrelevant).
+        // --- POSIX: `--docker` is opt-in ---
+        // No opt-in ⇒ degrade to text regardless of the daemon.
         assert_eq!(containerize_decision(false, false, true), (false, None));
-        assert_eq!(containerize_decision(false, true, false), (false, None));
-        // Opt-in, not Windows, daemon up ⇒ containerize, no error.
+        assert_eq!(containerize_decision(false, false, false), (false, None));
+        // Opt-in + daemon up ⇒ containerize, no error.
         assert_eq!(containerize_decision(true, false, true), (true, None));
-        // Opt-in, not Windows, daemon down ⇒ do NOT containerize, report (5.2).
+        // Opt-in + daemon down ⇒ do NOT containerize, report before degrading.
         let (containerize, err) = containerize_decision(true, false, false);
         assert!(!containerize, "docker absent must not containerize");
         assert!(
             err.is_some_and(|m| m.contains("--docker") && m.contains("not runnable")),
             "an actionable message is printed before the degrade fallback"
         );
-        // Opt-in on Windows ⇒ decline regardless of the daemon, naming local
-        // toolchains + WSL2 (task 5.1).
-        for daemon_up in [true, false] {
-            let (containerize, err) = containerize_decision(true, true, daemon_up);
-            assert!(
-                !containerize,
-                "the docker runtime is unsupported on Windows"
-            );
-            assert!(
-                err.is_some_and(|m| m.contains("Windows")
-                    && m.contains("WSL2")
-                    && m.contains("toolchain")),
-                "the Windows decline names local toolchains and WSL2"
-            );
-        }
+
+        // --- Windows: docker is the DEFAULT fallback, no `--docker` needed ---
+        // Daemon up ⇒ containerize with OR without the flag.
+        assert_eq!(containerize_decision(false, true, true), (true, None));
+        assert_eq!(containerize_decision(true, true, true), (true, None));
+        // No daemon, no flag ⇒ silent degrade to text (the per-language hint
+        // carries the Docker Desktop pointer, not this global message).
+        assert_eq!(containerize_decision(false, true, false), (false, None));
+        // Explicit `--docker` but no daemon ⇒ error naming Docker Desktop.
+        let (containerize, err) = containerize_decision(true, true, false);
+        assert!(!containerize, "no daemon must not containerize");
+        assert!(
+            err.is_some_and(|m| m.contains("Docker Desktop") && m.contains("--docker")),
+            "the Windows --docker-without-daemon error names Docker Desktop"
+        );
     }
 
     #[test]

@@ -2,13 +2,14 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::canonicalize::Workspace;
+use crate::docker::ContainerMount;
 use crate::report::{RunReport, RunStatus};
 
 use kenn_model::Language;
 
 use super::{
-    error_reason, make_scip_output_path, walk_for_language, DriverError, ScipDriver, ScipOutcome,
-    Unit,
+    container_arg, error_reason, make_scip_output_path, walk_for_language, DriverError, ScipDriver,
+    ScipOutcome, Unit,
 };
 
 /// scip-go SCIP driver. Spawns `scip-go index --module-root <dir>
@@ -28,12 +29,16 @@ pub struct ScipGo {
     /// prepended to the trailing `index ...` args. Defaults to
     /// `["scip-go"]`; users override with e.g. `["/opt/go/bin/scip-go"]`.
     pub command: Vec<String>,
+    /// Host→container path translation for the Windows docker `Translate` mount.
+    /// `None` (local, or POSIX same-path) passes host paths through.
+    pub mount: Option<ContainerMount>,
 }
 
 impl Default for ScipGo {
     fn default() -> Self {
         Self {
             command: vec!["scip-go".into()],
+            mount: None,
         }
     }
 }
@@ -45,6 +50,10 @@ impl ScipDriver for ScipGo {
 
     fn command(&self) -> PathBuf {
         PathBuf::from(self.command.first().map_or("scip-go", String::as_str))
+    }
+
+    fn container_mount(&self) -> Option<&ContainerMount> {
+        self.mount.as_ref()
     }
 
     fn discover_units(&self, workspace: &Workspace) -> Result<Vec<Unit>, DriverError> {
@@ -76,11 +85,13 @@ impl ScipDriver for ScipGo {
 
         let mut cmd = Command::new(program);
         cmd.args(self.command.iter().skip(1));
+        // `output` stays the host path (read back after the run); only the args
+        // the container sees are translated.
         cmd.arg("index")
             .arg("--module-root")
-            .arg(&unit.path)
+            .arg(container_arg(self.mount.as_ref(), &unit.path))
             .arg("--output")
-            .arg(&output)
+            .arg(container_arg(self.mount.as_ref(), &output))
             .arg("--quiet");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 

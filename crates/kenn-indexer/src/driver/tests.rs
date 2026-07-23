@@ -186,6 +186,7 @@ fn kenn_dotnet_returns_unavailable_when_binary_missing() {
         test_globs: Vec::new(),
         test_assembly_regexes: Vec::new(),
         provision_sdk: false,
+        mount: None,
     };
     let outcome = driver.run(&ws).unwrap();
     assert!(matches!(outcome, JsonlOutcome::Unavailable { .. }));
@@ -249,6 +250,7 @@ fn kenn_swift_returns_unavailable_when_binary_missing() {
         skip_build: true,
         projects: Vec::new(),
         platform: None,
+        mount: None,
     };
     let outcome = driver.run(&ws).unwrap();
     assert!(matches!(outcome, JsonlOutcome::Unavailable { .. }));
@@ -261,9 +263,29 @@ fn kenn_ts_returns_unavailable_when_binary_missing() {
     let driver = KennTs {
         command: vec!["/nonexistent/kenn-ts-binary-xyz".into()],
         projects: Vec::new(),
+        mount: None,
     };
     let outcome = driver.run(&ws).unwrap();
     assert!(matches!(outcome, JsonlOutcome::Unavailable { .. }));
+}
+
+#[test]
+fn container_arg_translates_under_a_mount_and_passes_through_without() {
+    let mount = crate::docker::ContainerMount::new(PathBuf::from("/ws/repo"));
+    // Under a Translate mount, an absolute host path arg → its /work container path.
+    assert_eq!(
+        container_arg(Some(&mount), std::path::Path::new("/ws/repo/src/main.ts")),
+        std::ffi::OsString::from("/work/src/main.ts")
+    );
+    assert_eq!(
+        container_arg(Some(&mount), std::path::Path::new("/ws/repo")),
+        std::ffi::OsString::from("/work")
+    );
+    // Without a mount (local / POSIX same-path), the host path passes through.
+    assert_eq!(
+        container_arg(None, std::path::Path::new("/ws/repo/src/main.ts")),
+        std::ffi::OsString::from("/ws/repo/src/main.ts")
+    );
 }
 
 #[test]
@@ -712,6 +734,7 @@ fn scip_go_returns_unavailable_when_binary_missing() {
     let ws = Workspace::new(dir.path(), &[]).unwrap();
     let driver = ScipGo {
         command: vec!["/nonexistent/scip-go-binary-xyz".into()],
+        mount: None,
     };
     let units = driver.discover_units(&ws).unwrap();
     assert_eq!(units.len(), 1);

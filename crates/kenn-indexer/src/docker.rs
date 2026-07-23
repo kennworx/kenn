@@ -12,13 +12,74 @@ use std::path::{Path, PathBuf};
 
 use kenn_config::Runtime;
 
-/// How the workspace is mounted into the container. Only [`MountStrategy::SamePath`]
-/// (POSIX) is implemented; `Translate` (Windows `/work` + path translation) is the
-/// follow-on seam and is intentionally absent here.
+/// How the workspace is mounted into the container.
+/// - [`MountStrategy::SamePath`] (POSIX): bind-mount at the workspace's own
+///   absolute path, so the absolute paths the drivers pass resolve unchanged.
+/// - [`MountStrategy::Translate`] (Windows): bind-mount at [`CONTAINER_ROOT`]
+///   (`/work`), because a `C:\…` host path cannot mount at its own path inside a
+///   Linux container. Drivers translate their path args via [`ContainerMount`],
+///   and the launcher drops `--user` (Docker Desktop virtualizes bind-mount
+///   ownership).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MountStrategy {
     /// Bind-mount the workspace at its own absolute host path.
     SamePath,
+    /// Bind-mount at `/work` with host→container path translation (Windows).
+    Translate,
+}
+
+/// The fixed container path the workspace mounts at under
+/// [`MountStrategy::Translate`].
+pub(crate) const CONTAINER_ROOT: &str = "/work";
+
+/// Host↔container path translation for the Windows [`MountStrategy::Translate`]
+/// mount. Every absolute path a driver passes to a containerized indexer is the
+/// workspace root or a descendant; [`ContainerMount::to_container`] prefix-swaps
+/// `host_root` for `/work` (normalizing to forward slashes, since the container
+/// is Linux), and [`ContainerMount::to_host`] reverses it for the
+/// indexer-reported `project_root` at ingest.
+#[derive(Debug, Clone)]
+pub struct ContainerMount {
+    host_root: PathBuf,
+}
+
+impl ContainerMount {
+    #[must_use]
+    pub fn new(host_root: PathBuf) -> Self {
+        Self { host_root }
+    }
+
+    /// Map a host path (the workspace root or a descendant) to its container
+    /// path under `/work`, forward-slash separated. A path not under the root is
+    /// returned lossily unchanged — driver args are always under the root, so
+    /// that branch is a defensive fallback, not an expected case.
+    pub(crate) fn to_container(&self, path: &Path) -> String {
+        match path.strip_prefix(&self.host_root) {
+            Ok(rel) => {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if rel.is_empty() {
+                    CONTAINER_ROOT.to_string()
+                } else {
+                    format!("{CONTAINER_ROOT}/{rel}")
+                }
+            }
+            Err(_) => path.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Reverse of [`ContainerMount::to_container`] for a container path string
+    /// (the indexer's reported `project_root`): map `/work[/rel]` back onto the
+    /// host root. Matches `/work` on a path boundary — `/workspace` is left
+    /// unchanged, not treated as `/work` + `space`.
+    pub(crate) fn to_host(&self, container_path: &str) -> PathBuf {
+        if container_path == CONTAINER_ROOT {
+            self.host_root.clone()
+        } else if let Some(rel) = container_path.strip_prefix(&format!("{CONTAINER_ROOT}/")) {
+            self.host_root.join(rel)
+        } else {
+            PathBuf::from(container_path)
+        }
+    }
 }
 
 /// The invoking user's `(uid, gid)`, so container-written files (SCIP output,
@@ -75,34 +136,45 @@ pub(crate) fn docker_launcher(
     image: &str,
     cache: Option<LangCache<'_>>,
     ws_root: &Path,
-    _strategy: MountStrategy,
+    strategy: MountStrategy,
 ) -> Vec<String> {
     let root = ws_root.display().to_string();
-    let (uid, gid) = current_ids();
-    let mut argv = vec![
-        "docker".to_string(),
-        "run".to_string(),
-        "--rm".to_string(),
-        // Run as the caller so files written into the mount are host-owned.
-        "--user".to_string(),
-        format!("{uid}:{gid}"),
-        // The image can't assume a writable /root under an arbitrary uid.
-        "-e".to_string(),
-        "HOME=/tmp".to_string(),
-        // Same-path mount: the workspace is valid at its own path inside.
-        "-v".to_string(),
-        format!("{root}:{root}"),
-        "-w".to_string(),
-        root,
-        // The provisioned-toolchain cache, on EVERY docker-runtime language —
-        // not conditional on `cache`, because a language with no dependency
-        // cache still needs its toolchain. The image's entrypoint provisions
-        // into here when the workspace's pinned version is absent.
-        "-v".to_string(),
-        format!("{TOOLCHAIN_VOLUME}:{TOOLCHAIN_MOUNT}"),
-        "-e".to_string(),
-        format!("{TOOLCHAIN_ROOT_ENV}={TOOLCHAIN_MOUNT}"),
-    ];
+    let mut argv = vec!["docker".to_string(), "run".to_string(), "--rm".to_string()];
+    match strategy {
+        MountStrategy::SamePath => {
+            let (uid, gid) = current_ids();
+            // Run as the caller so files written into the mount are host-owned.
+            argv.push("--user".to_string());
+            argv.push(format!("{uid}:{gid}"));
+            // The image can't assume a writable /root under an arbitrary uid.
+            argv.push("-e".to_string());
+            argv.push("HOME=/tmp".to_string());
+            // Same-path mount: the workspace is valid at its own path inside.
+            argv.push("-v".to_string());
+            argv.push(format!("{root}:{root}"));
+            argv.push("-w".to_string());
+            argv.push(root);
+        }
+        MountStrategy::Translate => {
+            // Windows: mount at /work; the drivers translate their path args via
+            // ContainerMount. No `--user` — Docker Desktop virtualizes bind-mount
+            // ownership, and a host uid/gid is meaningless to the Linux VM.
+            argv.push("-e".to_string());
+            argv.push("HOME=/tmp".to_string());
+            argv.push("-v".to_string());
+            argv.push(format!("{root}:{CONTAINER_ROOT}"));
+            argv.push("-w".to_string());
+            argv.push(CONTAINER_ROOT.to_string());
+        }
+    }
+    // The provisioned-toolchain cache, on EVERY docker-runtime language — not
+    // conditional on `cache`, because a language with no dependency cache still
+    // needs its toolchain. The image's entrypoint provisions into here when the
+    // workspace's pinned version is absent.
+    argv.push("-v".to_string());
+    argv.push(format!("{TOOLCHAIN_VOLUME}:{TOOLCHAIN_MOUNT}"));
+    argv.push("-e".to_string());
+    argv.push(format!("{TOOLCHAIN_ROOT_ENV}={TOOLCHAIN_MOUNT}"));
     if let Some(c) = cache {
         // Dependency sources → shared named volume (fast on mac/Windows).
         argv.push("-v".to_string());
@@ -128,6 +200,16 @@ pub(crate) fn docker_launcher(
     argv
 }
 
+/// The container mount for a language's run: `Some` under docker on Windows (the
+/// [`MountStrategy::Translate`] path), `None` otherwise (local runtime, or POSIX
+/// docker where the same-path mount needs no translation). A single predicate so
+/// the launcher's [`MountStrategy`] and the drivers' arg translation can never
+/// disagree — both derive from this.
+pub(crate) fn container_mount(runtime: Runtime, ws_root: &Path) -> Option<ContainerMount> {
+    (matches!(runtime, Runtime::Docker) && cfg!(windows))
+        .then(|| ContainerMount::new(ws_root.to_path_buf()))
+}
+
 /// The launcher tokens for a language: the raw `command` when `runtime = Local`,
 /// or the [`docker_launcher`] wrapping when `runtime = Docker` with an image.
 /// A validated config guarantees a docker runtime carries an image; a missing
@@ -141,7 +223,12 @@ pub(crate) fn maybe_docker_command(
 ) -> Vec<String> {
     match (runtime, image) {
         (Runtime::Docker, Some(img)) if !img.is_empty() => {
-            docker_launcher(command, img, cache, ws_root, MountStrategy::SamePath)
+            let strategy = if container_mount(runtime, ws_root).is_some() {
+                MountStrategy::Translate
+            } else {
+                MountStrategy::SamePath
+            };
+            docker_launcher(command, img, cache, ws_root, strategy)
         }
         _ => command.to_vec(),
     }
@@ -855,6 +942,63 @@ mod tests {
             .unwrap();
         assert_eq!(argv[img + 1], "rust-analyzer");
         assert_eq!(argv.last().unwrap(), "rust-analyzer");
+    }
+
+    #[test]
+    fn docker_launcher_translate_mounts_work_and_drops_user() {
+        let argv = docker_launcher(
+            &["kenn-ts".to_string()],
+            "ghcr.io/kenn/ts@sha256:abc",
+            None,
+            Path::new("/ws/repo"),
+            MountStrategy::Translate,
+        );
+        assert_eq!(&argv[0..3], &["docker", "run", "--rm"]);
+        let mounts = find_flags(&argv, "-v");
+        // Workspace mounts at /work, not at its own (Windows) path.
+        assert!(mounts.contains(&"/ws/repo:/work"), "{mounts:?}");
+        assert!(!mounts.contains(&"/ws/repo:/ws/repo"), "{mounts:?}");
+        assert_eq!(find_flags(&argv, "-w"), vec!["/work"]);
+        // Docker Desktop virtualizes bind-mount ownership — no --user under Translate.
+        assert!(!argv.iter().any(|a| a == "--user"), "{argv:?}");
+        // HOME + the toolchain volume still ride along.
+        assert!(find_flags(&argv, "-e").contains(&"HOME=/tmp"), "{argv:?}");
+        assert!(
+            mounts.iter().any(|m| m.starts_with(TOOLCHAIN_VOLUME)),
+            "{mounts:?}"
+        );
+    }
+
+    #[test]
+    fn container_mount_to_container_maps_root_and_descendants() {
+        let m = ContainerMount::new(PathBuf::from("/ws/repo"));
+        assert_eq!(m.to_container(Path::new("/ws/repo")), "/work");
+        assert_eq!(
+            m.to_container(Path::new("/ws/repo/src/main.ts")),
+            "/work/src/main.ts"
+        );
+        // A path outside the root is left unchanged (defensive; never expected).
+        assert_eq!(m.to_container(Path::new("/other/x")), "/other/x");
+    }
+
+    #[test]
+    fn container_mount_normalizes_backslash_separators() {
+        // On Windows a descendant's rel carries `\` separators; they normalize to
+        // `/` for the Linux container. (A literal `\` in a component stands in for
+        // the Windows separator on this POSIX test host.)
+        let m = ContainerMount::new(PathBuf::from("/ws/repo"));
+        assert_eq!(m.to_container(Path::new("/ws/repo/a\\b")), "/work/a/b");
+    }
+
+    #[test]
+    fn container_mount_to_host_reverses_and_respects_boundaries() {
+        let m = ContainerMount::new(PathBuf::from("/ws/repo"));
+        assert_eq!(m.to_host("/work"), PathBuf::from("/ws/repo"));
+        assert_eq!(m.to_host("/work/sub"), PathBuf::from("/ws/repo/sub"));
+        // `/workspace` is NOT `/work` + `space` — left unchanged.
+        assert_eq!(m.to_host("/workspace"), PathBuf::from("/workspace"));
+        // A host-rooted path (POSIX same-path) passes through.
+        assert_eq!(m.to_host("/elsewhere"), PathBuf::from("/elsewhere"));
     }
 
     /// The toolchain cache rides on EVERY docker-runtime language, including

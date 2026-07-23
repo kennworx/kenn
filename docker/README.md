@@ -28,10 +28,16 @@ ship in the image.
 ## Platform support
 
 The images are **Linux-only** — one `linux/<arch>` payload per language, no
-Windows variant. On Windows the docker runtime is unsupported: `kenn init
---docker` declines and points at local toolchains, or Docker Desktop with the
-WSL2 backend, where these same Linux images run unchanged. macOS and Linux run
-them natively.
+Windows variant. macOS and Linux run them natively; **Windows** runs them through
+Docker Desktop, where docker is the default indexing path (kenn ships no native
+Windows indexer binary). On Windows `kenn init` probes for a local indexer first
+and containerizes automatically when none is found and Docker Desktop is running.
+
+Under the Windows mount (`MountStrategy::Translate`) the workspace bind-mounts at
+`/work` — a `C:\…` host path cannot mount at its own path in a Linux container —
+and the drivers translate every absolute path argument onto `/work`; `--user` is
+dropped (Docker Desktop virtualizes bind-mount ownership). macOS/Linux keep the
+same-path mount (`-v <root>:<root>`), unchanged.
 
 ## Shape
 

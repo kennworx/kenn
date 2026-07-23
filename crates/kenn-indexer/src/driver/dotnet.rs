@@ -2,11 +2,14 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::canonicalize::Workspace;
+use crate::docker::ContainerMount;
 use crate::report::{RunReport, RunStatus};
 
 use kenn_model::Language;
 
-use super::{spawn_stderr_capture, walk_for_language, DriverError, JsonlIndexer, JsonlOutcome};
+use super::{
+    container_arg, spawn_stderr_capture, walk_for_language, DriverError, JsonlIndexer, JsonlOutcome,
+};
 
 /// kenn-dotnet driver: streams JSONL frames on the subprocess's stdout for
 /// the entire workspace in one invocation.
@@ -40,6 +43,10 @@ pub struct KennDotnet {
     /// project's pinned SDK on demand (via kenn-toolchain) if it is missing,
     /// then retries. Set from `[language.csharp] provision_sdk`. Default false.
     pub provision_sdk: bool,
+    /// Host→container path translation for the Windows docker `Translate` mount.
+    /// `Some` maps every absolute path arg onto `/work`; `None` (local, or the
+    /// POSIX same-path mount) passes host paths through.
+    pub mount: Option<ContainerMount>,
 }
 
 impl Default for KennDotnet {
@@ -51,6 +58,7 @@ impl Default for KennDotnet {
             test_globs: Vec::new(),
             test_assembly_regexes: Vec::new(),
             provision_sdk: false,
+            mount: None,
         }
     }
 }
@@ -131,9 +139,12 @@ impl JsonlIndexer for KennDotnet {
 
         let mut cmd = Command::new(program);
         cmd.args(self.command.iter().skip(1));
-        cmd.arg("index").arg("--workspace").arg(workspace.root());
+        cmd.arg("index")
+            .arg("--workspace")
+            .arg(container_arg(self.mount.as_ref(), workspace.root()));
         for sln in &projects {
-            cmd.arg("--projects").arg(sln);
+            cmd.arg("--projects")
+                .arg(container_arg(self.mount.as_ref(), sln));
         }
         for pat in &self.test_globs {
             cmd.arg("--test-glob").arg(pat);

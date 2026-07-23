@@ -9,6 +9,7 @@ use std::process::Child;
 use kenn_model::{DefRecord, Language};
 
 use crate::canonicalize::Workspace;
+use crate::docker::ContainerMount;
 use crate::driver::{JsonlIndexer, JsonlOutcome, ScipDriver, ScipOutcome};
 use crate::parse::{parse_scip_stream_with_metadata, ParseError};
 use crate::report::{RunReport, RunStatus};
@@ -105,8 +106,14 @@ where
                     reports.push(report);
                     continue;
                 }
-                let counts =
-                    ingest_scip_into_sink(&path, workspace, &mut registry, &mut sink, &mut report);
+                let counts = ingest_scip_into_sink(
+                    &path,
+                    workspace,
+                    driver.container_mount(),
+                    &mut registry,
+                    &mut sink,
+                    &mut report,
+                );
                 if let Ok(c) = counts.as_ref() {
                     progress(ProgressEvent::UnitIngested {
                         language,
@@ -241,6 +248,7 @@ fn absorb_scip_metadata(
     meta: scip::types::Metadata,
     project_root_uri: &std::cell::RefCell<String>,
     observed_version: &mut Option<String>,
+    mount: Option<&ContainerMount>,
 ) {
     if let Some(tool) = meta.tool_info.as_ref() {
         if !tool.version.is_empty() {
@@ -248,13 +256,43 @@ fn absorb_scip_metadata(
         }
     }
     if !meta.project_root.is_empty() {
-        *project_root_uri.borrow_mut() = meta.project_root;
+        *project_root_uri.borrow_mut() = reconcile_container_root(meta.project_root, mount);
+    }
+}
+
+/// Reconcile a container mount point in the indexer-reported `project_root` back
+/// onto the host workspace root. Under the Windows docker `Translate` mount a
+/// SCIP indexer runs with the workspace bind-mounted at `/work` and reports
+/// `file:///work`; combined with each document's relative path, canonicalization
+/// would then resolve every record outside the host workspace root and drop it
+/// (the `all_documents_outside_root` tripwire then hard-errors "empty index").
+/// Mapping `/work` → the host root here fixes it.
+///
+/// GATED on `mount` (the runtime signal), NOT on sniffing the path: only a
+/// `Translate` run has a `Some` mount. A non-`Translate` run leaves the reported
+/// `project_root` untouched, so a genuine `project_root`/workspace mismatch (e.g.
+/// a SCIP index reporting an unrelated `/work` on a POSIX host) is still surfaced
+/// as out-of-root rather than silently rebased. This is SCIP-only — the JSONL
+/// indexers emit relative paths and carry no `project_root`.
+fn reconcile_container_root(project_root_uri: String, mount: Option<&ContainerMount>) -> String {
+    let Some(mount) = mount else {
+        return project_root_uri;
+    };
+    let Some(path) = project_root_uri.strip_prefix("file://") else {
+        return project_root_uri;
+    };
+    let host = mount.to_host(path);
+    if host.as_os_str() == std::ffi::OsStr::new(path) {
+        project_root_uri
+    } else {
+        format!("file://{}", host.display())
     }
 }
 
 fn ingest_scip_into_sink(
     scip_path: &Path,
     workspace: &Workspace,
+    mount: Option<&ContainerMount>,
     registry: &mut IdRegistry,
     sink: &mut BatchSink,
     report: &mut RunReport,
@@ -293,7 +331,7 @@ fn ingest_scip_into_sink(
     let parsed = parse_scip_stream_with_metadata(
         &mut reader,
         |meta| {
-            absorb_scip_metadata(meta, &project_root_uri, &mut observed_version);
+            absorb_scip_metadata(meta, &project_root_uri, &mut observed_version, mount);
             Ok(())
         },
         |doc| {
@@ -682,4 +720,45 @@ fn finalize_unit(
     }
     report.finalize();
     reports.push(report.clone());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_container_root_is_gated_on_the_mount() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path(), &[]).unwrap();
+        let host = ws.root().display().to_string();
+        let mount = ContainerMount::new(ws.root().to_path_buf());
+
+        // Translate run (Some mount): /work rebases onto the host root so
+        // canonicalization keeps the records instead of dropping them.
+        assert_eq!(
+            reconcile_container_root("file:///work".to_string(), Some(&mount)),
+            format!("file://{host}")
+        );
+        assert_eq!(
+            reconcile_container_root("file:///work/sub/pkg".to_string(), Some(&mount)),
+            format!("file://{host}/sub/pkg")
+        );
+        // Non-Translate run (None): /work is LEFT ALONE — a genuine
+        // project_root/workspace mismatch must still surface as out-of-root, not
+        // be silently rebased.
+        assert_eq!(
+            reconcile_container_root("file:///work".to_string(), None),
+            "file:///work".to_string()
+        );
+        // Even under a mount, an already-host-rooted project_root is unchanged,
+        // and a URI only sharing the `/work` text prefix is not over-matched.
+        assert_eq!(
+            reconcile_container_root(format!("file://{host}"), Some(&mount)),
+            format!("file://{host}")
+        );
+        assert_eq!(
+            reconcile_container_root("file:///workshop/x".to_string(), Some(&mount)),
+            "file:///workshop/x".to_string()
+        );
+    }
 }

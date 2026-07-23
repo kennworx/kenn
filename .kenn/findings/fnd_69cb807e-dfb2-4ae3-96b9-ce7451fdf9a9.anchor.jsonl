@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/docker.rs","ts":"2026-07-23T09:06:47.64612Z","sha":"09d2a264fd36fba7"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/pipeline/ingest.rs","ts":"2026-07-23T09:06:47.64612Z","sha":"3e7399e20ad338f0"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/driver/contract.rs","ts":"2026-07-23T09:06:47.64612Z","sha":"fd9b9a8767ef3bfd"}

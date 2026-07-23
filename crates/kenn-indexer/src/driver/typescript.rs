@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::canonicalize::Workspace;
+use crate::docker::ContainerMount;
 use crate::report::{RunReport, RunStatus};
 
-use super::{spawn_stderr_capture, DriverError, JsonlIndexer, JsonlOutcome};
+use super::{container_arg, spawn_stderr_capture, DriverError, JsonlIndexer, JsonlOutcome};
 
 /// kenn-ts driver: streams JSONL frames on the subprocess's stdout for the
 /// entire workspace in one invocation. The indexer discovers `tsconfig.json`
@@ -18,6 +19,9 @@ pub struct KennTs {
     pub command: Vec<String>,
     /// Workspace-relative tsconfig dirs/paths to index. Empty = discover.
     pub projects: Vec<PathBuf>,
+    /// Host→container path translation for the Windows docker `Translate` mount.
+    /// `None` (local, or POSIX same-path) passes host paths through.
+    pub mount: Option<ContainerMount>,
 }
 
 impl Default for KennTs {
@@ -25,6 +29,7 @@ impl Default for KennTs {
         Self {
             command: vec!["kenn-ts".into()],
             projects: Vec::new(),
+            mount: None,
         }
     }
 }
@@ -49,7 +54,11 @@ impl JsonlIndexer for KennTs {
 
         let mut cmd = Command::new(program);
         cmd.args(self.command.iter().skip(1));
-        cmd.arg("index").arg("--workspace").arg(workspace.root());
+        cmd.arg("index")
+            .arg("--workspace")
+            .arg(container_arg(self.mount.as_ref(), workspace.root()));
+        // `--tsconfigs` are workspace-relative; the indexer resolves them against
+        // the workspace, so they need no host→container translation.
         for p in &self.projects {
             cmd.arg("--tsconfigs").arg(p);
         }

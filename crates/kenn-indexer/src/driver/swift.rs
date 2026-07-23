@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::canonicalize::Workspace;
+use crate::docker::ContainerMount;
 use crate::report::{RunReport, RunStatus};
 
-use super::{spawn_stderr_capture, DriverError, JsonlIndexer, JsonlOutcome};
+use super::{container_arg, spawn_stderr_capture, DriverError, JsonlIndexer, JsonlOutcome};
 
 /// kenn-swift driver: streams JSONL frames on the subprocess's stdout for the
 /// entire workspace in one invocation.
@@ -38,6 +39,9 @@ pub struct KennSwift {
     /// Xcode build-destination override (`ios`/`macos`/…). `None` = sidecar
     /// auto-detects. Forwarded as `--platform`; ignored for `SwiftPM` packages.
     pub platform: Option<String>,
+    /// Host→container path translation for the Windows docker `Translate` mount.
+    /// `None` (local, or POSIX same-path) passes host paths through.
+    pub mount: Option<ContainerMount>,
 }
 
 impl Default for KennSwift {
@@ -47,6 +51,7 @@ impl Default for KennSwift {
             skip_build: false,
             projects: Vec::new(),
             platform: None,
+            mount: None,
         }
     }
 }
@@ -109,9 +114,12 @@ impl JsonlIndexer for KennSwift {
 
         let mut cmd = Command::new(program);
         cmd.args(self.command.iter().skip(1));
-        cmd.arg("index").arg("--workspace").arg(workspace.root());
+        cmd.arg("index")
+            .arg("--workspace")
+            .arg(container_arg(self.mount.as_ref(), workspace.root()));
         for pkg in &projects {
-            cmd.arg("--projects").arg(pkg);
+            cmd.arg("--projects")
+                .arg(container_arg(self.mount.as_ref(), pkg));
         }
         if self.skip_build {
             cmd.arg("--skip-build");

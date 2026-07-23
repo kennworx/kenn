@@ -41,6 +41,6 @@ pub use rust::RustAnalyzer;
 pub use swift::KennSwift;
 pub use typescript::KennTs;
 
-pub(crate) use contract::{error_reason, spawn_stderr_capture};
+pub(crate) use contract::{container_arg, error_reason, spawn_stderr_capture};
 pub(crate) use orchestrator::make_scip_output_path;
 pub(crate) use walk::walk_for_language;

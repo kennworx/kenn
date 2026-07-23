@@ -2,13 +2,14 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::canonicalize::Workspace;
+use crate::docker::ContainerMount;
 use crate::report::{RunReport, RunStatus};
 
 use kenn_model::Language;
 
 use super::{
-    error_reason, make_scip_output_path, walk_for_language, DriverError, ScipDriver, ScipOutcome,
-    Unit,
+    container_arg, error_reason, make_scip_output_path, walk_for_language, DriverError, ScipDriver,
+    ScipOutcome, Unit,
 };
 
 /// scip-python SCIP driver. Spawns the configured launcher with `index
@@ -35,6 +36,9 @@ pub struct ScipPython {
     /// whole-workspace invocation; non-empty = one scip-python
     /// invocation per entry, each with `--target-only <abs>`.
     pub targets: Vec<String>,
+    /// Host→container path translation for the Windows docker `Translate` mount.
+    /// `None` (local, or POSIX same-path) passes host paths through.
+    pub mount: Option<ContainerMount>,
 }
 
 impl Default for ScipPython {
@@ -44,6 +48,7 @@ impl Default for ScipPython {
             project_name: None,
             project_version: None,
             targets: Vec::new(),
+            mount: None,
         }
     }
 }
@@ -55,6 +60,10 @@ impl ScipDriver for ScipPython {
 
     fn command(&self) -> PathBuf {
         PathBuf::from(self.command.first().map_or("scip-python", String::as_str))
+    }
+
+    fn container_mount(&self) -> Option<&ContainerMount> {
+        self.mount.as_ref()
     }
 
     fn discover_units(&self, workspace: &Workspace) -> Result<Vec<Unit>, DriverError> {
@@ -104,11 +113,14 @@ impl ScipDriver for ScipPython {
 
         let mut cmd = Command::new(program);
         cmd.args(self.command.iter().skip(1));
+        // `output` stays the host path (read back after the run); only the args
+        // the container sees are translated. The `unit.path != root` guard below
+        // compares HOST paths (discovery is host-side) — correct as-is.
         cmd.arg("index")
             .arg("--cwd")
-            .arg(workspace.root())
+            .arg(container_arg(self.mount.as_ref(), workspace.root()))
             .arg("--output")
-            .arg(&output)
+            .arg(container_arg(self.mount.as_ref(), &output))
             .arg("--quiet");
         if let Some(name) = self.project_name.as_deref() {
             cmd.arg("--project-name").arg(name);
@@ -117,7 +129,8 @@ impl ScipDriver for ScipPython {
             cmd.arg("--project-version").arg(ver);
         }
         if unit.path != workspace.root() {
-            cmd.arg("--target-only").arg(&unit.path);
+            cmd.arg("--target-only")
+                .arg(container_arg(self.mount.as_ref(), &unit.path));
         }
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 

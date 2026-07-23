@@ -319,6 +319,7 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
             test_globs: config.tests.paths.clone(),
             test_assembly_regexes: config.tests.assembly_regex.clone(),
             provision_sdk: config.language.csharp.provision_sdk,
+            mount: crate::docker::container_mount(config.language.csharp.runtime, &ws_root),
         });
     }
     if config.language.rust.enabled {
@@ -333,6 +334,7 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
             exclude_vendored_libraries: config.language.rust.exclude_vendored_libraries,
             max_threads: config.language.rust.max_threads,
             low_priority: config.language.rust.low_priority,
+            mount: crate::docker::container_mount(config.language.rust.runtime, &ws_root),
         });
     }
     if config.language.typescript.enabled {
@@ -345,6 +347,7 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
                 None,
             ),
             projects: config.language.typescript.projects.clone(),
+            mount: crate::docker::container_mount(config.language.typescript.runtime, &ws_root),
         });
     }
     if config.language.python.enabled {
@@ -359,6 +362,7 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
             project_name: config.language.python.project_name.clone(),
             project_version: config.language.python.project_version.clone(),
             targets: config.language.python.targets.clone(),
+            mount: crate::docker::container_mount(config.language.python.runtime, &ws_root),
         });
     }
     if config.language.go.enabled {
@@ -370,6 +374,7 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
                 Some(("GOMODCACHE", "go")),
                 Some(("GOCACHE", "go")),
             ),
+            mount: crate::docker::container_mount(config.language.go.runtime, &ws_root),
         });
     }
     if config.language.swift.enabled {
@@ -389,6 +394,7 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
             skip_build: config.language.swift.skip_build,
             projects: config.language.swift.projects.clone(),
             platform: config.language.swift.platform.clone(),
+            mount: crate::docker::container_mount(config.language.swift.runtime, &ws_root),
         });
     }
     if config.language.markdown.enabled {

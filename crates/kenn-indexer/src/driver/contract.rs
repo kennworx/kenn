@@ -1,13 +1,28 @@
 //! Driver contract: the traits and value types every language indexer
 //! shares, plus the stderr-capture helper their subprocess outcomes carry.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crate::canonicalize::Workspace;
+use crate::docker::ContainerMount;
 use crate::report::RunReport;
+
+/// Translate an absolute host-path argument for a containerized indexer.
+/// Under the Windows docker `Translate` mount (`mount` is `Some`) the path — the
+/// workspace root or a descendant — is mapped to its `/work` container path;
+/// otherwise (`None`: local runtime, or the POSIX same-path mount) the host path
+/// passes through unchanged. Every driver routes its absolute path args through
+/// this so a containerized indexer sees paths valid inside the container.
+pub(crate) fn container_arg(mount: Option<&ContainerMount>, path: &Path) -> OsString {
+    match mount {
+        Some(m) => OsString::from(m.to_container(path)),
+        None => path.as_os_str().to_owned(),
+    }
+}
 
 /// Background reader for a child process's stderr. Drains the pipe into an
 /// in-memory buffer so it can be attached to the `RunReport` if the child
@@ -121,6 +136,14 @@ pub trait ScipDriver: Send + Sync {
     fn command(&self) -> PathBuf;
     fn discover_units(&self, workspace: &Workspace) -> Result<Vec<Unit>, DriverError>;
     fn run_unit(&self, unit: &Unit, workspace: &Workspace) -> Result<ScipOutcome, DriverError>;
+    /// The Windows docker `Translate` mount, when this driver runs its indexer
+    /// in a container that reports `project_root` as `/work`. `None` (the
+    /// default, and every non-`Translate` run) means the reported `project_root`
+    /// is the real host path and MUST NOT be reconciled — a genuine
+    /// `project_root`/workspace mismatch is a real out-of-root signal to preserve.
+    fn container_mount(&self) -> Option<&ContainerMount> {
+        None
+    }
 }
 
 /// Whole-workspace JSONL streaming indexer. Pipeline calls `run` exactly

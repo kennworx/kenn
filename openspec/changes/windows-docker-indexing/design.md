@@ -57,37 +57,62 @@ dependency/build caches, the image, the trailing command — is identical.
 makes both substitutions (root arg + `project_root`) a constant, not a per-path
 drive-letter computation, and matches the `/work` name the seam comment documents.
 
-### Decision 2 — Translate the one root argument at the driver seam
+### Decision 2 — A threaded `ContainerMount` translates every absolute path arg (REVISED after the apply audit)
 
-The driver appends the absolute workspace root **after** the launcher prefix
-(`Command::new(argv[0])` then `.arg(root)`), so `docker_launcher` alone cannot
-fix it. Under `Translate`, the workspace-root argument the driver passes MUST be
-`/work` (the mount target) instead of the host path. This is the one integration
-point and it touches both the jsonl-driver and the SCIP-driver arg-formation.
+The apply-phase audit (task 2.1) disproved the original "one substitution" plan.
+Each driver appends **multiple, driver-specific** absolute paths after the
+launcher prefix, all derived from `workspace.root()`:
 
-*Open sub-question (resolve in apply):* whether `docker_launcher` should **own**
-the trailing workspace-root argument (append `/work` itself, and have the driver
-omit its own root arg when containerized) — a cleaner single-owner seam — versus
-each driver conditionally emitting `/work` under `Translate`. Prefer the former
-if the drivers pass the root as a positional the launcher can absorb.
+| Driver | Output | Absolute path args |
+|---|---|---|
+| kenn-ts (jsonl) | stdout | `--workspace <root>` |
+| kenn-dotnet (jsonl) | stdout | `--workspace <root>`, `--projects <abs>`×N |
+| kenn-swift (jsonl) | stdout | `--workspace <root>`, `--projects <abs>`×N |
+| rust (scip) | `--output` file | `scip <unit.path>`, `--output <derived>` |
+| go (scip) | `--output` file | `--module-root <unit.path>`, `--output <derived>` |
+| python (scip) | `--output` file | `--cwd <root>`, `--target-only <unit.path>`, `--output <derived>` |
+
+Because every one of these is `workspace.root()` or `workspace.root().join(rel)`,
+translation is a **prefix swap**: `host_root` → `/work`. Introduce a
+`ContainerMount { host_root, container_root: "/work" }`, present only under
+docker+`Translate`, and apply `mount.to_container(path)` at each path-arg site in
+each driver. `docker_launcher` cannot own this (the args are appended by the
+driver, after the launcher prefix, and differ per driver), so the mount is
+**threaded into the driver layer** alongside the existing `command`.
+
+*Derived-root reachability (re-examined in apply):* the SCIP `--output` file is
+`<source_root>/.kenn/local/scip-*.scip` (`Layout::default_for`), i.e. **inside
+the workspace root**, so the `/work` mount already covers it — the container
+writes `--output /work/.kenn/local/…` and it lands on the host for read-back. No
+separate mount is required; `--output` is just one more path arg to prefix-swap.
+The only SCIP-specific residue is that it round-trips an output *file* through the
+bind mount (owned via Docker Desktop virtualization since `--user` is dropped) —
+a manual-smoke verification point, not an architectural one.
 
 ### Decision 2b — Reconcile `metadata.project_root` at ingest (the output substitution)
 
 Context fact 2: the indexer emits `metadata.project_root = file:///work` inside
 the container, and `canonicalize.rs` drops any record whose
-`project_root + relative_path` falls outside the host workspace root. Under
-`Translate`, ingest MUST map the container mount point (`/work`) to the host
-workspace root before canonicalization — otherwise every record is dropped and
-the index is silently empty. This is a single substitution on the `project_root`
-URI (the `/work` constant → `workspace.root()`), NOT a per-file rewrite: each
-document's `relative_path` is used unchanged.
+`project_root + relative_path` falls outside the host workspace root (the
+`workflow.rs` `all_documents_outside_root` tripwire then hard-errors "empty
+index" — so this fails LOUD, not silently, but still fails). Under `Translate`,
+ingest MUST map the container root back to the host root before canonicalization:
+`mount.to_host(project_root)` — the reverse direction of the same
+`ContainerMount` from Decision 2. This is one substitution on the `project_root`
+URI (`/work` → `workspace.root()`), NOT a per-file rewrite: each document's
+`relative_path` is used unchanged.
 
-*Where it hooks:* `absorb_scip_metadata` / the ingest path in
-`crates/kenn-indexer/src/pipeline/ingest.rs` sets `project_root_uri` from
-`meta.project_root`; the docker-Translate case substitutes `/work` for the host
-root there (or the canonicalizer is told the mount point). It must be driven by
-the same "runtime = docker + Translate" signal as the launcher, not by sniffing
-the path — a real workspace could legitimately live at `/work` on a POSIX host.
+*Where it hooks (as built):* `reconcile_container_root` in
+`crates/kenn-indexer/src/pipeline/ingest.rs`, called from `absorb_scip_metadata`.
+It is **SCIP-only** — the JSONL indexers emit relative paths and carry no
+`project_root`, so only the SCIP ingest path needs it. It is **GATED on the
+runtime signal**, threaded via a new `ScipDriver::container_mount()` (default
+`None`; overridden by the rust/go/python drivers to return their `mount`), NOT by
+sniffing the path. This gating is load-bearing: an early unconditional version
+regressed the existing `scip_documents_outside_the_root_are_counted` test, which
+deliberately uses `/work` as a *sentinel unrelated root* — proving that a real
+project_root/workspace mismatch at `/work` must still surface as out-of-root on a
+non-Translate run, and only a genuine Translate mount may rebase it.
 
 ### Decision 3 — Drop `--user` on Windows
 
@@ -135,10 +160,12 @@ architectural one).
 
 ## Risks / Trade-offs
 
-- **A driver passes more than the root as an absolute host path** → the single-
-  substitution assumption breaks. *Mitigation:* audit each driver's appended args
-  during apply (Decision 2); the wire being relative bounds this to invocation
-  args only, which are enumerable.
+- **Drivers pass more than the root as absolute host paths** → CONFIRMED by the
+  apply audit (Decision 2): each driver passes a driver-specific set of absolute
+  paths, and SCIP drivers also pass `--output`. *Resolved:* the threaded
+  `ContainerMount` prefix-swaps every such arg; derived_root being under the
+  workspace bounds `--output` to the `/work` mount. All arg sites are enumerated
+  in the Decision 2 table.
 - **Docker Desktop bind-mount performance / file-watching over the host↔VM
   boundary** → indexing a large tree may be slow. *Mitigation:* the shared
   dependency-cache named volumes already exist for exactly this reason
