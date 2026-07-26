@@ -21,3 +21,4 @@ pub mod fetch;
 pub mod pin;
 pub mod resolve;
 pub mod run;
+pub mod select;

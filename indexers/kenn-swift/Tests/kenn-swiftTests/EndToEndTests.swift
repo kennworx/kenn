@@ -55,6 +55,65 @@ final class EndToEndTests: XCTestCase {
         return Indexed(keyById: keyById, symbols: symbols, edges: edges)
     }
 
+    /// Two reads of ONE store must emit byte-identical frames apart from
+    /// wall-clock stamps.
+    ///
+    /// `emit()` walks a Dictionary (`defs`) and a Set (`moduleImports`), and
+    /// Swift seeds its hasher PER PROCESS — so iterating them directly made
+    /// identity depend on run order. `keyFor` hands the unsalted key to whichever
+    /// USR arrives first and salts the rest, and module stubs took ids in Set
+    /// order. Two runs of one binary over an unchanged tree disagreed about which
+    /// `Contained` was `ArgumentParser.Contained` and which carried a `#<digest>`
+    /// suffix, and swapped two module stub ids; nine atlas documents differed.
+    ///
+    /// Compares the WHOLE frame stream rather than the set of keys: ids are the
+    /// wire identity, so a stub allocated in a different order is a real change
+    /// even when every key is still present. An earlier check that compared keys
+    /// as a set passed while ids churned underneath it.
+    func testEmitIsDeterministicAcrossRuns() throws {
+        let fixtureDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/SampleApp").path
+        let root = canonicalWorkspaceRoot(fixtureDir)
+        guard
+            let storePath = Provisioning.ensureSwiftPMStore(packageDir: root, skipBuild: false).store
+        else {
+            throw XCTSkip("could not produce index store for fixture (toolchain unavailable)")
+        }
+
+        // Two independent emitter runs over ONE store, in this process.
+        //
+        // I expected this to be too weak to catch the bug — the hash seed is
+        // fixed within a process, so I assumed a Set would iterate identically
+        // twice. Mutation-checked, and that assumption was WRONG: reverting
+        // `moduleImports.sorted()` fails this test. A Swift Set's iteration order
+        // depends on its internal layout, not only on the seed and its contents,
+        // so two separately-built Sets holding the same elements can differ. Good
+        // news for the guard — it does not need a subprocess to bite.
+        //
+        // It does NOT cover the other half. Reverting `defs.keys.sorted()` leaves
+        // this test GREEN, because a Dictionary built the same way twice in one
+        // process iterates the same way twice; that bug only shows across
+        // processes, where Swift reseeds. `just swift-determinism` is the guard
+        // for it — two separate sidecar processes over one store. Do not read a
+        // green run here as "the emitter is order-independent".
+        let first = try runReaderObjects(root: root, storePath: storePath)
+        let second = try runReaderObjects(root: root, storePath: storePath)
+
+        // Drop the frames whose only content is a timestamp.
+        let strip: ([[String: Any]]) -> [String] = { frames in
+            frames.compactMap { f in
+                let type = f["type"] as? String ?? ""
+                if type == "meta" || type == "end" { return nil }
+                return String(describing: f.sorted { $0.key < $1.key }.map { "\($0):\($1)" })
+            }
+        }
+        let a = strip(first)
+        let b = strip(second)
+        XCTAssertEqual(a.count, b.count, "frame count must not vary between runs")
+        XCTAssertEqual(a, b, "emitted frames must be identical for one store")
+    }
+
     func testEmitsSymbolsAndSemanticEdges() throws {
         let ix = try runIndexer()
 

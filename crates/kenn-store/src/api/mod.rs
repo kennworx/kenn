@@ -21,7 +21,7 @@ pub mod writer;
 pub use reader::Reader;
 pub use types::{
     BlendedFileRow, BlendedHit, BlendedSymbolRow, CodeSymbolHit, DbError, DefLineRow, DefRow,
-    FileRow, FoundSymbolRow, LinkDiagnosticRow, MatchKind, PackageRow, RankedSymbolRow, StatRow,
-    SymbolDocsRow, SymbolRow, WriterOptions,
+    FileRow, FoundSymbolRow, LinkDiagnosticRow, MatchKind, PackageRow, RankedSymbolRow, RowNarrow,
+    StatRow, SymbolDocsRow, SymbolRow, WriterOptions,
 };
 pub use writer::{WriteBatch, DEFAULT_BATCH_SIZE};

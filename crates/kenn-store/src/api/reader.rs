@@ -12,8 +12,8 @@ use kenn_model::ShortId;
 use crate::api::types::{
     AggregateEdgeRow, AggregateNodeRow, AnalysisAnchoredCommunityRow, AnalysisFlatCommunityRow,
     AnalysisGodNodeRow, AnalysisNodeMembershipRow, BlendedHit, BlendedSymbolRow, DbError,
-    DefLineRow, DefRow, FileRow, FoundSymbolRow, PackageRow, RankedSymbolRow, SymbolDocsRow,
-    SymbolRow,
+    DefLineRow, DefRow, FileRow, FoundSymbolRow, PackageRow, RankedSymbolRow, RowNarrow,
+    SymbolDocsRow, SymbolRow,
 };
 
 /// Storage-side reader contract. The MCP server holds an `impl Reader`
@@ -95,8 +95,7 @@ pub trait Reader: Send + Sync {
         relation: &str,
         limit: u32,
         cursor_after: Option<ShortId>,
-        include_external: bool,
-        include_tests: bool,
+        narrow: &RowNarrow,
     ) -> impl std::future::Future<Output = Result<(Vec<SymbolRow>, u64), DbError>> + Send;
 
     fn list_outbound(
@@ -105,8 +104,7 @@ pub trait Reader: Send + Sync {
         relation: &str,
         limit: u32,
         cursor_after: Option<ShortId>,
-        include_external: bool,
-        include_tests: bool,
+        narrow: &RowNarrow,
     ) -> impl std::future::Future<Output = Result<(Vec<SymbolRow>, u64), DbError>> + Send;
 
     fn list_module_files(
@@ -179,6 +177,22 @@ pub trait Reader: Send + Sync {
     fn scan_symbols(
         &self,
     ) -> impl std::future::Future<Output = Result<Vec<SymbolRow>, DbError>> + Send;
+
+    /// Stream every file row in the snapshot. Used for whole-workspace shape
+    /// questions (which top-level directories hold non-code files); not on the
+    /// MCP hot path.
+    fn scan_files(&self)
+        -> impl std::future::Future<Output = Result<Vec<FileRow>, DbError>> + Send;
+
+    /// Stream every `(symbol, file)` definition pair. Cold path.
+    fn scan_def_files(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<(ShortId, ShortId)>, DbError>> + Send;
+
+    /// Stream every non-empty `(file, module doc)`. Cold path.
+    fn scan_file_docs(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<(ShortId, String)>, DbError>> + Send;
 
     /// Stream every `(source, target)` pair for the given relation. Dedupes
     /// identical pairs that may exist when the kind carries a payload

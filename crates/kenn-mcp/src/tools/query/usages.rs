@@ -204,8 +204,7 @@ async fn paginate_single_target(
                 edge.db_name(),
                 remaining,
                 cursor_after,
-                include_external,
-                include_tests,
+                &kenn_store::RowNarrow::visibility(include_external, include_tests),
             )
             .await
             .map_err(internal)?;
@@ -261,8 +260,7 @@ async fn collect_multi_target(
                     edge.db_name(),
                     remaining,
                     None,
-                    include_external,
-                    include_tests,
+                    &kenn_store::RowNarrow::visibility(include_external, include_tests),
                 )
                 .await
                 .map_err(internal)?;

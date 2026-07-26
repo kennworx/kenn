@@ -87,6 +87,92 @@ impl AggregatedGraph {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty() && self.edges.is_empty()
     }
+
+    /// A first-party-only copy of the graph for FLAT community detection.
+    ///
+    /// The atlas maps project code, so its domain axis must cluster project code
+    /// — not the shared stdlib/vendored types first-party symbols happen to
+    /// mention. External nodes (and every edge incident to one) are dropped, so
+    /// two first-party symbols land in one community because THEY reference each
+    /// other, never because they both use `HashMap`. Downstream already ignores
+    /// external nodes (the atlas filters them on read; `build_membership_records`
+    /// assigns anything absent from a community the unassigned sentinel), so this
+    /// only aligns the clustering INPUT with what the output already consumes —
+    /// today we cluster with the vendor glue, then throw the glue away and keep
+    /// the first-party members it grouped.
+    ///
+    /// The flat pass alone uses this; god-node degree and the anchored hierarchy
+    /// keep the full graph — external god-nodes are reported on purpose, and the
+    /// hierarchy is per-anchor, so external symbols already sit in their own
+    /// branches.
+    ///
+    /// Edge weights are re-scaled by kind ([`cluster_kind_weight`]): the
+    /// aggregate weight encodes a coupling-traffic prior (a call outweighs an
+    /// implements), but community detection wants the opposite — an
+    /// `implements`/`overrides` bond means "same contract" and should pull two
+    /// symbols together harder than an incidental call.
+    #[must_use]
+    pub fn clustering_view(&self) -> Self {
+        let nodes: HashMap<ShortId, NodeInfo> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| !n.external)
+            .map(|(&id, n)| (id, n.clone()))
+            .collect();
+        let mut edges: Vec<AggregateEdge> = Vec::new();
+        let mut per_pair: HashMap<(ShortId, ShortId), u32> = HashMap::new();
+        let mut total_weight: u64 = 0;
+        for e in &self.edges {
+            if !nodes.contains_key(&e.a) || !nodes.contains_key(&e.b) {
+                continue;
+            }
+            let w = e.weight.saturating_mul(cluster_kind_weight(e.kind));
+            edges.push(AggregateEdge {
+                a: e.a,
+                b: e.b,
+                kind: e.kind,
+                weight: w,
+            });
+            let (lo, hi) = (e.a.min(e.b), e.a.max(e.b));
+            *per_pair.entry((lo, hi)).or_insert(0) += w;
+            total_weight += u64::from(w);
+        }
+        let mut adj: HashMap<ShortId, Vec<(ShortId, u32)>> =
+            nodes.keys().map(|&k| (k, Vec::new())).collect();
+        for ((a, b), w) in per_pair {
+            adj.entry(a).or_default().push((b, w));
+            adj.entry(b).or_default().push((a, w));
+        }
+        Self {
+            nodes,
+            edges,
+            adj,
+            total_weight,
+        }
+    }
+}
+
+/// Per-kind multiplier applied to the aggregate edge weight when building the
+/// FLAT-clustering adjacency ([`AggregatedGraph::clustering_view`]).
+///
+/// The aggregate weight encodes a coupling-TRAFFIC prior — a `call` (base 3)
+/// outweighs an `implements` (base 2) — which is right for the coupling tables
+/// but backwards for community detection. An is-a bond (`implements` /
+/// `overrides` / `extends_type`) means "same contract / same hierarchy" and is a
+/// far stronger signal that two symbols belong to one concept than an incidental
+/// call. Boosting the is-a family ×4 flips the effective order (a lone
+/// `implements` at 2·4=8 outpulls two calls at 3), so an interface clusters with
+/// its implementers — the relationship the domain axis exists to surface.
+///
+/// No language has all three: Go/Python carry only `implements`, Swift adds
+/// `overrides`, C# inheritance is `extends_type`. Weighting the family covers
+/// whichever each language emits.
+#[must_use]
+const fn cluster_kind_weight(kind: EdgeKind) -> u32 {
+    match kind {
+        EdgeKind::Implements | EdgeKind::Overrides | EdgeKind::ExtendsType => 4,
+        _ => 1,
+    }
 }
 
 /// Anchor → set of aggregate ids inside it. Used as L0 of the
@@ -263,4 +349,66 @@ pub fn build_from_records(
         graph.adj.entry(b).or_default().push((a, w));
     }
     graph
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kenn_model::EdgeKind;
+
+    fn node(external: bool) -> NodeInfo {
+        NodeInfo {
+            kind: "class".into(),
+            name: "N".into(),
+            language: "rs".into(),
+            external,
+            test: false,
+            anchor_id: 0,
+            anchor_name: "a".into(),
+        }
+    }
+
+    /// The clustering view drops external nodes and every edge incident to one,
+    /// and re-weights the is-a family up while leaving calls alone. Weight of the
+    /// surviving 1↔2 pair = implements(2)·4 + calls(3)·1 = 11. Mutation-checked:
+    /// dropping the `!external` filter keeps node 3; dropping the is-a boost makes
+    /// the pair weight 2+3=5.
+    #[test]
+    fn clustering_view_excludes_external_and_boosts_is_a() {
+        let mut g = AggregatedGraph::default();
+        g.nodes.insert(1, node(false));
+        g.nodes.insert(2, node(false));
+        g.nodes.insert(3, node(true)); // external
+        g.edges = vec![
+            AggregateEdge {
+                a: 1,
+                b: 2,
+                kind: EdgeKind::Implements,
+                weight: 2,
+            },
+            AggregateEdge {
+                a: 1,
+                b: 2,
+                kind: EdgeKind::Calls,
+                weight: 3,
+            },
+            AggregateEdge {
+                a: 2,
+                b: 3,
+                kind: EdgeKind::Calls,
+                weight: 3,
+            }, // to external
+        ];
+        let v = g.clustering_view();
+        assert!(!v.nodes.contains_key(&3), "external node dropped");
+        assert_eq!(v.nodes.len(), 2);
+        // 2→3 edge (incident to external) is gone; 1↔2 keeps implements·4 + calls.
+        let w: u32 = v.adj[&1]
+            .iter()
+            .find(|&&(n, _)| n == 2)
+            .map(|&(_, w)| w)
+            .unwrap();
+        assert_eq!(w, 2 * 4 + 3, "is-a boosted ×4, calls unchanged");
+        assert_eq!(v.edges.len(), 2, "only the two internal edges survive");
+    }
 }

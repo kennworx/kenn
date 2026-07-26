@@ -2,7 +2,7 @@
 //! read/knowledge tools (`overview`, `find`, `list`, `check`, `findings`,
 //! `get`). Each leaf is a thin wrapper: parse argv → build a `ServerState` →
 //! call the same `kenn_mcp::tools::*` function the MCP server calls → render
-//! the JSON value as TOON (default) or JSON (`--json`).
+//! the typed result as TOON (default) or JSON (`--json`).
 //!
 //! See the `cli-query-surface` capability. The MCP server is not touched; this
 //! only *calls* the tool functions.
@@ -17,7 +17,10 @@ use serde_json::Value;
 
 use kenn_config::Config;
 use kenn_mcp::tools::{self, ServerState};
-use kenn_mcp::{Filters, McpError, McpErrorCode, Pagination, WorkspaceSource};
+use kenn_mcp::{
+    Filters, FindUsagesResponse, ListResponse, McpError, McpErrorCode, Pagination, UsageRef,
+    WorkspaceSource,
+};
 use kenn_model::{EdgeKind, FieldOp, Kind, Language};
 use kenn_store::Layout;
 
@@ -47,7 +50,7 @@ struct FilterArgs {
 
 /// Pagination for the cursor-capable tools.
 #[derive(Debug, Args)]
-struct PageArgs {
+pub struct PageArgs {
     /// Rows per response.
     #[arg(long)]
     page_size: Option<u32>,
@@ -189,6 +192,22 @@ struct ByIdCmd {
     page: PageArgs,
 }
 
+/// `kenn documents` — the non-code directory axis.
+///
+/// A subcommand-capable group rather than a leaf verb: the axis is expected to
+/// grow its own subcommands, and a `document` is a different concept type with
+/// different fields, so folding it into `kenn packages` would make that verb's
+/// rows non-uniform and drop its default output out of table form.
+#[derive(Debug, Args)]
+pub struct DocumentsGroup {
+    /// Restrict to one directory by name.
+    document: Option<String>,
+    #[command(flatten)]
+    page: PageArgs,
+    #[arg(long)]
+    json: bool,
+}
+
 /// `kenn check` — diagnostic sweeps.
 #[derive(Debug, Args)]
 pub struct CheckGroup {
@@ -314,6 +333,46 @@ pub enum QueryCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Packages and how they depend on each other. Bare: the first page of
+    /// packages with their role and coupling counts, most-depended-on first —
+    /// pass `--all` for every one. With a name: that package's full typed
+    /// coupling in both directions.
+    Packages {
+        /// Exact package name, as it appears in the atlas.
+        package: Option<String>,
+        #[command(flatten)]
+        page: PageArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cross-package domains: clusters that span more than one package. Bare:
+    /// the first page of domains with their size and span counts, heaviest first
+    /// — pass `--all` for every one. With a name (hub id or title): that
+    /// domain's spanned packages and central symbols.
+    Domains {
+        /// The domain's hub symbol id, or its title.
+        domain: Option<String>,
+        #[command(flatten)]
+        page: PageArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cross-package contracts: interfaces / base types implemented in more
+    /// than one package. Bare: the first page of contracts with their
+    /// implementer and span counts, widest first — pass `--all` for every one.
+    /// With a name (id or title): its implementers.
+    Contracts {
+        /// The contract's symbol id, or its title. A title matching several
+        /// contracts returns them all.
+        contract: Option<String>,
+        #[command(flatten)]
+        page: PageArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// First-party non-code directories the atlas tracks (docs, specs, …).
+    /// Bare: the first page with their file counts — pass `--all` for every one.
+    Documents(DocumentsGroup),
     /// Search / resolve symbols. A bare `<query>` runs semantic search.
     ///
     /// Note: a single-word query that matches a subcommand name (e.g.
@@ -335,6 +394,18 @@ pub enum QueryCommand {
 pub fn dispatch(cmd: QueryCommand, ctx: Ctx) -> Result<ExitCodes> {
     match cmd {
         QueryCommand::Overview { json } => run_overview(ctx, json),
+        QueryCommand::Packages {
+            package,
+            page,
+            json,
+        } => run_packages(ctx, package, page, json),
+        QueryCommand::Domains { domain, page, json } => run_domains(ctx, domain, page, json),
+        QueryCommand::Contracts {
+            contract,
+            page,
+            json,
+        } => run_contracts(ctx, contract, page, json),
+        QueryCommand::Documents(g) => run_documents(ctx, g),
         QueryCommand::Find(g) => run_find(ctx, g),
         QueryCommand::List(g) => run_list(ctx, g),
         QueryCommand::Check(g) => run_check(ctx, g),
@@ -379,17 +450,108 @@ impl Facets {
 }
 
 pub fn run_overview(ctx: Ctx, json: bool) -> Result<ExitCodes> {
-    run_on_state(
-        ctx,
-        Format::from_json_flag(json),
-        false,
-        |state| async move {
-            to_val(
-                tools::get_workspace_overview(&state, tools::GetWorkspaceOverviewArgs::default())
-                    .await,
-            )
-        },
-    )
+    let fmt = Format::from_json_flag(json);
+    run_on_state(ctx, false, |state| async move {
+        emit_result(
+            tools::get_workspace_overview(&state, tools::GetWorkspaceOverviewArgs::default()).await,
+            fmt,
+        )
+    })
+}
+
+pub fn run_packages(
+    ctx: Ctx,
+    package: Option<String>,
+    page: PageArgs,
+    json: bool,
+) -> Result<ExitCodes> {
+    let fmt = Format::from_json_flag(json);
+    run_on_state(ctx, false, |state| async move {
+        emit_result(
+            run_listing(page.all, &page, |pg| async {
+                tools::list_packages(
+                    &state,
+                    &tools::ListPackagesArgs {
+                        package: package.clone(),
+                        pagination: pg,
+                    },
+                )
+                .await
+            })
+            .await,
+            fmt,
+        )
+    })
+}
+
+pub fn run_domains(
+    ctx: Ctx,
+    domain: Option<String>,
+    page: PageArgs,
+    json: bool,
+) -> Result<ExitCodes> {
+    let fmt = Format::from_json_flag(json);
+    run_on_state(ctx, false, |state| async move {
+        emit_result(
+            run_listing(page.all, &page, |pg| async {
+                tools::list_domains(
+                    &state,
+                    &tools::ListDomainsArgs {
+                        domain: domain.clone(),
+                        pagination: pg,
+                    },
+                )
+                .await
+            })
+            .await,
+            fmt,
+        )
+    })
+}
+
+pub fn run_contracts(
+    ctx: Ctx,
+    contract: Option<String>,
+    page: PageArgs,
+    json: bool,
+) -> Result<ExitCodes> {
+    let fmt = Format::from_json_flag(json);
+    run_on_state(ctx, false, |state| async move {
+        emit_result(
+            run_listing(page.all, &page, |pg| async {
+                tools::list_contracts(
+                    &state,
+                    &tools::ListContractsArgs {
+                        contract: contract.clone(),
+                        pagination: pg,
+                    },
+                )
+                .await
+            })
+            .await,
+            fmt,
+        )
+    })
+}
+
+pub fn run_documents(ctx: Ctx, g: DocumentsGroup) -> Result<ExitCodes> {
+    let fmt = Format::from_json_flag(g.json);
+    run_on_state(ctx, false, |state| async move {
+        emit_result(
+            run_listing(g.page.all, &g.page, |pg| async {
+                tools::list_documents(
+                    &state,
+                    &tools::ListDocumentsArgs {
+                        document: g.document.clone(),
+                        pagination: pg,
+                    },
+                )
+                .await
+            })
+            .await,
+            fmt,
+        )
+    })
 }
 
 pub fn run_find(ctx: Ctx, g: FindGroup) -> Result<ExitCodes> {
@@ -398,23 +560,23 @@ pub fn run_find(ctx: Ctx, g: FindGroup) -> Result<ExitCodes> {
     // Bare `find` (semantic) and `find symbols` (blended lexical+vector) embed
     // the query; the rest are pure lexical/graph reads.
     let embeds = matches!(g.sub, None | Some(FindSub::Symbols { .. }));
-    run_on_state(ctx, fmt, embeds, |state| async move {
-        find_value(&state, facets, g).await
+    run_on_state(ctx, embeds, |state| async move {
+        find_action(&state, fmt, facets, g).await
     })
 }
 
 pub fn run_list(ctx: Ctx, g: ListGroup) -> Result<ExitCodes> {
     let fmt = Format::from_json_flag(g.json);
     let facets = Facets::of(&ctx);
-    run_on_state(ctx, fmt, false, |state| async move {
-        list_value(&state, facets, g.sub).await
+    run_on_state(ctx, false, |state| async move {
+        list_action(&state, fmt, facets, g.sub).await
     })
 }
 
 pub fn run_check(ctx: Ctx, g: CheckGroup) -> Result<ExitCodes> {
     let fmt = Format::from_json_flag(g.json);
-    run_on_state(ctx, fmt, false, |state| async move {
-        check_value(&state, g.sub).await
+    run_on_state(ctx, false, |state| async move {
+        check_action(&state, fmt, g.sub).await
     })
 }
 
@@ -430,21 +592,23 @@ pub fn run_findings(ctx: Ctx, g: FindingsGroup) -> Result<ExitCodes> {
             | FindingsSub::Merge { .. }
             | FindingsSub::Directives { query: Some(_), .. }
     );
-    run_on_state(ctx, fmt, embeds, |state| async move {
-        findings_value(&state, g.sub).await
+    run_on_state(ctx, embeds, |state| async move {
+        findings_action(&state, fmt, g.sub).await
     })
 }
 
 pub fn run_get(ctx: Ctx, g: GetGroup) -> Result<ExitCodes> {
     let fmt = Format::from_json_flag(g.json);
-    run_on_state(ctx, fmt, false, |state| async move {
+    run_on_state(ctx, false, |state| async move {
         match g.sub {
-            GetSub::Symbol { id } => {
-                to_val(tools::get_symbol(&state, &tools::GetSymbolArgs { id }).await)
-            }
-            GetSub::Source { id } => {
-                to_val(tools::get_source(&state, &tools::GetSourceArgs { id }).await)
-            }
+            GetSub::Symbol { id } => emit_result(
+                tools::get_symbol(&state, &tools::GetSymbolArgs { id }).await,
+                fmt,
+            ),
+            GetSub::Source { id } => emit_result(
+                tools::get_source(&state, &tools::GetSourceArgs { id }).await,
+                fmt,
+            ),
         }
     })
 }
@@ -459,13 +623,18 @@ pub fn run_get(ctx: Ctx, g: GetGroup) -> Result<ExitCodes> {
               tool call. Splitting into per-arm helpers would scatter the \
               subcommand→tool mapping without reducing real complexity."
 )]
-async fn find_value(state: &ServerState, facets: Facets, g: FindGroup) -> Result<Value, McpError> {
+async fn find_action(
+    state: &ServerState,
+    fmt: Format,
+    facets: Facets,
+    g: FindGroup,
+) -> anyhow::Result<()> {
     match g.sub {
         None => {
             // Bare `find <query>` → semantic search. The embedder is pre-warmed
             // in `run_on_state` (this subcommand's `embeds` flag is set).
             let query = g.query.join(" ");
-            to_val(
+            emit_result(
                 tools::semantic_search(
                     state,
                     &tools::SemanticSearchArgs {
@@ -477,13 +646,14 @@ async fn find_value(state: &ServerState, facets: Facets, g: FindGroup) -> Result
                     },
                 )
                 .await,
+                fmt,
             )
         }
         Some(FindSub::Symbol {
             name,
             kind,
             page_size,
-        }) => to_val(
+        }) => emit_result(
             tools::find_symbol(
                 state,
                 &tools::FindSymbolArgs {
@@ -495,28 +665,28 @@ async fn find_value(state: &ServerState, facets: Facets, g: FindGroup) -> Result
                 },
             )
             .await,
+            fmt,
         ),
         Some(FindSub::Symbols {
             query,
             filters,
             page,
-        }) => {
+        }) => emit_result(
             run_listing(page.all, &page, |pg| async {
-                to_val(
-                    tools::search_symbols(
-                        state,
-                        &tools::SearchSymbolsArgs {
-                            query: query.clone(),
-                            filters: to_filters(&filters, facets)?,
-                            pagination: pg,
-                        },
-                    )
-                    .await,
+                tools::search_symbols(
+                    state,
+                    &tools::SearchSymbolsArgs {
+                        query: query.clone(),
+                        filters: to_filters(&filters, facets)?,
+                        pagination: pg,
+                    },
                 )
+                .await
             })
-            .await
-        }
-        Some(FindSub::AtLocation { file, line, kind }) => to_val(
+            .await,
+            fmt,
+        ),
+        Some(FindSub::AtLocation { file, line, kind }) => emit_result(
             tools::find_at_location(
                 state,
                 &tools::FindAtLocationArgs {
@@ -526,8 +696,9 @@ async fn find_value(state: &ServerState, facets: Facets, g: FindGroup) -> Result
                 },
             )
             .await,
+            fmt,
         ),
-        Some(FindSub::Similar { id, page_size }) => to_val(
+        Some(FindSub::Similar { id, page_size }) => emit_result(
             tools::find_similar(
                 state,
                 &tools::FindSimilarArgs {
@@ -538,6 +709,7 @@ async fn find_value(state: &ServerState, facets: Facets, g: FindGroup) -> Result
                 },
             )
             .await,
+            fmt,
         ),
         Some(FindSub::Usages {
             query,
@@ -551,8 +723,8 @@ async fn find_value(state: &ServerState, facets: Facets, g: FindGroup) -> Result
             let kind = parse_enums::<Kind>(&kind, "kind")?;
             let language = parse_enums::<Language>(&language, "language")?;
             let edge_kinds = parse_enums::<EdgeKind>(&edge_kinds, "edge-kinds")?;
-            run_listing(page.all, &page, |pg| async {
-                to_val(
+            emit_result(
+                run_listing(page.all, &page, |pg| async {
                     tools::find_usages(
                         state,
                         &tools::FindUsagesArgs {
@@ -568,23 +740,29 @@ async fn find_value(state: &ServerState, facets: Facets, g: FindGroup) -> Result
                             cursor: pg.and_then(|p| p.cursor),
                         },
                     )
-                    .await,
-                )
-            })
-            .await
+                    .await
+                })
+                .await,
+                fmt,
+            )
         }
     }
 }
 
-async fn list_value(state: &ServerState, facets: Facets, sub: ListSub) -> Result<Value, McpError> {
+async fn list_action(
+    state: &ServerState,
+    fmt: Format,
+    facets: Facets,
+    sub: ListSub,
+) -> anyhow::Result<()> {
     // The `<id>` + filters + pagination `list` leaves share a call shape. A
     // generic higher-order helper can't express it (an async fn as
     // `Fn(&_, &_) -> Fut` hits an HRTB limitation), so expand per-tool.
     macro_rules! by_id {
         ($tool:path, $c:expr) => {{
             let c = $c;
-            run_listing(c.page.all, &c.page, |pg| async {
-                to_val(
+            emit_result(
+                run_listing(c.page.all, &c.page, |pg| async {
                     $tool(
                         state,
                         &tools::ByIdArgs {
@@ -593,10 +771,11 @@ async fn list_value(state: &ServerState, facets: Facets, sub: ListSub) -> Result
                             pagination: pg,
                         },
                     )
-                    .await,
-                )
-            })
-            .await
+                    .await
+                })
+                .await,
+                fmt,
+            )
         }};
     }
     match sub {
@@ -619,8 +798,8 @@ async fn list_value(state: &ServerState, facets: Facets, sub: ListSub) -> Result
                 .as_deref()
                 .map(|s| parse_enum::<FieldOp>(s, "op-filter"))
                 .transpose()?;
-            run_listing(page.all, &page, |pg| async {
-                to_val(
+            emit_result(
+                run_listing(page.all, &page, |pg| async {
                     tools::list_usages(
                         state,
                         &tools::ListUsagesArgs {
@@ -631,10 +810,11 @@ async fn list_value(state: &ServerState, facets: Facets, sub: ListSub) -> Result
                             pagination: pg,
                         },
                     )
-                    .await,
-                )
-            })
-            .await
+                    .await
+                })
+                .await,
+                fmt,
+            )
         }
         ListSub::Imports {
             id,
@@ -644,8 +824,8 @@ async fn list_value(state: &ServerState, facets: Facets, sub: ListSub) -> Result
             page,
         } => {
             let direction = parse_enum(&direction, "direction")?;
-            run_listing(page.all, &page, |pg| async {
-                to_val(
+            emit_result(
+                run_listing(page.all, &page, |pg| async {
                     tools::list_imports(
                         state,
                         &tools::ListImportsArgs {
@@ -656,17 +836,18 @@ async fn list_value(state: &ServerState, facets: Facets, sub: ListSub) -> Result
                             pagination: pg,
                         },
                     )
-                    .await,
-                )
-            })
-            .await
+                    .await
+                })
+                .await,
+                fmt,
+            )
         }
     }
 }
 
-async fn check_value(state: &ServerState, sub: CheckSub) -> Result<Value, McpError> {
+async fn check_action(state: &ServerState, fmt: Format, sub: CheckSub) -> anyhow::Result<()> {
     match sub {
-        CheckSub::Links { grade, limit } => to_val(
+        CheckSub::Links { grade, limit } => emit_result(
             tools::check_links(
                 state,
                 &tools::CheckLinksArgs {
@@ -675,8 +856,9 @@ async fn check_value(state: &ServerState, sub: CheckSub) -> Result<Value, McpErr
                 },
             )
             .await,
+            fmt,
         ),
-        CheckSub::Css { category, limit } => to_val(
+        CheckSub::Css { category, limit } => emit_result(
             tools::check_css(
                 state,
                 &tools::CheckCssArgs {
@@ -685,39 +867,41 @@ async fn check_value(state: &ServerState, sub: CheckSub) -> Result<Value, McpErr
                 },
             )
             .await,
+            fmt,
         ),
-        CheckSub::Findings => {
-            to_val(tools::check_anchors(state, &tools::CheckAnchorsArgs {}).await)
-        }
+        CheckSub::Findings => emit_result(
+            tools::check_anchors(state, &tools::CheckAnchorsArgs {}).await,
+            fmt,
+        ),
     }
 }
 
-async fn findings_value(state: &ServerState, sub: FindingsSub) -> Result<Value, McpError> {
+async fn findings_action(state: &ServerState, fmt: Format, sub: FindingsSub) -> anyhow::Result<()> {
     match sub {
-        FindingsSub::Get { id } => {
-            to_val(tools::get_finding(state, &tools::GetFindingArgs { id }).await)
-        }
-        FindingsSub::Search { query, page } => {
+        FindingsSub::Get { id } => emit_result(
+            tools::get_finding(state, &tools::GetFindingArgs { id }).await,
+            fmt,
+        ),
+        FindingsSub::Search { query, page } => emit_result(
             run_listing(page.all, &page, |pg| async {
-                to_val(
-                    tools::search_findings(
-                        state,
-                        &tools::SearchFindingsArgs {
-                            query: query.clone(),
-                            pagination: pg,
-                        },
-                    )
-                    .await,
+                tools::search_findings(
+                    state,
+                    &tools::SearchFindingsArgs {
+                        query: query.clone(),
+                        pagination: pg,
+                    },
                 )
+                .await
             })
-            .await
-        }
+            .await,
+            fmt,
+        ),
         FindingsSub::Add {
             text,
             parent,
             tag,
             anchor,
-        } => to_val(
+        } => emit_result(
             tools::store_finding(
                 state,
                 &tools::StoreFindingArgs {
@@ -728,8 +912,9 @@ async fn findings_value(state: &ServerState, sub: FindingsSub) -> Result<Value, 
                 },
             )
             .await,
+            fmt,
         ),
-        FindingsSub::Merge { ids, text, tag } => to_val(
+        FindingsSub::Merge { ids, text, tag } => emit_result(
             tools::merge_findings(
                 state,
                 &tools::MergeFindingsArgs {
@@ -739,24 +924,28 @@ async fn findings_value(state: &ServerState, sub: FindingsSub) -> Result<Value, 
                 },
             )
             .await,
+            fmt,
         ),
-        FindingsSub::Directives { paths, query } => {
+        FindingsSub::Directives { paths, query } => emit_result(
             // Embedder pre-warmed in `run_on_state` when `--query` is present.
-            to_val(tools::find_directives(state, &tools::FindDirectivesArgs { paths, query }).await)
-        }
-        FindingsSub::Predecessors { id } => {
-            to_val(tools::find_predecessors(state, &tools::FindingDagArgs { id }).await)
-        }
-        FindingsSub::Successors { id } => {
-            to_val(tools::find_successors(state, &tools::FindingDagArgs { id }).await)
-        }
+            tools::find_directives(state, &tools::FindDirectivesArgs { paths, query }).await,
+            fmt,
+        ),
+        FindingsSub::Predecessors { id } => emit_result(
+            tools::find_predecessors(state, &tools::FindingDagArgs { id }).await,
+            fmt,
+        ),
+        FindingsSub::Successors { id } => emit_result(
+            tools::find_successors(state, &tools::FindingDagArgs { id }).await,
+            fmt,
+        ),
         FindingsSub::Touch {
             finding_id,
             op,
             anchor,
             from,
             to,
-        } => to_val(
+        } => emit_result(
             tools::record_anchor(
                 state,
                 &tools::RecordAnchorArgs {
@@ -768,6 +957,7 @@ async fn findings_value(state: &ServerState, sub: FindingsSub) -> Result<Value, 
                 },
             )
             .await,
+            fmt,
         ),
     }
 }
@@ -777,15 +967,15 @@ async fn findings_value(state: &ServerState, sub: FindingsSub) -> Result<Value, 
 // ---------------------------------------------------------------------------
 
 /// Build the `ServerState`, bootstrap it (open the live snapshot + findings
-/// store), run the async producer on a fresh runtime, and render the result.
+/// store), and run the async producer on a fresh runtime — the producer
+/// serializes its own typed result to stdout (see `render::emit`).
 fn run_on_state<Fut>(
     ctx: Ctx,
-    fmt: Format,
     embeds: bool,
     f: impl FnOnce(Arc<ServerState>) -> Fut,
 ) -> Result<ExitCodes>
 where
-    Fut: Future<Output = Result<Value, McpError>>,
+    Fut: Future<Output = anyhow::Result<()>>,
 {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -803,10 +993,7 @@ where
             prewarm_embedder().await;
         }
         match f(state).await {
-            Ok(v) => {
-                emit(&v, fmt);
-                Ok(ExitCodes::Ok)
-            }
+            Ok(()) => Ok(ExitCodes::Ok),
             Err(e) => {
                 eprintln!("error: {e}");
                 Ok(ExitCodes::Generic)
@@ -815,41 +1002,65 @@ where
     })
 }
 
-/// Single page (honoring `--cursor`) unless `--all`, in which case follow
-/// `next` to exhaustion and return one merged `{items, next: null}`.
-async fn run_listing<F, Fut>(all: bool, page: &PageArgs, mut call: F) -> Result<Value, McpError>
+/// A paginated tool response `run_listing` can drain and merge: an `items` list
+/// plus a `next` cursor. Any other fields (e.g. `find_usages`' `targets` /
+/// `truncated`) ride along from the last page.
+trait Page {
+    type Item;
+    fn items_mut(&mut self) -> &mut Vec<Self::Item>;
+    fn take_next(&mut self) -> Option<String>;
+}
+
+impl<T> Page for ListResponse<T> {
+    type Item = T;
+    fn items_mut(&mut self) -> &mut Vec<T> {
+        &mut self.items
+    }
+    fn take_next(&mut self) -> Option<String> {
+        self.next.take()
+    }
+}
+
+impl Page for FindUsagesResponse {
+    type Item = UsageRef;
+    fn items_mut(&mut self) -> &mut Vec<UsageRef> {
+        &mut self.items
+    }
+    fn take_next(&mut self) -> Option<String> {
+        self.next.take()
+    }
+}
+
+/// Single page (honoring `--cursor`) unless `--all`, in which case follow `next`
+/// to exhaustion and return one response: all pages' `items` merged, `next`
+/// cleared, and the last page's other meta fields kept. Typed all the way —
+/// no `Value` round-trip, so the emitted columns still follow struct order.
+async fn run_listing<P, F, Fut>(all: bool, page: &PageArgs, mut call: F) -> Result<P, McpError>
 where
+    P: Page,
     F: FnMut(Option<Pagination>) -> Fut,
-    Fut: Future<Output = Result<Value, McpError>>,
+    Fut: Future<Output = Result<P, McpError>>,
 {
     if !all {
         return call(to_pagination(page)).await;
     }
     let mut cursor: Option<String> = None;
-    let mut items: Vec<Value> = Vec::new();
+    let mut items: Vec<P::Item> = Vec::new();
     loop {
         let pg = Some(Pagination {
             page_size: page.page_size,
             cursor: cursor.clone(),
         });
-        let mut v = call(pg).await?;
-        let Some(arr) = v.get("items").and_then(Value::as_array) else {
-            // Non-list shape — return verbatim rather than fabricate a table.
-            return Ok(v);
-        };
-        items.extend(arr.iter().cloned());
-        let Some(next) = v.get("next").and_then(Value::as_str).map(str::to_owned) else {
-            // Last page — keep its non-items/next fields (e.g. `find_usages`
-            // truncated / total_targets, so a capped result set stays visible)
-            // and just swap in the merged items.
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("items".to_owned(), Value::Array(items));
-                obj.insert("next".to_owned(), Value::Null);
-                return Ok(v);
-            }
-            return Ok(serde_json::json!({ "items": items, "next": Value::Null }));
-        };
-        cursor = Some(next);
+        let mut resp = call(pg).await?;
+        items.append(resp.items_mut());
+        if let Some(next) = resp.take_next() {
+            cursor = Some(next);
+        } else {
+            // Last page — `take_next` already cleared its `next`; swap the merged
+            // items in and return it (its `targets`/`truncated` are the finals).
+            *resp.items_mut() = items;
+            return Ok(resp);
+        }
     }
 }
 
@@ -863,8 +1074,10 @@ async fn prewarm_embedder() {
         .await;
 }
 
-fn to_val<T: Serialize>(r: Result<T, McpError>) -> Result<Value, McpError> {
-    r.map(|v| serde_json::to_value(v).expect("tool result serializes to JSON"))
+/// Serialize a tool result to stdout in the chosen format, or propagate its
+/// error. Keeps the per-subcommand arms a single expression.
+fn emit_result<T: Serialize>(result: Result<T, McpError>, fmt: Format) -> anyhow::Result<()> {
+    emit(&result?, fmt)
 }
 
 fn to_pagination(p: &PageArgs) -> Option<Pagination> {

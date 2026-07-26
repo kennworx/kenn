@@ -308,7 +308,12 @@ fn md_to_code_link_resolves_and_backlinks() {
         .expect("reader");
     let (inbound, total) = rt
         .block_on(Reader::list_inbound(
-            &reader, code_sym, "links_to", 50, None, false, true,
+            &reader,
+            code_sym,
+            "links_to",
+            50,
+            None,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound");
     assert_eq!(total, 1);
@@ -407,15 +412,19 @@ fn md_to_code_file_link_uses_links_to_file_edge() {
             "links_to_file",
             50,
             None,
-            false,
-            true,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound links_to_file");
     assert_eq!(total, 1);
     assert!(ltf[0].pub_id.starts_with("md:workspace/docs/guide.md"));
     let (lt, _) = rt
         .block_on(Reader::list_inbound(
-            &reader, code_file, "links_to", 50, None, false, true,
+            &reader,
+            code_file,
+            "links_to",
+            50,
+            None,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound links_to");
     assert!(lt.is_empty());
@@ -462,8 +471,7 @@ fn nested_directory_modules_chain_and_own_documents() {
             "defined_in",
             50,
             None,
-            false,
-            true,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound")
         .0
@@ -600,7 +608,12 @@ fn end_to_end_corpus_graph() {
     };
     let inbound = |id, rel: &str| {
         rt.block_on(Reader::list_inbound(
-            &reader, id, rel, 50, None, false, true,
+            &reader,
+            id,
+            rel,
+            50,
+            None,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound")
         .0

@@ -10,6 +10,8 @@ vectors/**/.last-access
 vectors/.tmp/
 vectors/gc.lock
 findings/.tmp/
-# `atlas` is a convenience symlink to the live OKF atlas bundle, regenerated
-# each index (its target lives under the derived store).
+# `atlas` is a convenience symlink to the current OKF atlas bundle, replaced on
+# each index. It points at the RESOLVED run directory under the derived store —
+# never through `live`, which is a pointer FILE and not traversable; linking
+# through it is what left this dangling before.
 atlas

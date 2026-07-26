@@ -27,6 +27,7 @@ mod cmd_visualize;
 mod exit;
 mod init;
 mod render;
+mod toon;
 
 use exit::ExitCodes;
 

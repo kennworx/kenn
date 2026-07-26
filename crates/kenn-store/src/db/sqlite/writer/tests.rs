@@ -440,6 +440,7 @@ fn aggregate_analysis_writes_and_scans_roundtrip() {
             language: Language::Rust,
             external: false,
             test: false,
+            example: false,
             anchor_id: 0,
             anchor_name: "<unanchored>".into(),
         }],

@@ -41,6 +41,13 @@ use crate::package_layout::PackageLayout;
 /// note-to-note graph (an `embeds`/transclusion is tighter coupling than
 /// a plain reference, hence weight 2 vs 1, mirroring calls > type-use).
 ///
+/// `extends_type` (class/struct inheritance) is kept alongside `implements`:
+/// both are "is-a" bonds, and inheritance is real coupling a base class exerts
+/// on its subclasses. It is the ONLY form C# inheritance takes (C# emits no
+/// `implements` for a base class, ~1.7k `extends_type` edges on a large
+/// solution), so dropping it made every C# class hierarchy invisible to the
+/// coupling tables and to community detection.
+///
 /// Skipped kinds (`defined_in`, `contains`, `generic_constraint`,
 /// `corresponds_to`) are the structural / equivalence relations that
 /// just re-derive the symbol tree. `links_to_file` is also skipped: its
@@ -50,6 +57,7 @@ pub const KEPT_EDGE_KINDS: &[(EdgeKind, u32)] = &[
     (EdgeKind::TypeUse, 2),
     (EdgeKind::FieldAccess, 2),
     (EdgeKind::Implements, 2),
+    (EdgeKind::ExtendsType, 2),
     (EdgeKind::Instantiates, 2),
     (EdgeKind::Overrides, 1),
     (EdgeKind::Imports, 1),
@@ -125,12 +133,16 @@ fn walk_to_aggregate(start: ShortId, symbols: &HashMap<ShortId, SymbolRecord>) -
     }
 }
 
-/// Aggregate per-symbol edges of one kind into weighted undirected
-/// aggregate-pair edges. Skips self-loops on the aggregate graph,
-/// applies the module-to-module-only rule for `imports`, and dedupes
-/// undirected by sorting endpoints.
+/// Aggregate per-symbol edges of one kind into weighted DIRECTED
+/// aggregate-pair edges. Skips self-loops on the aggregate graph and
+/// applies the module-to-module-only rule for `imports`.
 ///
-/// Returns a map `(min_agg, max_agg, kind) -> total_weight`. Callers
+/// Endpoints are NOT sorted: `src → tgt` is kept as-is (see the comment at the
+/// insert), because consumers that need direction read it — the atlas `Depends
+/// on` links, and the contracts axis, which can only tell an implementer from
+/// its interface by the edge's direction.
+///
+/// Returns a map `(src_agg, tgt_agg, kind) -> total_weight`. Callers
 /// typically iterate `KEPT_EDGE_KINDS`, call this per kind, then merge
 /// into a single sorted edge list for persistence.
 #[must_use]
@@ -246,7 +258,7 @@ fn anchor_name_for(
     if let Some(s) = symbols.get(&agg) {
         if s.pkg_id != 0 {
             if let Some(p) = packages.get(&s.pkg_id) {
-                if !p.is_empty() {
+                if is_usable_anchor_name(p) {
                     return p.clone();
                 }
             }
@@ -269,6 +281,142 @@ fn first_path_segment(path: &str) -> Option<&str> {
     path.split('/').find(|s| !s.is_empty())
 }
 
+/// Whether a producer-supplied package name can serve as an anchor name.
+///
+/// A name with no alphanumeric character is a PLACEHOLDER, not a name.
+/// scip-python reports the project's own package as `"."` — the project root as
+/// a path — and an emptiness check let it through, so the whole repo anchored on
+/// `.`: a package concept titled `.` in a file called `python_..md`, with
+/// components `python_._src.md` and `python_._docs.md`. Names like those tell a
+/// reader nothing and make the id unreadable.
+///
+/// Rejecting it falls through to the manifest chain, which is strictly better
+/// than a salvage: `pyproject.toml` gives the real distribution name, and
+/// because markers sort deepest-first, a repo whose examples carry their own
+/// manifests splits into those packages instead of collapsing into one anchor.
+fn is_usable_anchor_name(name: &str) -> bool {
+    name.chars().any(char::is_alphanumeric)
+}
+
+/// Full path segments that mark bundled example/sample/demo code. Nodes under
+/// one are excluded from domain + central eligibility (like tests), so a demo
+/// app referencing a library type never fabricates a "domain" or a "central"
+/// symbol.
+const EXAMPLE_SEGMENTS: &[&str] = &[
+    "example", "examples", "sample", "samples", "demo", "demos", "fixtures",
+];
+
+/// Whether `path` lies under an example/sample/demo/fixtures directory segment
+/// (case-insensitive, full segment).
+///
+/// Evaluated here rather than in the atlas because the answer is persisted on
+/// the aggregate node: a query over a published snapshot sees no paths, so a
+/// consumer-side derivation is not available to every consumer. The atlas keeps
+/// one path-level caller — sub-area grouping ranges over all of a package's
+/// symbols, not just its aggregate nodes.
+#[must_use]
+pub(crate) fn is_example_path(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .any(|seg| EXAMPLE_SEGMENTS.contains(&seg.to_ascii_lowercase().as_str()))
+}
+
+/// The EARNED domain count: flat-Louvain communities that clear the domain
+/// axis's floors, which is what `kenn domains` lists and what the atlas renders.
+///
+/// This exists because the overview's `cross_anchor_communities` is the RAW
+/// count — every community touching more than one anchor — and the two disagreed
+/// by 4x with nothing on either surface saying which was which. Raw communities
+/// systematically overstate: they include packages joined only through a shared
+/// vendored type, plus one-symbol stragglers.
+///
+/// Goes through [`crate::atlas::domains::select_domains`], the same rule the
+/// atlas producer and the domains query use, so a third surface cannot invent a
+/// fourth answer. Reads nothing it isn't given — the caller supplies the
+/// communities it read back off the writer's own connection, so this stays
+/// `kenn-analyze`-free (the atlas ⊥ analyze rule in `atlas-bundle`).
+#[must_use]
+pub(crate) fn earned_domain_count(
+    nodes: &[AggregateNodeRecord],
+    edges: &[AggregateEdgeRecord],
+    flat: &[kenn_model::AnalysisFlatCommunityRecord],
+    membership: &[kenn_model::AnalysisNodeMembershipRecord],
+) -> usize {
+    use crate::atlas::domains;
+
+    // First-party + anchored only: an external node is a vendored dependency and
+    // `<unanchored>` is the no-package sentinel. Same projection the query makes.
+    let node_anchor: HashMap<ShortId, &str> = nodes
+        .iter()
+        .filter(|n| !n.external && n.anchor_name != UNANCHORED)
+        .map(|n| (n.id, n.anchor_name.as_str()))
+        .collect();
+    // Every eligibility fact comes off the node record — `example` included,
+    // since it became a persisted node fact. No file joins needed here.
+    let eligible: HashSet<ShortId> = nodes
+        .iter()
+        .filter(|n| {
+            domains::is_domain_eligible(
+                &domains::NodeFacts {
+                    id: n.id,
+                    language: n.language.db_name(),
+                    kind: n.kind.db_name(),
+                    name: n.name.as_str(),
+                    external: n.external,
+                    test: n.test,
+                    example: n.example,
+                },
+                node_anchor.contains_key(&n.id),
+            )
+        })
+        .map(|n| n.id)
+        .collect();
+    let symbol_name: HashMap<ShortId, &str> =
+        nodes.iter().map(|n| (n.id, n.name.as_str())).collect();
+
+    // Single-dominant (a monolithic library) keeps within-anchor communities too,
+    // matching both other surfaces: strict majority over the eligible set.
+    let mut per_anchor: HashMap<&str, usize> = HashMap::new();
+    for n in nodes.iter().filter(|n| eligible.contains(&n.id)) {
+        if let Some(&a) = node_anchor.get(&n.id) {
+            *per_anchor.entry(a).or_default() += 1;
+        }
+    }
+    let total_prod: usize = per_anchor.values().sum();
+    let top_prod: usize = per_anchor.values().copied().max().unwrap_or(0);
+    let single_dominant = total_prod > 0 && top_prod * 2 > total_prod;
+
+    let keep: HashSet<u32> = flat
+        .iter()
+        .filter(|f| {
+            (f.cross_anchor || single_dominant) && f.size as usize >= domains::MIN_DOMAIN_SIZE
+        })
+        .map(|f| f.community_id)
+        .collect();
+    let membership_pairs: Vec<(ShortId, u32)> = membership
+        .iter()
+        .map(|m| (m.short_id, m.flat_community_id))
+        .collect();
+    let projected: Vec<domains::Edge> = edges
+        .iter()
+        .map(|e| domains::Edge {
+            src: e.src_id,
+            dst: e.dst_id,
+            weight: e.weight,
+        })
+        .collect();
+
+    domains::select_domains(
+        &keep,
+        &membership_pairs,
+        &eligible,
+        &projected,
+        &node_anchor,
+        &symbol_name,
+        single_dominant,
+    )
+    .len()
+}
+
 /// Build the `AggregateNodeRecord` list — one per anchor that actually
 /// participated in an aggregated edge (orphan symbols don't get rows).
 /// `participating` is the set of `(min_agg, max_agg)` endpoints from
@@ -282,6 +430,8 @@ pub fn build_aggregate_nodes(
     participating: &HashSet<ShortId>,
     symbols: &HashMap<ShortId, SymbolRecord>,
     anchors: &HashMap<ShortId, (u32, String)>,
+    primary_def_file: &HashMap<ShortId, ShortId>,
+    files: &HashMap<ShortId, String>,
 ) -> Vec<AggregateNodeRecord> {
     let mut out: Vec<AggregateNodeRecord> = participating
         .iter()
@@ -291,6 +441,12 @@ pub fn build_aggregate_nodes(
                 .get(sid)
                 .cloned()
                 .unwrap_or((0, UNANCHORED.to_string()));
+            // A node with no resolvable def path is not example code — absence
+            // of evidence, not evidence of exclusion.
+            let example = primary_def_file
+                .get(sid)
+                .and_then(|f| files.get(f))
+                .is_some_and(|p| is_example_path(p));
             Some(AggregateNodeRecord {
                 id: s.id,
                 kind: s.kind,
@@ -298,6 +454,7 @@ pub fn build_aggregate_nodes(
                 language: s.language,
                 external: s.external,
                 test: s.test,
+                example,
                 anchor_id,
                 anchor_name,
             })
@@ -421,19 +578,52 @@ pub async fn compute_and_persist(
         &primary_def_file,
         layout,
     );
-    let nodes = build_aggregate_nodes(&participating, &symbols, &anchors);
+    let nodes = build_aggregate_nodes(
+        &participating,
+        &symbols,
+        &anchors,
+        &primary_def_file,
+        &files,
+    );
     let edges = flatten_edges(per_kind_maps);
     let counts = (nodes.len(), edges.len());
     writer.write_aggregate_tables(&nodes, &edges).await?;
 
-    // The analysis hook runs FIRST now: it computes + persists the flat-Louvain
+    // The analysis hook runs FIRST: it computes + persists the flat-Louvain
     // communities (`analysis_node_membership` / `analysis_flat_communities`) that
     // the atlas reads back for its `domains` axis. It takes the records by value,
-    // so we clone when the atlas needs the originals for its package axis; with no
-    // atlas we hand the originals straight over.
-    if let Some(ctx) = atlas {
-        aggregated_hook(nodes.clone(), edges.clone(), writer.clone()).await?;
+    // so both paths clone — the earned-domain counter below needs them too, and
+    // an `AggregateEdgeRecord` is `Copy` while the node clone is a few MB on the
+    // largest repo measured. Cheaper than threading projections through the hook.
+    aggregated_hook(nodes.clone(), edges.clone(), writer.clone()).await?;
 
+    // The EARNED domain count, as a build-time stat row beside the raw
+    // `cross_anchor_communities` the analysis pass writes. Read back on the
+    // writer's own connection — the same move the atlas makes, so this adds no
+    // dependency on `kenn-analyze` (see `atlas-bundle`: the two stay parallel
+    // consumers of the persisted graph).
+    //
+    // Deliberately OUTSIDE the atlas branch: a counter that appears only on runs
+    // that built the atlas is a worse contract than the inconsistency it fixes.
+    // Written only when clustering actually produced communities, so "absent"
+    // means "analysis did not run" — exactly when the raw counter is absent too,
+    // and the two can never be read as disagreeing because one is missing.
+    let flat_communities = writer.scan_analysis_flat_communities().await?;
+    let node_membership = writer.scan_analysis_node_membership().await?;
+    if !flat_communities.is_empty() {
+        let earned = earned_domain_count(&nodes, &edges, &flat_communities, &node_membership);
+        writer
+            .write_stats(&[kenn_store::StatRow {
+                scope: "global".to_owned(),
+                key: String::new(),
+                subset: "graph".to_owned(),
+                metric: "domains".to_owned(),
+                value: i64::try_from(earned).unwrap_or(i64::MAX),
+            }])
+            .await?;
+    }
+
+    if let Some(ctx) = atlas {
         // Atlas (`atlas` capability): resolve anchors for every symbol (not just
         // the edge-participating ones), then build + write the OKF bundle from the
         // same aggregate graph. Runs on the shared pipeline (CLI + MCP).
@@ -461,16 +651,14 @@ pub async fn compute_and_persist(
                     .or_insert((start, end));
             }
         }
-        // The domains axis: the flat communities the hook just wrote, read back on
-        // the writer's own connection (atlas ⊥ kenn-analyze — it consumes the
-        // persisted tables, never recomputes clustering).
-        let membership = writer.scan_analysis_node_membership().await?;
-        let flat = writer.scan_analysis_flat_communities().await?;
+        // The domains axis reuses the communities already read back above (atlas ⊥
+        // kenn-analyze — it consumes the persisted tables, never recomputes
+        // clustering).
         // File-level module docs, to seed each package concept's `description`
         // (atlas tasks 3.4/8.4) verbatim from its root module.
         let file_docs: HashMap<ShortId, String> =
             writer.scan_file_docs().await?.into_iter().collect();
-        let (mut concepts, domains, shape) = crate::atlas::producer::build_concepts(
+        let (mut concepts, domains, contracts, shape) = crate::atlas::producer::build_concepts(
             &symbols,
             &files,
             &primary_def_file,
@@ -478,8 +666,8 @@ pub async fn compute_and_persist(
             &atlas_anchors,
             &nodes,
             &edges,
-            &membership,
-            &flat,
+            &node_membership,
+            &flat_communities,
             &primary_def_range,
             &file_docs,
             &crate::atlas::producer::ShapeMeta {
@@ -490,10 +678,22 @@ pub async fn compute_and_persist(
         );
         // The atlas respects .gitignore: drop any concept whose dir is ignored.
         concepts.retain(|c| !dir_is_gitignored(&ctx.source_root, &c.resource));
-        crate::atlas::producer::write_bundle(&ctx.out_dir, &shape, &concepts, &domains)
+        // Refresh the stable `.kenn/atlas` handle here, in the SHARED writer,
+        // so `kenn index` and the MCP reindex path both get it (parity).
+        // Best-effort: a filesystem that refuses symlinks must not fail a run.
+        if let Some(dir) = &ctx.pointer_dir {
+            if let Err(e) = crate::atlas::producer::refresh_atlas_pointer(dir, &ctx.out_dir) {
+                // Windows without Developer Mode is the expected case. Debug,
+                // not warn: the `atlas: <path>` line still names the bundle.
+                tracing::debug!(
+                    target: "kenn_indexer::atlas",
+                    error = %e,
+                    "could not refresh the .kenn/atlas pointer"
+                );
+            }
+        }
+        crate::atlas::producer::write_bundle(&ctx.out_dir, &shape, &concepts, &domains, &contracts)
             .map_err(|e| kenn_store::api::DbError::Backend(format!("atlas write: {e}")))?;
-    } else {
-        aggregated_hook(nodes, edges, writer.clone()).await?;
     }
     Ok(Some(counts))
 }
@@ -709,7 +909,204 @@ mod tests {
         assert_eq!(out[&(2, 5, EdgeKind::Imports)], 1);
     }
 
+    // ── earned_domain_count ────────────────────────────────────────
+
+    /// The whole point of the counter: RAW cross-anchor communities overstate.
+    /// Here two communities are both flagged `cross_anchor` — the raw count is 2 —
+    /// but only one earns the axis. The other spans a second package through a
+    /// SINGLE straggler symbol, which is a reference into a cluster, not
+    /// membership of it, so `MIN_PKG_MEMBERS` withholds the span and it collapses
+    /// to one package.
+    ///
+    /// This is the 38-vs-9 divergence in miniature, and the reason both numbers
+    /// have to be published under their own names.
+    ///
+    /// Mutation-checked: relaxing `MIN_PKG_MEMBERS` to 1 makes the earned count 2,
+    /// i.e. equal to the raw count — only `domains` moves, which is exactly the
+    /// property the task asks for.
+    #[test]
+    fn earned_count_is_below_the_raw_cross_anchor_count() {
+        let n = |id: ShortId, name: &str, anchor: &str| AggregateNodeRecord {
+            id,
+            kind: Kind::Class,
+            name: name.to_string(),
+            language: Language::Rust,
+            external: false,
+            test: false,
+            example: false,
+            anchor_id: 0,
+            anchor_name: anchor.to_string(),
+        };
+        let e = |src: ShortId, dst: ShortId| AggregateEdgeRecord {
+            src_id: src,
+            dst_id: dst,
+            kind: EdgeKind::Calls,
+            weight: 3,
+        };
+        let nodes = vec![
+            // community 1 — genuinely spans core + web (2 members each)
+            n(1, "A", "core"),
+            n(2, "B", "core"),
+            n(3, "C", "web"),
+            n(4, "D", "web"),
+            // community 2 — four in `lib`, ONE straggler in `util`
+            n(5, "E", "lib"),
+            n(6, "F", "lib"),
+            n(7, "G", "lib"),
+            n(8, "H", "lib"),
+            n(9, "Straggler", "util"),
+        ];
+        let edges = vec![e(1, 3), e(2, 4), e(5, 9), e(6, 9)];
+        let flat = vec![
+            kenn_model::AnalysisFlatCommunityRecord {
+                community_id: 1,
+                size: 4,
+                total_weight: 8,
+                cross_anchor: true,
+                primary_anchor_id: 0,
+                primary_anchor_name: "core".into(),
+            },
+            kenn_model::AnalysisFlatCommunityRecord {
+                community_id: 2,
+                size: 5,
+                total_weight: 10,
+                cross_anchor: true,
+                primary_anchor_id: 0,
+                primary_anchor_name: "lib".into(),
+            },
+        ];
+        let membership: Vec<kenn_model::AnalysisNodeMembershipRecord> = [
+            (1u32, 1u32),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 2),
+            (6, 2),
+            (7, 2),
+            (8, 2),
+            (9, 2),
+        ]
+        .into_iter()
+        .map(|(short_id, c)| kenn_model::AnalysisNodeMembershipRecord {
+            short_id,
+            flat_community_id: c,
+            anchored_leaf_community_id: 0,
+        })
+        .collect();
+
+        let raw = flat.iter().filter(|f| f.cross_anchor).count();
+        let earned = earned_domain_count(&nodes, &edges, &flat, &membership);
+        assert_eq!(raw, 2, "both communities touch more than one anchor");
+        assert_eq!(
+            earned, 1,
+            "only one clears the floors — a single straggler is not a span"
+        );
+    }
+
+    /// No communities means the analysis pass did not run, and the caller must
+    /// not write a counter at all — an absent row is honest, a `0` reads as "this
+    /// repo has no domains".
+    #[test]
+    fn no_communities_yields_no_domains() {
+        assert_eq!(earned_domain_count(&[], &[], &[], &[]), 0);
+    }
+
+    // ── build_aggregate_nodes ──────────────────────────────────────
+
+    /// Example-ness is decided HERE, once, and persisted — because the only
+    /// other place that could decide it (a query over the published snapshot)
+    /// cannot see definition paths. A node under `examples/` is flagged, one
+    /// under `src/` is not, and a node with no resolvable def file is not.
+    ///
+    /// Mutation-checked: hard-coding `example = false` in
+    /// `build_aggregate_nodes` fails on the `examples/` node.
+    #[test]
+    fn example_path_provenance_is_persisted_on_the_node() {
+        let syms = map_of(vec![
+            sym(1, Kind::Class, 0),
+            sym(2, Kind::Class, 0),
+            sym(3, Kind::Class, 0),
+        ]);
+        let mut files = HashMap::new();
+        files.insert(10, "crates/store/src/lib.rs".to_string());
+        files.insert(11, "crates/store/examples/spike.rs".to_string());
+        let mut pdf = HashMap::new();
+        pdf.insert(1, 10);
+        pdf.insert(2, 11);
+        // node 3 deliberately has no def-file entry
+        let aggs: HashSet<ShortId> = [1, 2, 3].into();
+        let nodes = build_aggregate_nodes(&aggs, &syms, &HashMap::new(), &pdf, &files);
+
+        let flag = |id: ShortId| nodes.iter().find(|n| n.id == id).unwrap().example;
+        assert!(!flag(1), "a node under src/ is production code");
+        assert!(flag(2), "a node under examples/ is example code");
+        assert!(
+            !flag(3),
+            "no def path is absence of evidence, not evidence of exclusion"
+        );
+    }
+
+    /// The segment match is whole-segment and case-insensitive, and covers the
+    /// Windows separator — a path convention that only held on `/` would flag
+    /// nothing on a Windows-indexed workspace.
+    #[test]
+    fn example_segments_match_whole_segments_either_separator() {
+        assert!(is_example_path("crates/store/examples/spike.rs"));
+        assert!(is_example_path("crates\\store\\Examples\\spike.rs"));
+        assert!(is_example_path("pkg/Fixtures/data.swift"));
+        assert!(!is_example_path("crates/store/src/exampled.rs"));
+        assert!(!is_example_path("crates/counterexamples/src/lib.rs"));
+    }
+
     // ── resolve_anchors ────────────────────────────────────────────
+
+    /// A package name of `.` is a path placeholder, not a name — scip-python
+    /// reports the project's own package that way. It must NOT win the anchor,
+    /// or the whole repo anchors on `.` and the atlas writes a concept titled
+    /// `.` into `python_..md`. The manifest chain answers instead.
+    ///
+    /// Mutation-checked: restoring the old `!p.is_empty()` guard makes the
+    /// anchor `.` again and fails the first assertion.
+    #[test]
+    fn a_placeholder_package_name_does_not_win_the_anchor() {
+        for placeholder in [".", "..", "", "   ", "./"] {
+            let mut s = sym(2, Kind::Class, 0);
+            s.pkg_id = 9;
+            let syms = map_of(vec![s]);
+            let mut files = HashMap::new();
+            files.insert(1, "src/app.py".to_string());
+            let mut pkgs = HashMap::new();
+            pkgs.insert(9, placeholder.to_string());
+            let mut pdf = HashMap::new();
+            pdf.insert(2, 1);
+            let aggs: HashSet<ShortId> = [2].into();
+            let anchors =
+                resolve_anchors(&aggs, &syms, &files, &pkgs, &pdf, &PackageLayout::empty());
+            // No layout marker here, so it falls to the first path segment.
+            assert_eq!(
+                anchors[&2].1, "src",
+                "{placeholder:?} must not become the anchor name"
+            );
+        }
+        // A real name still wins — the guard rejects placeholders, not names.
+        for real in ["Flask", "kenn-store", "@acme/web", "Acme.Billing", "v2"] {
+            let mut s = sym(2, Kind::Class, 0);
+            s.pkg_id = 9;
+            let syms = map_of(vec![s]);
+            let mut pkgs = HashMap::new();
+            pkgs.insert(9, real.to_string());
+            let aggs: HashSet<ShortId> = [2].into();
+            let anchors = resolve_anchors(
+                &aggs,
+                &syms,
+                &HashMap::new(),
+                &pkgs,
+                &HashMap::new(),
+                &PackageLayout::empty(),
+            );
+            assert_eq!(anchors[&2].1, real, "a real package name must still win");
+        }
+    }
 
     #[test]
     fn package_anchor_wins_over_path_fallback() {

@@ -72,15 +72,23 @@ and SHALL NOT recompute clustering nor depend on `kenn-analyze`; kenn-indexer an
 kenn-analyze stay parallel consumers of the persisted graph. A community SHALL
 become a domain only when it spans more than one package AND still spans more than
 one package after its members are restricted to the domain-eligible set
-(non-container, non-test, code + anchored) — a community that collapses to a single
-package once containers/tests are excluded is the package concept's job. Each domain
+(non-container, non-test, non-example, code + anchored) — a community that
+collapses to a single package once containers, tests and example code are
+excluded is the package concept's job. Each domain
 SHALL be named by its hub (its highest-weighted-degree eligible member), carry that
 hub's central list and its spanned packages as bundle-relative links, and render
 `type: domain` with no `resource`. The bundle SHALL remain deterministic.
 
+Example, sample, demo and fixture code SHALL be excluded from the domain-eligible
+set for the same reason tests are: a bundled spike that references a library type
+is not architecture. Every surface that computes domain eligibility — the producer
+and any query over the published snapshot — SHALL take this fact from the
+persisted aggregate node's `example` flag. No surface may re-derive it from paths,
+and none may assume its absence.
+
 #### Scenario: a cross-package cluster becomes a domain
 - **WHEN** a persisted flat community spans two packages with enough eligible
-  (non-container, non-test) members
+  (non-container, non-test, non-example) members
 - **THEN** a `domain` concept is written, named by its hub symbol, listing that
   hub's central members and links to the packages it spans
 
@@ -88,6 +96,18 @@ hub's central list and its spanned packages as bundle-relative links, and render
 - **WHEN** a community's eligible members all resolve to one package (even if the
   raw community was flagged cross-anchor)
 - **THEN** no domain concept is written — the package concept already covers it
+
+#### Scenario: a span carried only by example code is not a domain
+- **WHEN** a community spans two packages, but every one of its members in the
+  second package is defined under an example/sample/demo/fixture path
+- **THEN** the second package does not join the earned span, the community
+  collapses to one package, and no domain concept is written
+
+#### Scenario: the query and the atlas agree on eligibility
+- **WHEN** the domains axis is read as a query over the same snapshot the atlas
+  was rendered from, by the same build
+- **THEN** it returns exactly the domains the atlas rendered, because both read
+  the persisted `example` flag rather than deriving it
 
 #### Scenario: domains need the analysis pass
 - **WHEN** a repo is indexed with the analysis/clustering pass disabled
@@ -188,4 +208,27 @@ starting work in an unfamiliar or freshly-cloned repo.
 - **WHEN** a user asks to "understand this repo" / "get up to speed" / after a
   fresh clone
 - **THEN** the skill's `description` matches that intent
+
+### Requirement: the atlas has a contracts axis
+
+Alongside the package and domains axes, the bundle SHALL emit a **contracts**
+axis — `contract` concept documents plus a `## Contracts` section in `index.md` —
+whose behavior is specified by the `atlas-contracts` capability. The bundle SHALL
+write one `contracts/<slug>.md` per contract and include the contracts axis in the
+`index.md` concept count. The contracts axis SHALL be additive: the existing
+packages and domains axes are unchanged, and a bundle with no cross-package
+contract writes no `## Contracts` section and no `contracts/` files.
+
+#### Scenario: the bundle carries three axes
+
+- **WHEN** a multi-package repo with cross-package interfaces is indexed
+- **THEN** the bundle contains package concepts, domain concepts, and contract
+  concepts, and `index.md` lists `## Domains` and `## Contracts` sections
+
+#### Scenario: no contracts, no section
+
+- **WHEN** a repo has no first-party interface implemented across package
+  boundaries
+- **THEN** the bundle writes no `contracts/` files and `index.md` has no
+  `## Contracts` section (packages and domains are unaffected)
 

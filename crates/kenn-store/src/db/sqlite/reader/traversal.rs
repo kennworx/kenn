@@ -7,7 +7,7 @@ use super::super::super::codes::{edge_kind_code, parse_edge_relation};
 use super::projection::{
     be, col_u32, fetch_symbols_by_ids, file_from_row, passes_filter, SqliteConnRef,
 };
-use crate::api::types::{DbError, FileRow, SymbolRow};
+use crate::api::types::{DbError, FileRow, RowNarrow, SymbolRow};
 use kenn_model::EdgeKind;
 
 /// Which endpoint of `edges` is the pivot vs. the neighbour.
@@ -37,8 +37,7 @@ impl SqliteConnRef<'_> {
         relation: &str,
         limit: u32,
         cursor_after: Option<u32>,
-        include_external: bool,
-        include_tests: bool,
+        narrow: &RowNarrow,
     ) -> Result<(Vec<SymbolRow>, u64), DbError> {
         self.list_edges(
             Direction::Outbound,
@@ -46,8 +45,7 @@ impl SqliteConnRef<'_> {
             relation,
             limit,
             cursor_after,
-            include_external,
-            include_tests,
+            narrow,
         )
     }
 
@@ -58,8 +56,7 @@ impl SqliteConnRef<'_> {
         relation: &str,
         limit: u32,
         cursor_after: Option<u32>,
-        include_external: bool,
-        include_tests: bool,
+        narrow: &RowNarrow,
     ) -> Result<(Vec<SymbolRow>, u64), DbError> {
         self.list_edges(
             Direction::Inbound,
@@ -67,8 +64,7 @@ impl SqliteConnRef<'_> {
             relation,
             limit,
             cursor_after,
-            include_external,
-            include_tests,
+            narrow,
         )
     }
 
@@ -78,10 +74,6 @@ impl SqliteConnRef<'_> {
     /// distinct neighbours (pre external/test filter, matching the prior CSR
     /// behaviour); the returned rows are hydrated, filtered, and truncated to
     /// `limit`.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "list_inbound/outbound parameter set"
-    )]
     fn list_edges(
         &self,
         direction: Direction,
@@ -89,8 +81,7 @@ impl SqliteConnRef<'_> {
         relation: &str,
         limit: u32,
         cursor_after: Option<u32>,
-        include_external: bool,
-        include_tests: bool,
+        narrow: &RowNarrow,
     ) -> Result<(Vec<SymbolRow>, u64), DbError> {
         let Some(kind) = parse_edge_relation(relation) else {
             return Err(DbError::Backend(format!("unknown relation: {relation}")));
@@ -116,6 +107,8 @@ impl SqliteConnRef<'_> {
         };
         let total = others.len() as u64;
         let symbols = fetch_symbols_by_ids(conn, &others)?;
+        // Package names resolve to ids ONCE per traversal, not per row.
+        let pkg_ids = resolve_package_ids(conn, narrow)?;
 
         let mut out = Vec::new();
         for id in others {
@@ -123,7 +116,7 @@ impl SqliteConnRef<'_> {
                 break;
             }
             if let Some(s) = symbols.get(&id) {
-                if passes_filter(s, include_external, include_tests) {
+                if passes_filter(s, narrow, pkg_ids.as_ref()) {
                     out.push(s.clone());
                 }
             }
@@ -215,4 +208,32 @@ fn hydrate_files(conn: &Connection, ids: &[u32], limit: u32) -> Result<Vec<FileR
         }
     }
     Ok(out)
+}
+
+/// Resolve `narrow`'s package NAMES to ids, once per traversal.
+///
+/// `SymbolRow` carries `pkg_id`, not the package name, so a name filter needs
+/// one lookup — done here rather than per row, and skipped entirely when no
+/// package narrowing was asked for. An unknown name yields an empty set, which
+/// correctly matches nothing rather than silently matching everything.
+fn resolve_package_ids(
+    conn: &Connection,
+    narrow: &RowNarrow,
+) -> Result<Option<std::collections::HashSet<u32>>, DbError> {
+    let Some(names) = narrow.packages.as_ref() else {
+        return Ok(None);
+    };
+    let mut stmt = conn
+        .prepare_cached("SELECT id FROM packages WHERE name=?1")
+        .map_err(be)?;
+    let mut ids = std::collections::HashSet::new();
+    for n in names {
+        let rows = stmt
+            .query_map(rusqlite::params![n], |r| col_u32(r, 0))
+            .map_err(be)?;
+        for id in rows {
+            ids.insert(id.map_err(be)?);
+        }
+    }
+    Ok(Some(ids))
 }

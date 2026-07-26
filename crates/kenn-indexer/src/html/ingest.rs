@@ -532,7 +532,12 @@ mod tests {
             .expect("app.css module");
         let (imp, imp_total) = rt
             .block_on(Reader::list_inbound(
-                &reader, appcss.id, "imports", 50, None, false, true,
+                &reader,
+                appcss.id,
+                "imports",
+                50,
+                None,
+                &kenn_store::RowNarrow::visibility(false, true),
             ))
             .expect("imports");
         assert_eq!(imp_total, 1);
@@ -549,8 +554,7 @@ mod tests {
                 "links_to_file",
                 50,
                 None,
-                false,
-                true,
+                &kenn_store::RowNarrow::visibility(false, true),
             ))
             .expect("links_to_file");
         assert_eq!(lnk_total, 1);
@@ -570,8 +574,7 @@ mod tests {
                 "corresponds_to",
                 50,
                 None,
-                false,
-                true,
+                &kenn_store::RowNarrow::visibility(false, true),
             ))
             .expect("corresponds_to");
         assert_eq!(cor_total, 1);
@@ -590,8 +593,7 @@ mod tests {
                 "uses_css_class",
                 50,
                 None,
-                false,
-                true,
+                &kenn_store::RowNarrow::visibility(false, true),
             ))
             .expect("uses_css_class");
         assert_eq!(use_total, 1);

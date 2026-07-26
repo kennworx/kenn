@@ -6,6 +6,7 @@
 //! `kenn.workspace=<dir>` (orphan-binding). This command reads no `kenn.toml`:
 //! it operates purely on those labels and the current worktree root.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
@@ -125,10 +126,11 @@ fn run_ls(json: bool) -> Result<ExitCodes> {
     } else {
         Vec::new()
     };
+    let sizes = docker::volume_sizes();
     if json {
-        println!("{}", render_json(&vols, &toolchains));
+        println!("{}", render_json(&vols, &toolchains, &sizes));
     } else {
-        print!("{}", render_table(&vols, &toolchains));
+        print!("{}", render_table(&vols, &toolchains, &sizes));
     }
     Ok(ExitCodes::Ok)
 }
@@ -243,16 +245,21 @@ fn describe(outcome: &RemoveOutcome) -> &'static str {
 struct VolumeRow<'a> {
     name: &'a str,
     kind: &'a str,
+    /// Docker's on-disk size string, or `None` when `docker system df` did not
+    /// report this volume (added key; existing consumers ignore it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<String>,
     bound_dir: Option<String>,
     exists: Option<bool>,
     in_use: bool,
 }
 
-fn to_rows(vols: &[ManagedVolume]) -> Vec<VolumeRow<'_>> {
+fn to_rows<'a>(vols: &'a [ManagedVolume], sizes: &HashMap<String, String>) -> Vec<VolumeRow<'a>> {
     vols.iter()
         .map(|v| VolumeRow {
             name: &v.name,
             kind: v.kind.label(),
+            size: sizes.get(&v.name).cloned(),
             bound_dir: v.bound_dir.as_ref().map(|d| d.display().to_string()),
             exists: v.bound_dir.as_ref().map(|d| d.exists()),
             in_use: v.in_use,
@@ -271,12 +278,16 @@ struct ToolchainRow<'a> {
     size_kb: u64,
 }
 
-fn render_json(vols: &[ManagedVolume], toolchains: &[docker::ProvisionedToolchain]) -> String {
+fn render_json(
+    vols: &[ManagedVolume],
+    toolchains: &[docker::ProvisionedToolchain],
+    sizes: &HashMap<String, String>,
+) -> String {
     // Stays a top-level ARRAY of volumes: `--json` is a machine-readable
     // interface and reshaping the root would break every existing consumer.
     // The toolchains nest under the volume that holds them, which is where they
     // belong anyway.
-    let rows: Vec<_> = to_rows(vols)
+    let rows: Vec<_> = to_rows(vols, sizes)
         .into_iter()
         .map(|row| {
             let nested: Vec<ToolchainRow<'_>> = if row.kind == VolumeKind::Toolchain.label() {
@@ -329,43 +340,86 @@ fn human_kb(kb: u64) -> String {
     }
 }
 
-fn render_table(vols: &[ManagedVolume], toolchains: &[docker::ProvisionedToolchain]) -> String {
+fn render_table(
+    vols: &[ManagedVolume],
+    toolchains: &[docker::ProvisionedToolchain],
+    sizes: &HashMap<String, String>,
+) -> String {
     if vols.is_empty() {
         return "no kenn cache volumes\n".to_string();
     }
-    let mut out = String::new();
+    // Table 1 — the volumes, each with its size and binding. `\t` was used
+    // before, but a tab stop misaligns the moment a name crosses it, so pad to
+    // the widest cell instead.
+    let mut vol_rows = vec![row(["VOLUME", "KIND", "SIZE", "BINDING"])];
     for v in vols {
-        let binding = v.bound_dir.as_ref().map_or_else(
+        let mut binding = v.bound_dir.as_ref().map_or_else(
             || "shared".to_string(),
             |d| {
                 let state = if d.exists() { "exists" } else { "MISSING" };
                 format!("{} ({state})", d.display())
             },
         );
-        out.push_str(&v.name);
-        out.push('\t');
-        out.push_str(v.kind.label());
-        out.push('\t');
-        out.push_str(&binding);
         if v.in_use {
-            out.push_str("  [in-use]");
+            binding.push_str(" [in-use]");
+        }
+        vol_rows.push(vec![
+            v.name.clone(),
+            v.kind.label().to_string(),
+            sizes
+                .get(&v.name)
+                .cloned()
+                .unwrap_or_else(|| "?".to_string()),
+            binding,
+        ]);
+    }
+    let mut out = align_rows(&vol_rows);
+    // Table 2 — what is inside the toolchain volume, each with the exact
+    // `--toolchain` spec needed to reclaim it. A separate table because these
+    // are sub-trees of one volume, not volumes; blank line between the two.
+    if !toolchains.is_empty() {
+        let mut tc_rows = vec![row(["TOOLCHAIN", "ARCH", "SIZE"])];
+        for t in toolchains {
+            tc_rows.push(vec![
+                format!("{}@{}", t.language, t.version),
+                t.arch.clone(),
+                human_kb(t.size_kb),
+            ]);
         }
         out.push('\n');
-        // Nest each provisioned toolchain under the volume that holds it, with
-        // the exact `--toolchain` spec needed to reclaim it.
-        if v.kind == VolumeKind::Toolchain {
-            for t in toolchains {
-                out.push_str("  ");
-                out.push_str(&t.language);
-                out.push('@');
-                out.push_str(&t.version);
-                out.push('\t');
-                out.push_str(&t.arch);
-                out.push('\t');
-                out.push_str(&human_kb(t.size_kb));
-                out.push('\n');
+        out.push_str(&align_rows(&tc_rows));
+    }
+    out
+}
+
+/// One header/label row from string literals.
+fn row<const N: usize>(cells: [&str; N]) -> Vec<String> {
+    cells.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Render rows as a fixed-width table: every column left-aligned to its widest
+/// cell (header included) with two spaces between columns. The last column is
+/// never trailing-padded, so no line carries dangling whitespace.
+fn align_rows(rows: &[Vec<String>]) -> String {
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = vec![0usize; cols];
+    for r in rows {
+        for (w, cell) in widths.iter_mut().zip(r) {
+            *w = (*w).max(cell.chars().count());
+        }
+    }
+    let mut out = String::new();
+    for r in rows {
+        let last = r.len().saturating_sub(1);
+        for (i, (cell, w)) in r.iter().zip(&widths).enumerate() {
+            out.push_str(cell);
+            if i != last {
+                for _ in 0..w - cell.chars().count() + 2 {
+                    out.push(' ');
+                }
             }
         }
+        out.push('\n');
     }
     out
 }
@@ -445,15 +499,49 @@ mod tests {
         );
     }
 
-    /// The point of listing them: a user with gigabytes of toolchains can see
-    /// what they are and reclaim one, with the `--toolchain` spec spelled out.
+    /// Two separated tables: the volumes (name, kind, size, binding), then the
+    /// toolchains inside the toolchain volume with the `--toolchain` spec to
+    /// reclaim each. A blank line divides them.
     #[test]
-    fn the_table_nests_toolchains_under_their_volume() {
-        let vols = vec![vol("kenn-toolchains", VolumeKind::Toolchain, None, false)];
-        let table = render_table(&vols, &[tc("dotnet", "9.0.308", 423_616)]);
-        assert!(table.contains("kenn-toolchains"), "{table}");
+    fn the_table_lists_volumes_then_toolchains() {
+        let vols = vec![
+            vol("kenn-deps-a", VolumeKind::Deps, Some("/x"), false),
+            vol("kenn-toolchains", VolumeKind::Toolchain, None, false),
+        ];
+        let sizes = HashMap::from([("kenn-deps-a".to_string(), "906.7MB".to_string())]);
+        let table = render_table(&vols, &[tc("dotnet", "9.0.308", 423_616)], &sizes);
+        // Volumes table: header + a deps row carrying its size.
+        assert!(table.contains("VOLUME"), "volumes header: {table}");
+        assert!(table.contains("kenn-deps-a"), "{table}");
+        assert!(table.contains("906.7MB"), "deps size shown: {table}");
+        // Toolchains table: its own header, the reclaim spec, and human size.
+        assert!(table.contains("TOOLCHAIN"), "toolchains header: {table}");
         assert!(table.contains("dotnet@9.0.308"), "{table}");
         assert!(table.contains("414 MB"), "human-readable size: {table}");
+        // The blank line proves they are two tables, not one nested block.
+        assert!(table.contains("\n\n"), "blank line between tables: {table}");
+    }
+
+    /// The `align` fix: a narrow cell is padded to its column's width, so the
+    /// next column starts at the same offset on every row. Mutation-checked —
+    /// dropping the padding puts the second column at index 1, not 10.
+    #[test]
+    fn align_rows_pads_columns_to_a_common_width() {
+        let out = align_rows(&[row(["A", "x"]), row(["longname", "y"])]);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[0].find('x'),
+            Some(10),
+            "narrow row padded: {:?}",
+            lines[0]
+        );
+        assert_eq!(
+            lines[1].find('y'),
+            Some(10),
+            "wide row aligned: {:?}",
+            lines[1]
+        );
+        assert!(!lines[0].ends_with(' '), "no trailing pad: {:?}", lines[0]);
     }
 
     /// `--json` is a machine-readable interface: it must stay a top-level array
@@ -464,10 +552,12 @@ mod tests {
             vol("kenn-deps-a", VolumeKind::Deps, Some("/x"), false),
             vol("kenn-toolchains", VolumeKind::Toolchain, None, false),
         ];
-        let json = render_json(&vols, &[tc("swift", "6.3.3", 1_800_000)]);
+        let sizes = HashMap::from([("kenn-deps-a".to_string(), "906.7MB".to_string())]);
+        let json = render_json(&vols, &[tc("swift", "6.3.3", 1_800_000)], &sizes);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert!(parsed.is_array(), "root must stay an array: {json}");
+        assert_eq!(parsed[0]["size"], "906.7MB", "deps size in json: {json}");
         // The pre-existing per-volume keys are untouched.
         assert_eq!(parsed[0]["name"], "kenn-deps-a");
         assert_eq!(parsed[0]["kind"], "deps");
@@ -505,7 +595,7 @@ mod tests {
             ),
             vol("kenn-shared", VolumeKind::Other, None, true),
         ];
-        let table = render_table(&vols, &[]);
+        let table = render_table(&vols, &[], &HashMap::new());
         assert!(table.contains("kenn-deps-a"));
         assert!(table.contains("deps"));
         assert!(
@@ -524,11 +614,13 @@ mod tests {
             Some("/no/such/dir/xyz"),
             false,
         )];
-        let json = render_json(&vols, &[]);
+        let sizes = HashMap::from([("kenn-build-a".to_string(), "15.4MB".to_string())]);
+        let json = render_json(&vols, &[], &sizes);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let row = &parsed[0];
         assert_eq!(row["name"], "kenn-build-a");
         assert_eq!(row["kind"], "build");
+        assert_eq!(row["size"], "15.4MB");
         assert_eq!(row["exists"], false);
         assert_eq!(row["in_use"], false);
         assert_eq!(row["bound_dir"], "/no/such/dir/xyz");

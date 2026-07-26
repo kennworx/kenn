@@ -124,8 +124,38 @@ pub(super) fn col_f32(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<f32> {
     Ok(r.get::<_, f64>(idx)? as f32)
 }
 
-pub(super) fn passes_filter(s: &SymbolRow, include_external: bool, include_tests: bool) -> bool {
-    (include_external || !s.external) && (include_tests || !s.test)
+/// Row-level narrowing. Visibility (external/test) plus the predicates every
+/// `list` command accepted and previously dropped on the floor: package, kind
+/// and language. Applied BEFORE `limit`, so a narrowed page is still a full
+/// page.
+///
+/// `pkg_ids` is the resolved form of `narrow.packages` — `None` means no
+/// package narrowing, `Some(empty)` means the requested names matched no
+/// package and therefore nothing passes.
+pub(super) fn passes_filter(
+    s: &SymbolRow,
+    narrow: &crate::api::types::RowNarrow,
+    pkg_ids: Option<&std::collections::HashSet<u32>>,
+) -> bool {
+    if (s.external && !narrow.include_external) || (s.test && !narrow.include_tests) {
+        return false;
+    }
+    if let Some(ids) = pkg_ids {
+        if !ids.contains(&s.pkg_id) {
+            return false;
+        }
+    }
+    if let Some(kinds) = &narrow.kinds {
+        if !kinds.iter().any(|k| k == &s.kind) {
+            return false;
+        }
+    }
+    if let Some(langs) = &narrow.languages {
+        if !langs.iter().any(|l| l == &s.language) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The blended composite score of a hit — for ranking symbol and file hits
@@ -236,7 +266,7 @@ pub(super) fn symbol_from_row(r: &rusqlite::Row) -> rusqlite::Result<SymbolRow> 
 }
 
 /// Hydrate a [`FileRow`] from `id, path, language, test, external`.
-pub(super) fn file_from_row(r: &rusqlite::Row) -> rusqlite::Result<crate::api::types::FileRow> {
+pub(crate) fn file_from_row(r: &rusqlite::Row) -> rusqlite::Result<crate::api::types::FileRow> {
     Ok(crate::api::types::FileRow {
         id: col_u32(r, 0)?,
         path: r.get(1)?,
@@ -323,5 +353,77 @@ impl SqliteReader {
             r?;
         }
         Ok(Self { pool })
+    }
+}
+
+#[cfg(test)]
+mod narrow_tests {
+    use super::passes_filter;
+    use crate::api::types::{RowNarrow, SymbolRow};
+
+    fn row(pkg: u32, kind: &str, lang: &str) -> SymbolRow {
+        SymbolRow {
+            id: 1,
+            pub_id: "rs:x".into(),
+            language: lang.into(),
+            pkg_id: pkg,
+            kind: kind.into(),
+            name: "x".into(),
+            partial: false,
+            nargs: 0,
+            targs: 0,
+            external: false,
+            test: false,
+            enclosing_sym_id: 0,
+        }
+    }
+
+    /// `package`, `kind` and `language` were accepted by every `list` command
+    /// and dropped on the floor, so a narrowed query returned the unnarrowed
+    /// list — indistinguishable from a genuine answer. Mutation-checked:
+    /// deleting any one arm lets a non-matching row through.
+    #[test]
+    fn every_predicate_narrows() {
+        let r = row(7, "method", "rust");
+        let base = RowNarrow::visibility(false, false);
+        assert!(passes_filter(&r, &base, None), "no narrowing → passes");
+
+        let mut n = base.clone();
+        n.kinds = Some(vec!["method".into()]);
+        assert!(passes_filter(&r, &n, None));
+        n.kinds = Some(vec!["class".into()]);
+        assert!(!passes_filter(&r, &n, None), "kind narrows");
+
+        let mut n = base.clone();
+        n.languages = Some(vec!["csharp".into()]);
+        assert!(!passes_filter(&r, &n, None), "language narrows");
+
+        let hit: std::collections::HashSet<u32> = [7].into_iter().collect();
+        let miss: std::collections::HashSet<u32> = [9].into_iter().collect();
+        assert!(passes_filter(&r, &base, Some(&hit)));
+        assert!(!passes_filter(&r, &base, Some(&miss)), "package narrows");
+    }
+
+    /// A package name that matches nothing must match NOTHING — an empty id set
+    /// is a real answer, not "no filter". Getting this backwards would make a
+    /// typo silently return the whole list.
+    #[test]
+    fn an_unmatched_package_name_excludes_everything() {
+        let empty: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        assert!(!passes_filter(
+            &row(7, "method", "rust"),
+            &RowNarrow::visibility(false, false),
+            Some(&empty)
+        ));
+    }
+
+    /// Visibility still wins regardless of the other predicates.
+    #[test]
+    fn visibility_is_independent() {
+        let mut r = row(7, "method", "rust");
+        r.test = true;
+        let mut n = RowNarrow::visibility(false, false);
+        n.kinds = Some(vec!["method".into()]);
+        assert!(!passes_filter(&r, &n, None), "a test row is still excluded");
     }
 }

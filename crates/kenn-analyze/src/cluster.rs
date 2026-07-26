@@ -150,6 +150,27 @@ fn build_subtree(
     HierarchyNode::Internal { members, children }
 }
 
+/// Members in a STABLE processing order for greedy Louvain — sorted by each
+/// node's `(anchor_name, name)` identity, with the `short_id` only as a
+/// last-resort tie-break.
+///
+/// Louvain is order-sensitive and `short_id` numbering is NOT stable across index
+/// runs (the same symbols get different ids from interning order), which
+/// reshuffled this order and flipped borderline communities on/off between
+/// reindexes. Ordering by the node's stable identity makes the partition
+/// invariant to id relabeling — see `flat_partition_is_invariant_to_id_relabeling`.
+fn stable_order(graph: &AggregatedGraph, members: &HashSet<ShortId>) -> Vec<ShortId> {
+    let mut sorted: Vec<ShortId> = members.iter().copied().collect();
+    let key = |sid: &ShortId| {
+        graph
+            .nodes
+            .get(sid)
+            .map(|n| (n.anchor_name.as_str(), n.name.as_str()))
+    };
+    sorted.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| a.cmp(b)));
+    sorted
+}
+
 /// Single-level Louvain restricted to the given node set. Edges
 /// crossing the set boundary are ignored. Used both for the flat
 /// pass (over all nodes) and recursively inside [`hierarchical`].
@@ -157,8 +178,7 @@ fn louvain_induced(graph: &AggregatedGraph, members: &HashSet<ShortId>) -> Parti
     if members.is_empty() {
         return Vec::new();
     }
-    let mut sorted_members: Vec<ShortId> = members.iter().copied().collect();
-    sorted_members.sort_unstable();
+    let sorted_members = stable_order(graph, members);
 
     // Compute induced degree and 2m.
     let mut induced_degree: HashMap<ShortId, f64> = HashMap::new();
@@ -291,6 +311,80 @@ mod tests {
             weight: w,
         });
         g.total_weight += u64::from(w);
+    }
+
+    fn add_named_node(g: &mut AggregatedGraph, sid: ShortId, name: &str, anchor: &str) {
+        g.nodes.insert(
+            sid,
+            NodeInfo {
+                kind: "class".into(),
+                name: name.into(),
+                language: "rs".into(),
+                external: false,
+                test: false,
+                anchor_id: 1,
+                anchor_name: anchor.into(),
+            },
+        );
+        g.adj.entry(sid).or_default();
+    }
+
+    /// Two triangles bridged by an ambiguous node `G` (weight 2 to each side) —
+    /// its community is a near-tie, so the partition is sensitive to processing
+    /// order. `perm` maps the structural id to the actual `short_id`, letting a
+    /// test re-run the SAME structure/names under a different id numbering.
+    fn bridge_graph(perm: impl Fn(ShortId) -> ShortId) -> AggregatedGraph {
+        let mut g = AggregatedGraph::default();
+        for (sid, name) in [
+            (1, "A"),
+            (2, "B"),
+            (3, "C"),
+            (4, "D"),
+            (5, "E"),
+            (6, "F"),
+            (7, "G"),
+        ] {
+            add_named_node(&mut g, perm(sid), name, "pkg");
+        }
+        let mut e = |a, b, w| add_edge(&mut g, perm(a), perm(b), w);
+        e(1, 2, 5);
+        e(2, 3, 5);
+        e(1, 3, 5); // triangle A,B,C
+        e(4, 5, 5);
+        e(5, 6, 5);
+        e(4, 6, 5); // triangle D,E,F
+        e(3, 7, 2);
+        e(4, 7, 2); // G bridges C and D
+        g
+    }
+
+    fn name_groups(g: &AggregatedGraph, part: &Partition) -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = part
+            .iter()
+            .map(|c| {
+                let mut ns: Vec<String> = c.iter().map(|s| g.nodes[s].name.clone()).collect();
+                ns.sort();
+                ns
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Louvain is greedy and order-sensitive, and `short_id` numbering is NOT
+    /// stable across index runs — so the partition must not depend on it. The same
+    /// structure and names under a reversed id numbering must give the same
+    /// name-groupings. Mutation-checked: sorting members by `short_id` instead of
+    /// the stable `(anchor, name)` key makes these two disagree.
+    #[test]
+    fn flat_partition_is_invariant_to_id_relabeling() {
+        let g1 = bridge_graph(|s| s); // name-order == id-order
+        let g2 = bridge_graph(|s| 8 - s); // name-order == reverse of id-order
+        assert_eq!(
+            name_groups(&g1, &louvain_flat(&g1)),
+            name_groups(&g2, &louvain_flat(&g2)),
+            "partition must be invariant to short_id relabeling"
+        );
     }
 
     #[test]

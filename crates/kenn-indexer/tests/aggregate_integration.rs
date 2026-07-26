@@ -308,6 +308,10 @@ async fn aggregate_edges_dedups_symmetric_writes() {
 /// `root/atlas` and returns that dir. Shared by the domain assertion +
 /// determinism tests; a fixed timestamp is the only wall-clock value, so the
 /// bundle is reproducible.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear fixture: records, then the pipeline run that consumes them; splitting only hides what the test feeds in"
+)]
 async fn build_cross_package_domain_atlas(root: &std::path::Path) -> std::path::PathBuf {
     use kenn_model::{AnalysisFlatCommunityRecord, AnalysisNodeMembershipRecord};
 
@@ -395,6 +399,8 @@ async fn build_cross_package_domain_atlas(root: &std::path::Path) -> std::path::
     let atlas = kenn_indexer::atlas::producer::AtlasContext {
         out_dir: out_dir.clone(),
         source_root: root.to_path_buf(),
+        // No committed store in this fixture — nothing to hang a pointer off.
+        pointer_dir: None,
         workspace_name: "ws".into(),
         freshness: "HEAD abc".into(),
         timestamp: "2026-07-15T00:00:00Z".into(),

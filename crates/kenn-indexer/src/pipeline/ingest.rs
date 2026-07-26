@@ -384,6 +384,10 @@ fn ingest_scip_into_sink(
                 sink.push_file_docs(d)
                     .map_err(|e| ParseError::Io(std::io::Error::other(format!("sink: {e}"))))?;
             }
+            for p in transformed.packages {
+                sink.push_package(p)
+                    .map_err(|e| ParseError::Io(std::io::Error::other(format!("sink: {e}"))))?;
+            }
             sink.push_document_records(
                 transformed.file,
                 transformed.symbols,

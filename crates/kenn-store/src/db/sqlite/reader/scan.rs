@@ -2,11 +2,11 @@
 
 use super::super::super::codes::{edge_kind_code, edge_kind_from_code, parse_edge_relation};
 use super::projection::{
-    be, col_f32, col_u32, col_u64, symbol_from_row, SqliteConnRef, SYMBOL_COLS,
+    be, col_f32, col_u32, col_u64, file_from_row, symbol_from_row, SqliteConnRef, SYMBOL_COLS,
 };
 use crate::api::types::{
     AggregateEdgeRow, AggregateNodeRow, AnalysisAnchoredCommunityRow, AnalysisFlatCommunityRow,
-    AnalysisGodNodeRow, AnalysisNodeMembershipRow, DbError, SymbolRow,
+    AnalysisGodNodeRow, AnalysisNodeMembershipRow, DbError, FileRow, SymbolRow,
 };
 
 impl SqliteConnRef<'_> {
@@ -17,6 +17,42 @@ impl SqliteConnRef<'_> {
             .prepare(&format!("SELECT {SYMBOL_COLS} FROM symbols"))
             .map_err(be)?;
         let rows = q.query_map([], symbol_from_row).map_err(be)?;
+        rows.collect::<Result<_, _>>().map_err(be)
+    }
+
+    /// Every file row (whole-workspace shape questions; not on the hot path).
+    pub(crate) fn scan_files(&self) -> Result<Vec<FileRow>, DbError> {
+        let mut q = self
+            .conn
+            .prepare("SELECT id, path, language, test, external FROM files ORDER BY id")
+            .map_err(be)?;
+        let rows = q.query_map([], file_from_row).map_err(be)?;
+        rows.collect::<Result<_, _>>().map_err(be)
+    }
+
+    /// Every `(sym_id, file_id)` definition pair. Used for whole-workspace
+    /// shape questions (which files a package's symbols are defined in); not on
+    /// the MCP hot path.
+    pub(crate) fn scan_def_files(&self) -> Result<Vec<(u32, u32)>, DbError> {
+        let mut q = self
+            .conn
+            .prepare("SELECT DISTINCT sym_id, file_id FROM defs")
+            .map_err(be)?;
+        let rows = q
+            .query_map([], |r| Ok((col_u32(r, 0)?, col_u32(r, 1)?)))
+            .map_err(be)?;
+        rows.collect::<Result<_, _>>().map_err(be)
+    }
+
+    /// Every non-empty `(file_id, doc)` module doc.
+    pub(crate) fn scan_file_docs(&self) -> Result<Vec<(u32, String)>, DbError> {
+        let mut q = self
+            .conn
+            .prepare("SELECT file_id, doc FROM file_docs WHERE doc <> ''")
+            .map_err(be)?;
+        let rows = q
+            .query_map([], |r| Ok((col_u32(r, 0)?, r.get::<_, String>(1)?)))
+            .map_err(be)?;
         rows.collect::<Result<_, _>>().map_err(be)
     }
 
@@ -46,7 +82,7 @@ impl SqliteConnRef<'_> {
         let mut q = self
             .conn
             .prepare(
-                "SELECT id,kind,name,language,external,test,anchor_id,anchor_name \
+                "SELECT id,kind,name,language,external,test,example,anchor_id,anchor_name \
                  FROM aggregate_nodes",
             )
             .map_err(be)?;
@@ -59,8 +95,9 @@ impl SqliteConnRef<'_> {
                     language: r.get(3)?,
                     external: r.get::<_, i64>(4)? != 0,
                     test: r.get::<_, i64>(5)? != 0,
-                    anchor_id: col_u32(r, 6)?,
-                    anchor_name: r.get(7)?,
+                    example: r.get::<_, i64>(6)? != 0,
+                    anchor_id: col_u32(r, 7)?,
+                    anchor_name: r.get(8)?,
                 })
             })
             .map_err(be)?;

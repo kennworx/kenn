@@ -310,6 +310,156 @@ fn transform_document_unknown_language_errors() {
     }
 }
 
+/// Build a rust document holding one trait-impl member plus the occurrences an
+/// `impl <Trait> for <Type>` header necessarily produces.
+fn trait_impl_document(impl_member: &str, referenced: &[&str]) -> Document {
+    use scip::types::{Occurrence, SymbolInformation};
+    let mut doc = synthetic_document("rust", impl_member, "");
+    doc.symbols = vec![{
+        let mut info = SymbolInformation::new();
+        info.symbol = impl_member.into();
+        info
+    }];
+    doc.occurrences = referenced
+        .iter()
+        .map(|s| {
+            let mut occ = Occurrence::new();
+            occ.symbol = (*s).into();
+            occ.range = vec![1, 0, 1, 8];
+            occ
+        })
+        .collect();
+    doc
+}
+
+/// The `Implements` edges a transform produced — the one accessor all the
+/// trait-impl tests share, returning whole records so callers can assert on
+/// either endpoint.
+fn implements_edges(
+    out: &crate::transform::document::TransformedDocument,
+) -> Vec<&kenn_model::EdgeRecord> {
+    out.edges
+        .iter()
+        .filter(|e| e.properties == kenn_model::EdgeProperties::Implements)
+        .collect()
+}
+
+/// rust-analyzer never fills SCIP `relationships`, so the ONLY surviving record
+/// of a Rust trait impl is the `impl#[Type][Trait]` moniker. The trait name in it
+/// is bare, so it is resolved against the types this document references — which
+/// is how a std trait like `Default`, defined in no workspace crate, still lands
+/// an edge. Mutation-checked: deleting the `push_rust_trait_impl_edges` call
+/// leaves `implements` empty and fails this.
+#[test]
+fn rust_trait_impl_resolves_the_bare_trait_name_against_the_document() {
+    let (dir, ws) = synthetic_workspace();
+    let ty = "rust-analyzer cargo k 0.1 m/Foo#";
+    let tr = "rust-analyzer cargo std 1.0 default/Default#";
+    let doc = trait_impl_document(
+        "rust-analyzer cargo k 0.1 m/impl#[Foo][Default]default().",
+        &[ty, tr],
+    );
+    let mut reg = IdRegistry::new(Language::Rust);
+    let uri = format!("file://{}", dir.path().canonicalize().unwrap().display());
+    let out = transform_document(&doc, &ws, &uri, &mut reg).expect("transform_document");
+
+    let implements = implements_edges(&out);
+    assert_eq!(
+        implements.len(),
+        1,
+        "one impl block, one edge: {implements:?}"
+    );
+    let want_src = reg
+        .lookup_symbol(Language::Rust, ty)
+        .expect("type interned");
+    let want_tgt = reg
+        .lookup_symbol(Language::Rust, tr)
+        .expect("trait interned");
+    assert_eq!(
+        implements[0].src_id, want_src,
+        "concrete type is the source"
+    );
+    assert_eq!(implements[0].target_id, want_tgt, "trait is the target");
+}
+
+/// Two same-named traits referenced in ONE document is the ambiguity
+/// document-scoping cannot resolve. Guessing would attach the impl to the wrong
+/// trait, so nothing is emitted. Mutation-checked: dropping the `*slot = None`
+/// ambiguity marking emits an edge and fails this.
+#[test]
+fn rust_trait_impl_skips_an_ambiguous_bare_name() {
+    let (dir, ws) = synthetic_workspace();
+    let doc = trait_impl_document(
+        "rust-analyzer cargo k 0.1 m/impl#[Foo][Registry]get().",
+        &[
+            "rust-analyzer cargo k 0.1 m/Foo#",
+            "rust-analyzer cargo k 0.1 css/Registry#",
+            "rust-analyzer cargo k 0.1 html/Registry#",
+        ],
+    );
+    let mut reg = IdRegistry::new(Language::Rust);
+    let uri = format!("file://{}", dir.path().canonicalize().unwrap().display());
+    let out = transform_document(&doc, &ws, &uri, &mut reg).expect("transform_document");
+    assert!(
+        implements_edges(&out).is_empty(),
+        "two candidates named Registry — must not guess: {:?}",
+        out.edges
+    );
+}
+
+/// When the real trait produces no occurrence in this document — a macro- or
+/// derive-expanded impl, or a trait reached only through an aliased re-export — a
+/// same-named STRUCT can be the unique remaining candidate. Emitting then would
+/// claim a struct is implemented, and `kenn list implementers <struct>` would
+/// report a type that implements nothing. Mutation-checked: dropping the
+/// `not_a_trait` guard emits an edge here and fails.
+#[test]
+fn rust_trait_impl_never_resolves_a_trait_name_to_a_struct() {
+    use scip::types::{symbol_information::Kind as ScipKind, SymbolInformation};
+    let (dir, ws) = synthetic_workspace();
+    let decoy = "rust-analyzer cargo k 0.1 m/Registry#";
+    let mut doc = trait_impl_document(
+        "rust-analyzer cargo k 0.1 m/impl#[Foo][Registry]get().",
+        &["rust-analyzer cargo k 0.1 m/Foo#", decoy],
+    );
+    // The document DEFINES `Registry` as a struct — the only candidate for the
+    // bare name `Registry`, but not a trait.
+    doc.symbols.push({
+        let mut info = SymbolInformation::new();
+        info.symbol = decoy.into();
+        info.kind = ScipKind::Struct.into();
+        info
+    });
+    let mut reg = IdRegistry::new(Language::Rust);
+    let uri = format!("file://{}", dir.path().canonicalize().unwrap().display());
+    let out = transform_document(&doc, &ws, &uri, &mut reg).expect("transform_document");
+    assert!(
+        implements_edges(&out).is_empty(),
+        "a struct is not a trait — must not claim it is implemented: {:?}",
+        out.edges
+    );
+}
+
+/// An INHERENT impl (`impl Foo { … }`, one type param) declares no trait.
+/// Mutation-checked: accepting a single `TypeParam` in `trait_impl_of` emits an
+/// edge here and fails.
+#[test]
+fn rust_inherent_impl_emits_no_implements_edge() {
+    let (dir, ws) = synthetic_workspace();
+    let doc = trait_impl_document(
+        "rust-analyzer cargo k 0.1 m/impl#[Foo]new().",
+        &["rust-analyzer cargo k 0.1 m/Foo#"],
+    );
+    let mut reg = IdRegistry::new(Language::Rust);
+    let uri = format!("file://{}", dir.path().canonicalize().unwrap().display());
+    let out = transform_document(&doc, &ws, &uri, &mut reg).expect("transform_document");
+    assert!(
+        implements_edges(&out).is_empty(),
+        "an inherent impl implements nothing: {:?}",
+        out.edges
+    );
+}
+
 /// Definition occurrences in the SCIP document yield 1-based `DefRecord`
 /// lines (per `source-data-model` D1). A symbol with a Definition
 /// occurrence at 0-based range `[9, 4, 9, 24]` MUST land in the store

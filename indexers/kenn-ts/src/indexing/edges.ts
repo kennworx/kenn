@@ -14,6 +14,7 @@ import type {
 import type { IdRegistry } from "./ids";
 import { wireKind } from "./kind";
 import { moduleKey, symbolKey } from "./key";
+import { isDeclarationFile, type OutDirMap } from "./outdir";
 import type { Packages } from "./packages";
 import { rangeOf } from "./range";
 import type { JsonlSink } from "../wire/sink";
@@ -26,16 +27,64 @@ export interface EdgeCtx {
   root: string;
   ids: IdRegistry;
   packages: Packages;
+  outDirs: OutDirMap;
   sink: JsonlSink;
   stats: EndStats;
 }
 
-function isExternal(declSf: ts.SourceFile, root: string): boolean {
-  const rel = path.relative(root, declSf.fileName);
+/**
+ * The path a reference should be KEYED by: a declaration under a workspace
+ * project's `outDir` is keyed by the source it was compiled from.
+ *
+ * Without this, `import { X } from "@scope/other"` resolves through that
+ * package's `types` field into its `dist/*.d.ts`, producing a symbol key that
+ * matches neither the real definition (a different path) nor anything indexed —
+ * so every cross-package reference in a monorepo becomes an external stub and
+ * the package graph has no first-party edges at all.
+ *
+ * The remapped path is only a candidate. `ensureRef` links solely when that key
+ * was already emitted as a full symbol, so a mapping with no corresponding
+ * indexed source degrades to "no edge", never to a wrong one.
+ *
+ * The remap can yield SEVERAL candidates, because the extension is not
+ * invertible one-to-one: `Button.d.ts` may have come from `Button.ts` or
+ * `Button.tsx`. `keyOf` lets this pick the candidate whose key was actually
+ * indexed instead of guessing — the same `hasFull` test the callers already use,
+ * so no filesystem access and no new source of truth. With no candidate indexed
+ * the first is kept, which reproduces the old single-candidate behaviour exactly:
+ * degrade to "no edge", never to an external stub for build output.
+ */
+function declPath(
+  ctx: EdgeCtx,
+  declSf: ts.SourceFile,
+  keyOf: (rel: string) => string,
+): string {
+  const candidates = ctx.outDirs.toSource(declSf.fileName);
+  const first = candidates[0];
+  if (first === undefined) return declSf.fileName;
+  const indexed = candidates.find((c) => ctx.ids.hasFull(keyOf(path.relative(ctx.root, c))));
+  return indexed ?? first;
+}
+
+/**
+ * Keyed on the PATH, not the `SourceFile`, so a declaration remapped back to its
+ * source by [`declPath`] is judged as that source. The declaration test still
+ * catches every genuine external the first two clauses miss — and any first-party
+ * declaration that is NOT compiler output (a hand-written `types.d.ts`) keeps its
+ * existing external treatment, since nothing remapped it.
+ *
+ * Uses [`isDeclarationFile`] rather than an inline `.d.ts` check: a
+ * workspace-internal `dist/index.d.mts` from a dual ESM+CJS build is under the
+ * root and not in `node_modules`, so a `.d.ts`-only test classified it INTERNAL.
+ * That is worse than a lost edge — the build output becomes a first-party symbol
+ * competing with the source it was generated from.
+ */
+function isExternalPath(absPath: string, root: string): boolean {
+  const rel = path.relative(root, absPath);
   return (
     rel.startsWith("..") ||
     rel.split(path.sep).includes("node_modules") ||
-    declSf.isDeclarationFile
+    isDeclarationFile(absPath)
   );
 }
 
@@ -79,11 +128,14 @@ function ensureRef(ctx: EdgeCtx, symRaw: ts.Symbol | undefined): Ref {
   const name = sym.getName();
   if (!name || name.startsWith("__")) return 0;
   const declSf = decl.getSourceFile();
-  const rel = path.relative(ctx.root, declSf.fileName);
+  // `kind` first: the key depends on it, and `declPath` needs to build a
+  // candidate key to tell which remap target was actually indexed.
   const kind = wireKind(sym, decl);
+  const declFile = declPath(ctx, declSf, (r) => symbolKey(name, kind, decl, r));
+  const rel = path.relative(ctx.root, declFile);
   const key = symbolKey(name, kind, decl, rel);
 
-  if (isExternal(declSf, ctx.root)) {
+  if (isExternalPath(declFile, ctx.root)) {
     const id = ctx.ids.symbolId(key);
     if (ctx.ids.needStub(key)) {
       const stub: StubFrame = { type: "stub", id, kind, name, key };
@@ -102,9 +154,10 @@ function moduleRef(ctx: EdgeCtx, spec: ts.StringLiteralLike): Ref {
   const decl = sym?.declarations?.[0];
   if (!decl) return 0;
   const declSf = decl.getSourceFile();
-  const rel = path.relative(ctx.root, declSf.fileName);
+  const declFile = declPath(ctx, declSf, moduleKey);
+  const rel = path.relative(ctx.root, declFile);
   const key = moduleKey(rel);
-  if (isExternal(declSf, ctx.root)) {
+  if (isExternalPath(declFile, ctx.root)) {
     const id = ctx.ids.symbolId(key);
     if (ctx.ids.needStub(key)) {
       const stub: StubFrame = {

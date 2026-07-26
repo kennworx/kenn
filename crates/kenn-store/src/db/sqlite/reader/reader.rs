@@ -16,7 +16,7 @@ use crate::api::types::{
     DefLineRow, DefRow, FileRow, FoundSymbolRow, PackageRow, RankedSymbolRow, StatRow,
     SymbolDocsRow, SymbolRow,
 };
-use crate::api::Reader;
+use crate::api::{Reader, RowNarrow};
 use kenn_model::ShortId;
 
 impl SqliteReader {
@@ -167,19 +167,12 @@ impl Reader for SqliteReader {
         relation: &str,
         limit: u32,
         cursor_after: Option<ShortId>,
-        include_external: bool,
-        include_tests: bool,
+        narrow: &RowNarrow,
     ) -> Result<(Vec<SymbolRow>, u64), DbError> {
         let relation = relation.to_owned();
+        let narrow = narrow.clone();
         self.with_conn(move |c| {
-            c.list_inbound(
-                target_short_id,
-                &relation,
-                limit,
-                cursor_after,
-                include_external,
-                include_tests,
-            )
+            c.list_inbound(target_short_id, &relation, limit, cursor_after, &narrow)
         })
         .await
     }
@@ -189,19 +182,12 @@ impl Reader for SqliteReader {
         relation: &str,
         limit: u32,
         cursor_after: Option<ShortId>,
-        include_external: bool,
-        include_tests: bool,
+        narrow: &RowNarrow,
     ) -> Result<(Vec<SymbolRow>, u64), DbError> {
         let relation = relation.to_owned();
+        let narrow = narrow.clone();
         self.with_conn(move |c| {
-            c.list_outbound(
-                source_short_id,
-                &relation,
-                limit,
-                cursor_after,
-                include_external,
-                include_tests,
-            )
+            c.list_outbound(source_short_id, &relation, limit, cursor_after, &narrow)
         })
         .await
     }
@@ -286,6 +272,15 @@ impl Reader for SqliteReader {
     }
     async fn scan_symbols(&self) -> Result<Vec<SymbolRow>, DbError> {
         self.with_conn(|c| c.scan_symbols()).await
+    }
+    async fn scan_files(&self) -> Result<Vec<FileRow>, DbError> {
+        self.with_conn(|c| c.scan_files()).await
+    }
+    async fn scan_def_files(&self) -> Result<Vec<(ShortId, ShortId)>, DbError> {
+        self.with_conn(|c| c.scan_def_files()).await
+    }
+    async fn scan_file_docs(&self) -> Result<Vec<(ShortId, String)>, DbError> {
+        self.with_conn(|c| c.scan_file_docs()).await
     }
     async fn scan_edges(&self, relation: &str) -> Result<Vec<(ShortId, ShortId)>, DbError> {
         let relation = relation.to_owned();

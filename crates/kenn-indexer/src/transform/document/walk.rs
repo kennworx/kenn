@@ -2,11 +2,11 @@
 //! `kenn_model` records (file, symbols, docs, defs, edges) plus the
 //! Rust file-doc extraction and definition-occurrence prepass it relies on.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use kenn_model::{
-    DefRecord, EdgeProperties, EdgeRecord, FileDocsRecord, FileRecord, Language, ShortId,
-    SymbolDocsRecord, SymbolRecord,
+    DefRecord, EdgeProperties, EdgeRecord, FileDocsRecord, FileRecord, Language, PackageRecord,
+    ShortId, SymbolDocsRecord, SymbolRecord,
 };
 use scip::types::Document;
 
@@ -37,6 +37,11 @@ pub struct TransformedDocument {
     /// comments, so these are read from source on disk for new files and
     /// run through the same license filter as the C# path.
     pub file_docs: Vec<FileDocsRecord>,
+    /// Packages first seen in this document. The SCIP path used to emit none —
+    /// every symbol carried `pkg_id: 0` — so `packages` was empty for rust, go
+    /// and python, `--package` filters matched nothing, and the atlas had to
+    /// infer packages from manifest directories.
+    pub packages: Vec<PackageRecord>,
 }
 
 #[expect(
@@ -110,6 +115,7 @@ pub fn transform_document(
     let mut docs = Vec::new();
     let mut defs = Vec::new();
     let mut edges = Vec::new();
+    let mut packages = Vec::new();
 
     // Prepass: collect this document's Definition occurrences keyed by SCIP
     // symbol. The per-symbol loop below pushes one `DefRecord` per occurrence,
@@ -165,11 +171,12 @@ pub fn transform_document(
         // We have a real SymbolRecord for this id — clear any prior stub
         // we may have buffered for it from a previous interning.
         registry.mark_full_emitted(short_id);
+        let pkg_id = intern_package(&info.symbol, language, registry, &mut packages);
         symbols.push(SymbolRecord {
             id: short_id,
             pub_id: crate::pubid::render(language, public_id.as_str()),
             language,
-            pkg_id: 0,
+            pkg_id,
             kind,
             name,
             enclosing_sym_id: enclosing_symbol,
@@ -226,6 +233,10 @@ pub fn transform_document(
         }
     }
 
+    if language == Language::Rust {
+        push_rust_trait_impl_edges(doc, registry, &mut edges);
+    }
+
     Ok(TransformedDocument {
         file,
         symbols,
@@ -233,7 +244,146 @@ pub fn transform_document(
         defs,
         edges,
         file_docs,
+        packages,
     })
+}
+
+/// Intern the package a SCIP symbol belongs to, buffering a `PackageRecord` the
+/// first time it is seen, and return its id (`0` when the moniker names none).
+///
+/// The identity comes from the moniker itself — the crate for Rust, the
+/// distribution for Python, the import path for Go — so nothing new has to be
+/// discovered. `external` is false because a document being transformed is
+/// first-party by construction; cross-crate references reach
+/// `intern_symbol_with_stub` instead, which marks its stubs external.
+fn intern_package(
+    scip_symbol: &str,
+    language: Language,
+    registry: &mut IdRegistry,
+    out: &mut Vec<PackageRecord>,
+) -> ShortId {
+    let Some((name, version)) = kenn_model::id::package::package_of(language, scip_symbol) else {
+        return 0;
+    };
+    let (id, is_new) = registry.intern_package(&name, version);
+    if is_new {
+        out.push(PackageRecord {
+            id,
+            name,
+            version: version.to_string(),
+            manager: String::new(),
+            external: false,
+        });
+    }
+    id
+}
+
+/// Emit `Implements` edges for the trait impls in a rust-analyzer document.
+///
+/// rust-analyzer does NOT populate SCIP `SymbolInformation.relationships` — the
+/// channel the loop above reads, and the one scip-go and scip-python do fill —
+/// so without this pass Rust is the only indexed language that yields zero
+/// implements edges, and `kenn list implementers` on a trait always answers
+/// empty. The relationship does survive, structurally, in the moniker:
+/// `impl#[Type][Trait]member` ([`trait_impl_of`]).
+///
+/// Both names in that moniker are BARE — rust-analyzer never qualifies the
+/// trait with its defining crate, so `[Default]` alone cannot say whether it
+/// means `std`'s or a local one. Resolution is therefore **document-scoped**:
+/// `impl Default for Foo` necessarily references the real `Default` in this same
+/// document, so the document's own type references are a small, precise
+/// candidate set. A name matching no reference, or more than one, is SKIPPED —
+/// two same-named traits referenced in one file is the ambiguity this cannot
+/// resolve, and guessing would attach the impl to the wrong trait.
+fn push_rust_trait_impl_edges(
+    doc: &Document,
+    registry: &mut IdRegistry,
+    edges: &mut Vec<EdgeRecord>,
+) {
+    use kenn_model::id::{base_type_name, terminal_type_name, trait_impl_of};
+    use protobuf::Enum;
+    use scip::types::symbol_information::Kind as ScipKind;
+
+    use crate::edge::is_pseudo_symbol;
+
+    // Nothing to resolve unless this document actually declares a trait impl —
+    // and occurrences outnumber symbols by an order of magnitude, so checking the
+    // smaller collection first skips the index build entirely for the many files
+    // that contain no `impl … for …`.
+    if !doc
+        .symbols
+        .iter()
+        .any(|i| trait_impl_of(&i.symbol).is_some())
+    {
+        return;
+    }
+
+    // Symbols this document DEFINES that are demonstrably not traits. A trait
+    // name must never resolve to one of these: when the real trait produces no
+    // occurrence here (a macro- or derive-expanded impl, a trait reached only
+    // through an aliased re-export), a same-named struct would otherwise be the
+    // unique candidate and we would emit an edge claiming it is implemented.
+    // Only same-document definitions carry a kind; cross-crate references have
+    // none, so this narrows the candidate set without being able to close it.
+    let not_a_trait: HashSet<&str> = doc
+        .symbols
+        .iter()
+        .filter(|i| {
+            matches!(
+                ScipKind::from_i32(i.kind.value()),
+                Some(ScipKind::Struct | ScipKind::Class | ScipKind::Enum | ScipKind::Union)
+            )
+        })
+        .map(|i| i.symbol.as_str())
+        .collect();
+
+    // Candidate index: every type this document mentions, by base name. Built
+    // from occurrences (not `doc.symbols`) so a trait defined in another crate —
+    // the common case, and the whole reason a workspace-only trait table would
+    // drop two thirds of Rust's impls — is still a candidate here.
+    let mut by_name: HashMap<&str, Option<&str>> = HashMap::new();
+    for occ in &doc.occurrences {
+        if is_pseudo_symbol(&occ.symbol) {
+            continue;
+        }
+        if let Some(name) = terminal_type_name(&occ.symbol) {
+            by_name
+                .entry(name)
+                // `Some(sym)` = one candidate so far; `None` = ambiguous. A
+                // repeat of the SAME symbol is not ambiguity — the same type is
+                // referenced many times in a file.
+                .and_modify(|slot| {
+                    if *slot != Some(occ.symbol.as_str()) {
+                        *slot = None;
+                    }
+                })
+                .or_insert(Some(occ.symbol.as_str()));
+        }
+    }
+    let resolve =
+        |name: &str| -> Option<&str> { by_name.get(base_type_name(name)).copied().flatten() };
+
+    // One impl block declares many members; every one carries the same
+    // `impl#[T][Tr]` prefix, so dedup before interning.
+    let mut seen: HashSet<(&str, &str)> = HashSet::new();
+    for info in &doc.symbols {
+        let Some(imp) = trait_impl_of(&info.symbol) else {
+            continue;
+        };
+        let (Some(ty), Some(tr)) = (resolve(imp.type_name), resolve(imp.trait_name)) else {
+            continue;
+        };
+        if ty == tr || not_a_trait.contains(tr) || !seen.insert((ty, tr)) {
+            continue;
+        }
+        let src_id = intern_symbol_with_stub(registry, Language::Rust, ty);
+        let target_id = intern_symbol_with_stub(registry, Language::Rust, tr);
+        edges.push(EdgeRecord {
+            src_id,
+            target_id,
+            properties: EdgeProperties::Implements,
+        });
+    }
 }
 
 /// Extract leading file-level comment blocks from Rust source: the header

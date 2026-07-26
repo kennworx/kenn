@@ -11,7 +11,7 @@ use super::projection::{
 };
 use crate::api::types::{
     BlendedFileRow, BlendedHit, BlendedSymbolRow, DbError, FoundSymbolRow, MatchKind,
-    RankedSymbolRow, SymbolRow,
+    RankedSymbolRow, RowNarrow, SymbolRow,
 };
 use kenn_model::ShortId;
 
@@ -55,7 +55,11 @@ impl SqliteConnRef<'_> {
             let Some(s) = symbols.get(&id) else {
                 continue;
             };
-            if !passes_filter(s, include_external, include_tests) {
+            if !passes_filter(
+                s,
+                &RowNarrow::visibility(include_external, include_tests),
+                None,
+            ) {
                 continue;
             }
             // bm25() is lower-is-better (≤0); negate so higher is better.
@@ -106,7 +110,12 @@ impl SqliteConnRef<'_> {
             rows
         };
         for s in exact {
-            if passes_filter(&s, include_external, include_tests) && seen.insert(s.id) {
+            if passes_filter(
+                &s,
+                &RowNarrow::visibility(include_external, include_tests),
+                None,
+            ) && seen.insert(s.id)
+            {
                 out.push(FoundSymbolRow {
                     symbol: s,
                     match_kind: MatchKind::Exact,
@@ -185,7 +194,11 @@ impl SqliteConnRef<'_> {
             .into_iter()
             .filter_map(|(id, mut score)| {
                 let s = symbols.get(&id)?;
-                if !passes_filter(s, include_external, include_tests) {
+                if !passes_filter(
+                    s,
+                    &RowNarrow::visibility(include_external, include_tests),
+                    None,
+                ) {
                     return None;
                 }
                 if s.name.to_ascii_lowercase() == ql {
@@ -240,7 +253,11 @@ impl SqliteConnRef<'_> {
         let mut out = Vec::new();
         for row in rows {
             let s = row.map_err(be)?;
-            if passes_filter(&s, include_external, include_tests) {
+            if passes_filter(
+                &s,
+                &RowNarrow::visibility(include_external, include_tests),
+                None,
+            ) {
                 out.push(s);
             }
         }
@@ -391,7 +408,12 @@ impl SqliteConnRef<'_> {
             .into_iter()
             .filter_map(|(id, distance)| {
                 let s = symbols.get(&id)?;
-                passes_filter(s, include_external, include_tests).then(|| ranked(s, 1.0 - distance))
+                passes_filter(
+                    s,
+                    &RowNarrow::visibility(include_external, include_tests),
+                    None,
+                )
+                .then(|| ranked(s, 1.0 - distance))
             })
             .collect();
         hits.sort_by(|a, b| {

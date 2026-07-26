@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/aggregate.rs","ts":"2026-07-26T10:14:49.080368Z","sha":"4ca7cffb76ac7407"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/atlas","ts":"2026-07-26T10:14:49.080368Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/atlas/producer.rs","ts":"2026-07-26T10:14:48.916556Z","sha":"0f13b40d289104ce"}
+{"op":"attach","anchor":"indexers/kenn-swift/Sources/kenn-swift/Indexer.swift","ts":"2026-07-26T10:14:48.916556Z","sha":"2648ef62eb96d180"}

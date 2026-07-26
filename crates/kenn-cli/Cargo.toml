@@ -35,7 +35,6 @@ kenn-collect = { path = "../kenn-collect" }
 anyhow.workspace = true
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
-toon = "0.1"
 serde = { workspace = true }
 serde_json.workspace = true
 time.workspace = true
@@ -47,6 +46,9 @@ tracing-subscriber.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 
 [dev-dependencies]
+# Only for the TOON compat test: our own encoder must match this crate's
+# output for already-sorted input. Not shipped in the binary.
+toon = "0.1"
 assert_cmd.workspace = true
 tempfile.workspace = true
 rusqlite.workspace = true

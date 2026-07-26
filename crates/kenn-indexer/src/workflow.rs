@@ -137,6 +137,7 @@ where
     let atlas_ctx = crate::atlas::producer::AtlasContext {
         out_dir: handle.run_dir().join("atlas"),
         source_root: layout.source_root().to_path_buf(),
+        pointer_dir: Some(layout.committed_root().to_path_buf()),
         workspace_name: layout
             .source_root()
             .file_name()
@@ -290,10 +291,14 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
                   source: Option<(&'static str, &'static str)>,
                   build: Option<(&'static str, &'static str)>|
      -> Vec<String> {
-        let cache = source.map(|(source_env, source_subdir)| crate::docker::LangCache {
-            source_env,
-            source_subdir,
-            source_volume: &deps_volume,
+        // Built when EITHER half is requested — `source.map(…)` would drop a
+        // build-only language's cache (Swift) on the floor.
+        let cache = (source.is_some() || build.is_some()).then(|| crate::docker::LangCache {
+            source: source.map(|(env, subdir)| crate::docker::SourceCache {
+                env,
+                subdir,
+                volume: &deps_volume,
+            }),
             build: build.map(|(env, subdir)| crate::docker::BuildCache {
                 env,
                 subdir,
@@ -410,25 +415,47 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
         runner = runner.with_text(config.language.text.clone(), claimed_extensions(config));
     }
     // Cache volumes the preflight must create + chown before any `--user` run.
-    let any_docker = [
+    // Third field: whether the language wires a dependency-source cache. Swift is
+    // the sole exception — its `launch()` passes source = None (SwiftPM checkouts
+    // go to the BUILD volume via KENN_SWIFT_SCRATCH), so a swift-only workspace
+    // needs the toolchain + build volumes but would leave a deps volume empty.
+    let docker_langs = [
         (
             config.language.csharp.enabled,
             config.language.csharp.runtime,
+            true,
         ),
-        (config.language.rust.enabled, config.language.rust.runtime),
+        (
+            config.language.rust.enabled,
+            config.language.rust.runtime,
+            true,
+        ),
         (
             config.language.typescript.enabled,
             config.language.typescript.runtime,
+            true,
         ),
         (
             config.language.python.enabled,
             config.language.python.runtime,
+            true,
         ),
-        (config.language.go.enabled, config.language.go.runtime),
-        (config.language.swift.enabled, config.language.swift.runtime),
-    ]
-    .iter()
-    .any(|(enabled, runtime)| *enabled && matches!(runtime, kenn_config::Runtime::Docker));
+        (config.language.go.enabled, config.language.go.runtime, true),
+        (
+            config.language.swift.enabled,
+            config.language.swift.runtime,
+            false,
+        ),
+    ];
+    let is_docker = |enabled: bool, runtime: kenn_config::Runtime| {
+        enabled && matches!(runtime, kenn_config::Runtime::Docker)
+    };
+    let any_docker = docker_langs
+        .iter()
+        .any(|&(enabled, runtime, _)| is_docker(enabled, runtime));
+    let any_deps_cache = docker_langs
+        .iter()
+        .any(|&(enabled, runtime, deps)| deps && is_docker(enabled, runtime));
     // Swift is provisioned HOST-side, so its version is resolved here where the
     // workspace is in hand. `swift-tools-version` is a minimum rather than an
     // exact version, so this is approximate in a way the other languages are not.
@@ -448,12 +475,17 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
         runner
             .docker_cache_volumes
             .push(crate::docker::toolchain_volume());
-        runner
-            .docker_cache_volumes
-            .push(crate::docker::CacheVolume {
-                name: deps_volume.clone(),
-                bound_dir: deps_bound_dir.clone(),
-            });
+        // The dependency-source volume only when some enabled docker language
+        // actually wires one; otherwise (a swift-only workspace) it would be
+        // created, mounted by nobody, and sit at 0 B.
+        if any_deps_cache {
+            runner
+                .docker_cache_volumes
+                .push(crate::docker::CacheVolume {
+                    name: deps_volume.clone(),
+                    bound_dir: deps_bound_dir.clone(),
+                });
+        }
         if let Some(name) = build_volume.clone() {
             runner
                 .docker_cache_volumes
@@ -655,6 +687,40 @@ mod tests {
             Some("rust-analyzer")
         );
         assert!(local_runner.docker_cache_volumes.is_empty());
+    }
+
+    #[test]
+    fn a_swift_only_docker_workspace_registers_no_deps_volume() {
+        use kenn_config::Runtime;
+        // Swift wires no dependency-source cache (its checkouts go to the build
+        // volume), so its workspace needs the shared toolchain volume but a deps
+        // volume would only ever sit empty. Mutation-checked: dropping the
+        // `any_deps_cache` gate re-registers the deps volume and fails this.
+        let (_dir, ws) = workspace();
+        let mut config = Config::default();
+        config.language.swift.enabled = true;
+        config.language.swift.runtime = Runtime::Docker;
+        config.language.swift.image = Some("ghcr.io/kenn/kenn-swift:v0".into());
+        let runner = configure_runner(ws, &config);
+        assert!(
+            runner
+                .docker_cache_volumes
+                .iter()
+                .any(|v| v.name == crate::docker::TOOLCHAIN_VOLUME),
+            "docker workspace still registers the shared toolchain volume"
+        );
+        assert!(
+            !runner
+                .docker_cache_volumes
+                .iter()
+                .any(|v| v.name.starts_with("kenn-deps-")),
+            "swift-only workspace must not register an unused deps volume: {:?}",
+            runner
+                .docker_cache_volumes
+                .iter()
+                .map(|v| &v.name)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

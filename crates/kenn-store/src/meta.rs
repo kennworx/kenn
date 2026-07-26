@@ -20,7 +20,7 @@ pub const ACTIVE_BACKEND: &str = "sqlite";
 ///
 /// Pre-versioning snapshots have no `schema_version` field; they are
 /// treated as version `1` per the `store-layout` requirement.
-pub const STORE_SCHEMA_VERSION: u32 = 3;
+pub const STORE_SCHEMA_VERSION: u32 = 4;
 
 /// Inspect a snapshot directory's `meta.json` for `schema_version`.
 ///

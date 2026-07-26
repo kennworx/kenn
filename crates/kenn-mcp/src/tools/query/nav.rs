@@ -36,8 +36,23 @@ async fn list_relation(
     // Universal default: exclude test and external symbols unless the caller
     // opts in (`Filters.include_tests` / `include_external`). Matches the CLI's
     // universal default and the search tools; overridable per call.
-    let include_external = filters.include_external.unwrap_or(false);
-    let include_tests = filters.include_tests.unwrap_or(false);
+    // Every predicate the caller set, not just visibility: `package`, `kind`
+    // and `language` used to be accepted here and silently dropped, so a
+    // narrowed `kenn list` returned the unnarrowed list. Applied store-side,
+    // before `limit`, so a filtered page is still a full page.
+    let narrow = kenn_store::RowNarrow {
+        include_external: filters.include_external.unwrap_or(false),
+        include_tests: filters.include_tests.unwrap_or(false),
+        packages: filters.package.clone(),
+        kinds: filters
+            .kind
+            .as_ref()
+            .map(|ks| ks.iter().map(|k| k.db_name().to_string()).collect()),
+        languages: filters
+            .language
+            .as_ref()
+            .map(|ls| ls.iter().map(|l| l.db_name().to_string()).collect()),
+    };
     let cursor = if let Some(c) = args.pagination.as_ref().and_then(|p| p.cursor.as_ref()) {
         Some(decode_cursor(c)?)
     } else {
@@ -67,26 +82,12 @@ async fn list_relation(
             let (rows, total) = match direction {
                 RelationDirection::Inbound => {
                     h.read
-                        .list_inbound(
-                            target.id,
-                            relation,
-                            limit,
-                            cursor_after,
-                            include_external,
-                            include_tests,
-                        )
+                        .list_inbound(target.id, relation, limit, cursor_after, &narrow)
                         .await
                 }
                 RelationDirection::Outbound => {
                     h.read
-                        .list_outbound(
-                            target.id,
-                            relation,
-                            limit,
-                            cursor_after,
-                            include_external,
-                            include_tests,
-                        )
+                        .list_outbound(target.id, relation, limit, cursor_after, &narrow)
                         .await
                 }
             }

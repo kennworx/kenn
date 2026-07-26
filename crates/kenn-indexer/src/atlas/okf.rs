@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use super::model::{AtlasShape, Concept, DomainConcept};
+use super::model::{
+    AtlasShape, Concept, ContractConcept, Coupling, DomainConcept, Role, SymbolRef,
+};
 
 /// The reserved OKF filenames — never treated as concept documents.
 pub const INDEX_MD: &str = "index.md";
@@ -26,13 +28,41 @@ const LOG_TITLE: &str = "# Atlas update log";
 /// concept) omits the prefix. The `.md` suffix is added by the file writer.
 #[must_use]
 pub fn concept_id(language: &str, anchor: &str) -> String {
-    let flat = anchor.trim_matches('/').replace(['/', '\\'], "_");
+    let flat: String = anchor
+        .trim_matches('/')
+        .chars()
+        .map(|c| if is_id_safe(c) { c } else { '_' })
+        .collect();
+    let flat = collapse_underscores(&flat);
+    // Never leave a separator or a dot on either end: `foo.` is an illegal
+    // filename on Windows, and `_foo` reads as a missing segment.
+    let flat = flat.trim_matches(|c| c == '_' || c == '.');
     let id = if language.is_empty() {
         format!("packages/{flat}")
     } else {
         format!("packages/{language}_{flat}")
     };
     collapse_underscores(&id)
+}
+
+/// Whether `ch` may appear literally in an atlas concept id.
+///
+/// An ALLOWLIST, not a denylist: alphanumerics plus the four marks real package
+/// names carry — `_` (the separator), `-` (`kenn-store`, `go-plugin`), `.` (a C#
+/// namespace like `Acme.Billing`, or `platform-socket.io`) and `@` (a scoped npm
+/// package, `@nestjs/core`). Everything else, path separators included, becomes
+/// `_`.
+///
+/// Two things this prevents, both observed. A Swift package anchored on
+/// `ArgumentParser/Parsable Properties` produced the filename
+/// `swift_ArgumentParser_Parsable Properties.md`, and the index linked it as
+/// `](/packages/swift_ArgumentParser_Parsable Properties.md)` — an unescaped
+/// space TERMINATES a link destination in `CommonMark`, so the file existed on
+/// disk while every markdown reader saw a broken link. And `:` `<` `>` `"` `|`
+/// `?` `*` are illegal in Windows filenames, which this project targets; a
+/// denylist would have had to enumerate them and would still miss the next one.
+fn is_id_safe(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '@')
 }
 
 /// Collapse any run of underscores into a single `_`. Path separators flatten to
@@ -56,25 +86,52 @@ pub(crate) fn collapse_underscores(s: &str) -> String {
     out
 }
 
+/// A filesystem-safe slug from a symbol name: alphanumerics kept, every other
+/// char mapped to `_`, runs collapsed to a single `_`, ends trimmed. `fallback`
+/// when nothing survives.
+///
+/// `_` is the separator, matching [`concept_id`] — one flattening rule for every
+/// atlas id rather than `_` for packages and `-` for symbols. Swift is what
+/// forced it: an argument-labelled name is mostly punctuation, and mapping each
+/// run to a dash while KEEPING the name's own underscores produced
+/// `replacing(_:with:)` → `replacing-_-with`, a stutter of separators standing
+/// in for characters a reader never typed. Mapping everything to `_` and
+/// coalescing gives `replacing_with`.
+///
+/// This also earns an invariant: a slug can never contain `-`, so the `-{n}`
+/// suffix the producer appends to break id collisions cannot be confused with
+/// slug content.
+fn concept_slug<'a>(name: &str, fallback: &'a str) -> std::borrow::Cow<'a, str> {
+    // `_` maps to itself, so alphanumeric is the whole keep-set. Unicode-aware
+    // on purpose: an ASCII-only test would map a non-Latin type name to solid
+    // underscores and drop the whole concept onto `fallback`, losing its name.
+    let mapped: String = name
+        .chars()
+        .map(|ch| if ch.is_alphanumeric() { ch } else { '_' })
+        .collect();
+    let collapsed = collapse_underscores(&mapped);
+    let trimmed = collapsed.trim_matches('_');
+    if trimmed.is_empty() {
+        std::borrow::Cow::Borrowed(fallback)
+    } else {
+        std::borrow::Cow::Owned(trimmed.to_string())
+    }
+}
+
+/// A readable contract concept id from the interface/base name: a slug under
+/// `contracts/`. The producer disambiguates any residual slug collision.
+#[must_use]
+pub fn contract_id(name: &str) -> String {
+    format!("contracts/{}", concept_slug(name, "contract"))
+}
+
 /// A readable domain concept id from its hub symbol name: a slug under
-/// `domains/`. Non-identifier chars collapse to a single `-` (a hub like
-/// `Cow<'_, B>` → `domains/Cow`); the producer disambiguates any residual slug
+/// `domains/`. Non-alphanumerics collapse to a single `_` (a hub like
+/// `Cow<'_, B>` → `domains/Cow_B`); the producer disambiguates any residual slug
 /// collision. The `.md` suffix is added by the file writer.
 #[must_use]
 pub fn domain_id(hub: &str) -> String {
-    let mut slug = String::with_capacity(hub.len());
-    let mut prev_dash = false;
-    for ch in hub.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            slug.push(ch);
-            prev_dash = false;
-        } else if !prev_dash {
-            slug.push('-');
-            prev_dash = true;
-        }
-    }
-    let slug = slug.trim_matches('-');
-    format!("domains/{}", if slug.is_empty() { "domain" } else { slug })
+    format!("domains/{}", concept_slug(hub, "domain"))
 }
 
 /// The concept's YAML frontmatter — OKF-standard fields only (`type`, `title`,
@@ -101,6 +158,68 @@ struct Frontmatter<'a> {
 /// the link label. Split on `/` only: names may contain `_` (`code_with_me`).
 fn dep_leaf(id: &str) -> &str {
     id.rsplit('/').find(|s| !s.is_empty()).unwrap_or(id)
+}
+
+/// The ` — {total}, heaviest {shown}` suffix an axis heading carries when its
+/// render cap binds, and nothing when it doesn't — so the suffix itself is the
+/// truncation signal. The same rule [`render_couplings`] applies to a package's
+/// coupling lists, which is where it was already honoured; the domains and
+/// contracts axes reported their CAPPED length as the total until this existed.
+fn cap_suffix(total: usize, shown: usize, verb: &str) -> String {
+    if total > shown {
+        // Naming the cap tells a reader the page is partial; naming the VERB tells
+        // them how to see the rest. Without it the heading is honest but a dead
+        // end — a reader learns 54 domains exist and has nowhere to go, when
+        // `kenn domains` returns all 78 uncapped by design.
+        format!(" — {total}, heaviest {shown} shown · all via `kenn {verb}`")
+    } else {
+        String::new()
+    }
+}
+
+/// Render one coupling direction as a `Package | Weight | Relations` table, or
+/// the empty string when there is nothing to show (a leaf package has no
+/// dependents; a vocabulary package has no dependencies).
+///
+/// The relation split is the point of the table. A bare package name says two
+/// packages are coupled; `type_use 102 · calls 15 · implements 6` says HOW —
+/// and `implements` in particular marks a contract/implementer pair rather than
+/// incidental use, which no weight sum can express.
+#[must_use]
+#[expect(
+    clippy::format_push_string,
+    reason = "building a markdown table row by row; format! per row reads clearer than write!"
+)]
+fn render_couplings(heading: &str, items: &[Coupling], total: u64) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    // Name the cap when it binds. A truncated list that says nothing reads as
+    // the WHOLE list — on a real 125-package solution one package showed 8 of
+    // its 100 dependents, indistinguishable from a package with 8.
+    let shown = items.len() as u64;
+    let suffix = if total > shown {
+        format!(" — {total} packages, heaviest {shown}")
+    } else {
+        String::new()
+    };
+    let mut out =
+        format!("\n## {heading}{suffix}\n\n| Package | Weight | Relations |\n|---|---|---|\n");
+    for c in items {
+        let rels: Vec<String> = c
+            .relations
+            .iter()
+            .map(|(kind, w)| format!("{kind} {w}"))
+            .collect();
+        out.push_str(&format!(
+            "| [{}](/{}.md) | {} | {} |\n",
+            c.title,
+            c.concept_id,
+            c.weight,
+            rels.join(" · "),
+        ));
+    }
+    out
 }
 
 /// Render one concept document: `---\n<yaml>---\n<body>`. Follows the findings
@@ -169,12 +288,11 @@ pub fn render_concept(c: &Concept) -> String {
             body.push_str(&format!("- [{label}](/{comp}.md)\n"));
         }
     }
-    if !c.deps.is_empty() {
-        body.push_str("\n## Depends on\n\n");
-        for d in &c.deps {
-            body.push_str(&format!("- [{}](/{d}.md)\n", dep_leaf(d)));
-        }
-    }
+    // `Used by` leads: "who breaks if I change this" is the question a reader
+    // brings to a package they are about to touch, and it is the one the
+    // outgoing list cannot answer.
+    body.push_str(&render_couplings("Used by", &c.used_by, c.used_by_total));
+    body.push_str(&render_couplings("Depends on", &c.deps, c.deps_total));
     if !c.dir_counts.is_empty() {
         // A package summarizes its files as a total + per-directory histogram
         // (D7): the heading carries the true file count, each line a directory
@@ -235,12 +353,96 @@ pub fn render_domain(d: &DomainConcept) -> String {
         }
     }
     if !d.packages.is_empty() {
-        body.push_str("\n## Spanned packages\n\n");
+        // Members = how much of the domain lives in the package; Links = its
+        // first-party edges to the domain's OTHER packages — the coupling that
+        // earned it the span, distinguishing a real participant from a straggler.
+        body.push_str("\n## Spanned packages\n\n| Package | Members | Links |\n|---|---|---|\n");
         for p in &d.packages {
-            body.push_str(&format!("- [{}](/{p}.md)\n", dep_leaf(p)));
+            body.push_str(&format!(
+                "| [{}](/{}.md) | {} | {} |\n",
+                p.title, p.concept_id, p.members, p.links,
+            ));
         }
     }
     format!("---\n{yaml}{sep}---\n{body}")
+}
+
+/// Render one contract concept document: the interface/base, the package it is
+/// defined in, and its implementers grouped by package — read directly from the
+/// is-a edges, so it is complete and deterministic (unlike a domain's clustered
+/// span). A heading like `## Implementers — 426 across 55 packages` names the
+/// full breadth even when the table below is capped.
+#[must_use]
+#[expect(
+    clippy::format_push_string,
+    reason = "building a markdown document line by line; format! per line reads clearer than write!"
+)]
+pub fn render_contract(c: &ContractConcept) -> String {
+    let front = Frontmatter {
+        type_: "contract",
+        title: &c.title,
+        description: None,
+        resource: None,
+        tags: if c.kind.is_empty() {
+            Vec::new()
+        } else {
+            vec![c.kind.as_str()]
+        },
+    };
+    let yaml = serde_yaml_ng::to_string(&front).unwrap_or_default();
+    let yaml = yaml.strip_prefix("---\n").unwrap_or(&yaml);
+    let sep = if yaml.ends_with('\n') { "" } else { "\n" };
+
+    let mut body = format!(
+        "\n_Defined in [{}](/{}.md)_\n\n| ID | Location |\n|---|---|\n| `{}` | {} |\n",
+        c.defined_in_title,
+        c.defined_in_id,
+        c.symbol.pub_id,
+        location(&c.symbol),
+    );
+    // Name the full breadth in the heading; the table below may be capped.
+    let shown = c.implementers.len() as u64;
+    let cap_note = if c.package_span > shown {
+        format!(", heaviest {shown} shown")
+    } else {
+        String::new()
+    };
+    body.push_str(&format!(
+        "\n## Implementers — {} across {} packages{cap_note}\n",
+        c.total_implementers, c.package_span,
+    ));
+    // One section per package: an `ID | Location` table (same shape a package
+    // concept uses for central symbols), so each implementer is `kenn get`-able
+    // and jump-to-source. The package heading carries its full implementer count.
+    for p in &c.implementers {
+        body.push_str(&format!(
+            "\n### [{}](/{}.md) — {}\n\n| ID | Location |\n|---|---|\n",
+            p.title, p.concept_id, p.count,
+        ));
+        for s in &p.symbols {
+            body.push_str(&format!("| `{}` | {} |\n", s.pub_id, location(s)));
+        }
+        // Name the extras the per-package cap dropped rather than truncate silently.
+        if p.count > p.symbols.len() as u64 {
+            body.push_str(&format!(
+                "\n_… (+{} more)_\n",
+                p.count - p.symbols.len() as u64
+            ));
+        }
+    }
+    format!("---\n{yaml}{sep}---\n{body}")
+}
+
+/// The workspace-relative source location of a central symbol: `path`,
+/// `path:line`, or `path:start-end`. `line_start` 0 means unknown → path only.
+fn location(s: &SymbolRef) -> String {
+    if s.line_start == 0 {
+        s.path.clone()
+    } else if s.line_end > s.line_start {
+        format!("{}:{}-{}", s.path, s.line_start, s.line_end)
+    } else {
+        format!("{}:{}", s.path, s.line_start)
+    }
 }
 
 /// A prettier heading for a `db_name` language token.
@@ -258,16 +460,47 @@ fn lang_display(lang: &str) -> &str {
     }
 }
 
+/// The module-doc first line as a one-line gloss, or a file count for a
+/// document concept. Empty when the package carries no doc.
+fn gloss(c: &Concept) -> String {
+    c.description
+        .as_deref()
+        .and_then(|d| d.lines().next())
+        .map(|l| format!(" — {}", l.trim()))
+        .or_else(|| (c.concept_type == "document").then(|| format!(" — {} files", c.symbols)))
+        .unwrap_or_default()
+}
+
+/// The dependent/dependency counts a package's [`Role`] was derived from, so a
+/// reader can check the grouping instead of trusting it. The language rides
+/// here too — role sections replaced the per-language ones, and in a
+/// multi-language repo that fact would otherwise be lost from the index.
+fn counts_note(c: &Concept, multilingual: bool) -> String {
+    let lang = if multilingual && !c.language.is_empty() {
+        format!("{} · ", lang_display(&c.language))
+    } else {
+        String::new()
+    };
+    format!(
+        " ({lang}{} used by · {} deps)",
+        c.used_by_total, c.deps_total
+    )
+}
+
 /// Render the reserved `index.md`: a frontmatter-free shape/status header, then
-/// one `## <Language>` section per language (sorted), each listing that
-/// language's packages (in the producer's order) with the module-doc first line
-/// as a gloss.
+/// one section per [`Role`] (foundation-first), a `## Documents` section, and
+/// the cross-package `## Domains` axis last.
 #[must_use]
 #[expect(
     clippy::format_push_string,
     reason = "building a markdown document line by line; format! per line reads clearer than write!"
 )]
-pub fn render_index(shape: &AtlasShape, concepts: &[Concept], domains: &[DomainConcept]) -> String {
+pub fn render_index(
+    shape: &AtlasShape,
+    concepts: &[Concept],
+    domains: &[DomainConcept],
+    contracts: &[ContractConcept],
+) -> String {
     let langs = if shape.languages.is_empty() {
         "—".to_string()
     } else {
@@ -278,51 +511,85 @@ pub fn render_index(shape: &AtlasShape, concepts: &[Concept], domains: &[DomainC
          _{fresh} · {ts} · {n} concepts (skeletons)_\n",
         name = shape.name,
         pkgs = shape.packages,
-        doms = domains.len(),
+        // The repo's shape, NOT the bundle's: the pre-cap count. `n concepts`
+        // below is the written-file count, and the two legitimately differ once
+        // a cap binds — which is why the axis heading names it.
+        doms = shape.domains_total,
         syms = shape.symbols,
         test = shape.test_ratio_pct,
         fresh = shape.freshness,
         ts = shape.timestamp,
-        n = concepts.len() + domains.len(),
+        n = concepts.len() + domains.len() + contracts.len(),
     );
 
-    // Section code packages by language; group non-code `document` concepts under
-    // a single "Documents" section. BTreeMap → deterministic; documents sort last.
-    let mut by_section: BTreeMap<String, Vec<&Concept>> = BTreeMap::new();
+    // Group code packages by ROLE, not language. Language is a filesystem fact
+    // and it collapses at scale: a real 125-package solution rendered as 123
+    // alphabetical bullets under one `## C#`, which says nothing about which
+    // packages matter. Role sections are ordered foundation-first (the reading
+    // order of a stack), with tests and isolated packages last — they are the
+    // bulk of a large list and the least of its architecture.
+    let mut by_role: BTreeMap<Role, Vec<&Concept>> = BTreeMap::new();
+    let mut components: Vec<&Concept> = Vec::new();
+    let mut documents: Vec<&Concept> = Vec::new();
+    // Route by concept TYPE first. A component carries `role: None` (it is a
+    // package's source sub-area, not a package), so a role-first match files
+    // every one of them under Documents — which is what it used to do.
     for c in concepts {
-        let key = if c.concept_type == "document" {
-            "Documents".to_string()
-        } else {
-            lang_display(&c.language).to_string()
-        };
-        by_section.entry(key).or_default().push(c);
+        match c.concept_type.as_str() {
+            "document" => documents.push(c),
+            "component" => components.push(c),
+            _ => match c.role {
+                Some(r) => by_role.entry(r).or_default().push(c),
+                None => documents.push(c),
+            },
+        }
     }
-    let mut sections: Vec<(String, Vec<&Concept>)> = by_section.into_iter().collect();
-    sections.sort_by(|a, b| {
-        (a.0 == "Documents")
-            .cmp(&(b.0 == "Documents"))
-            .then(a.0.cmp(&b.0))
-    });
-    for (section, list) in sections {
-        out.push_str(&format!("\n## {section}\n\n"));
+    let multilingual = shape.languages.len() > 1;
+    for (role, mut list) in by_role {
+        // Heaviest first: on a long list the packages everything rests on must
+        // be the ones a reader sees, not whichever sorts alphabetically first.
+        list.sort_by(|a, b| {
+            b.used_by_total
+                .cmp(&a.used_by_total)
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        out.push_str(&format!("\n## {}\n\n", role.heading()));
         for c in list {
-            let gloss = c
-                .description
-                .as_deref()
-                .and_then(|d| d.lines().next())
-                .map(|l| format!(" — {}", l.trim()))
-                .or_else(|| {
-                    (c.concept_type == "document").then(|| format!(" — {} files", c.symbols))
-                })
-                .unwrap_or_default();
-            out.push_str(&format!("- [{}](/{}.md){gloss}\n", c.title, c.id));
+            out.push_str(&format!(
+                "- [{}](/{}.md){}{}\n",
+                c.title,
+                c.id,
+                // The counts the role came from, so the label is checkable
+                // rather than asserted.
+                counts_note(c, multilingual),
+                gloss(c),
+            ));
+        }
+    }
+    if !components.is_empty() {
+        // A single-dominant repo is one big package, so its sub-areas ARE the
+        // structure a reader navigates — they belong in the index, under their
+        // own heading rather than mislabelled as documents.
+        components.sort_by(|a, b| a.title.cmp(&b.title));
+        out.push_str("\n## Components — source sub-areas\n\n");
+        for c in components {
+            out.push_str(&format!("- [{}](/{}.md){}\n", c.title, c.id, gloss(c)));
+        }
+    }
+    if !documents.is_empty() {
+        out.push_str("\n## Documents\n\n");
+        for c in documents {
+            out.push_str(&format!("- [{}](/{}.md){}\n", c.title, c.id, gloss(c)));
         }
     }
 
     // The cross-package domains axis, pinned last — a distinct axis, not a
     // language-sectioned package.
     if !domains.is_empty() {
-        out.push_str("\n## Domains\n\n");
+        out.push_str(&format!(
+            "\n## Domains{}\n\n",
+            cap_suffix(shape.domains_total, domains.len(), "domains")
+        ));
         for d in domains {
             out.push_str(&format!(
                 "- [{}](/{}.md) — {} packages · {} symbols\n",
@@ -330,6 +597,21 @@ pub fn render_index(shape: &AtlasShape, concepts: &[Concept], domains: &[DomainC
                 d.id,
                 d.packages.len(),
                 d.size,
+            ));
+        }
+    }
+
+    // The cross-package contracts axis — first-party abstractions and where they
+    // are implemented across the tree, widest span first.
+    if !contracts.is_empty() {
+        out.push_str(&format!(
+            "\n## Contracts{}\n\n",
+            cap_suffix(shape.contracts_total, contracts.len(), "contracts")
+        ));
+        for c in contracts {
+            out.push_str(&format!(
+                "- [{}](/{}.md) — {} implementers across {} packages\n",
+                c.title, c.id, c.total_implementers, c.package_span,
             ));
         }
     }
@@ -369,7 +651,7 @@ pub fn concept_type(md: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atlas::model::CentralSymbol;
+    use crate::atlas::model::{ContractImplementers, SpannedPackage, SymbolRef};
 
     fn concept() -> Concept {
         Concept {
@@ -381,8 +663,22 @@ mod tests {
             language: "rust".into(),
             test: false,
             symbols: 1240,
-            deps: vec!["packages/crates_kenn-model".into()],
-            central: vec![CentralSymbol {
+            deps: vec![Coupling {
+                concept_id: "packages/crates_kenn-model".into(),
+                title: "kenn-model".into(),
+                weight: 2007,
+                relations: vec![("type_use".into(), 1900), ("calls".into(), 107)],
+            }],
+            used_by: vec![Coupling {
+                concept_id: "packages/crates_kenn-indexer".into(),
+                title: "kenn-indexer".into(),
+                weight: 1199,
+                relations: vec![("type_use".into(), 1199)],
+            }],
+            deps_total: 1,
+            used_by_total: 1,
+            role: Some(Role::Layer),
+            central: vec![SymbolRef {
                 name: "Store".into(),
                 pub_id: "rs:kenn-store::Store".into(),
                 path: "crates/kenn-store/src/lib.rs".into(),
@@ -429,6 +725,51 @@ mod tests {
         assert_eq!(concept_id("", "foo"), "packages/foo");
     }
 
+    /// A concept id becomes a FILENAME and a markdown link destination, so it may
+    /// not contain a space or any character Windows forbids.
+    ///
+    /// The space is the one that bit: a Swift package anchored on
+    /// `ArgumentParser/Parsable Properties` was written to
+    /// `swift_ArgumentParser_Parsable Properties.md` and linked as
+    /// `](/packages/… Parsable Properties.md)`. An unescaped space terminates a
+    /// link destination in `CommonMark`, so the file existed while every markdown
+    /// reader saw a broken link — and a file-existence check (which is what the
+    /// bundle verifier did) could not see it.
+    ///
+    /// Mutation-checked: reverting `concept_id` to `replace(['/', '\\'], "_")`
+    /// fails the first assertion.
+    #[test]
+    fn concept_id_is_a_safe_filename_and_link_target() {
+        assert_eq!(
+            concept_id("swift", "ArgumentParser/Parsable Properties"),
+            "packages/swift_ArgumentParser_Parsable_Properties"
+        );
+        // Every character Windows forbids in a filename maps to the separator.
+        for hostile in [':', '<', '>', '"', '|', '?', '*'] {
+            let id = concept_id("rust", &format!("a{hostile}b"));
+            assert_eq!(id, "packages/rust_a_b", "{hostile:?} must not survive");
+        }
+        // A trailing dot is an illegal Windows filename; a leading one hides it.
+        assert_eq!(concept_id("go", "pkg."), "packages/go_pkg");
+        assert_eq!(concept_id("go", ".pkg"), "packages/go_pkg");
+        // The marks real package names carry are KEPT — this is an allowlist, so
+        // regressing it would silently mangle ordinary names.
+        assert_eq!(
+            concept_id("typescript", "@nestjs/core"),
+            "packages/typescript_@nestjs_core"
+        );
+        assert_eq!(
+            concept_id("csharp", "Acme.Billing"),
+            "packages/csharp_Acme.Billing"
+        );
+        assert_eq!(
+            concept_id("typescript", "platform-socket.io"),
+            "packages/typescript_platform-socket.io"
+        );
+        // Non-ASCII names survive rather than collapsing to underscores.
+        assert_eq!(concept_id("go", "пакет"), "packages/go_пакет");
+    }
+
     /// A Rust `geo` and a C# `Geo` must not collide as *filenames* on a
     /// case-insensitive filesystem — the language prefix makes the ids differ
     /// even after case-folding.
@@ -459,6 +800,65 @@ mod tests {
         assert_eq!(md, render_concept(&c));
         // No per-concept timestamp key (R3-C).
         assert!(!md.contains("timestamp"));
+    }
+
+    /// Both coupling directions render, with the relation split. `Used by` is
+    /// the direction the outgoing list cannot answer — a package that four
+    /// others depend on used to render a concept that said only what IT
+    /// depended on. Mutation-checked: dropping the `used_by` render call, or
+    /// the relation column, fails the corresponding assertion.
+    #[test]
+    fn couplings_render_both_directions_with_relations() {
+        let md = render_concept(&concept());
+        assert!(md.contains("## Used by"), "the inverse direction: {md}");
+        assert!(md.contains("## Depends on"));
+        assert!(
+            md.contains("| [kenn-model](/packages/crates_kenn-model.md) | 2007 | type_use 1900 · calls 107 |"),
+            "weight AND relation split, heaviest relation first: {md}"
+        );
+        assert!(
+            md.contains(
+                "| [kenn-indexer](/packages/crates_kenn-indexer.md) | 1199 | type_use 1199 |"
+            ),
+            "dependents carry the same shape: {md}"
+        );
+        // `Used by` leads — a reader about to change this package wants its
+        // blast radius before its own dependencies.
+        assert!(
+            md.find("## Used by") < md.find("## Depends on"),
+            "Used by precedes Depends on: {md}"
+        );
+    }
+
+    /// A capped list that says nothing reads as the whole list. On a real
+    /// 125-package solution one package showed 8 of its 100 dependents,
+    /// indistinguishable from a package that genuinely has 8. Mutation-checked:
+    /// dropping the suffix fails this; so does emitting it when nothing is cut.
+    #[test]
+    fn a_truncated_coupling_list_names_what_it_dropped() {
+        let mut c = concept();
+        c.used_by_total = 100;
+        let md = render_concept(&c);
+        assert!(
+            md.contains("## Used by — 100 packages, heaviest 1"),
+            "the true total AND how many are shown: {md}"
+        );
+        // The uncapped direction stays clean — no noise when nothing is cut.
+        assert!(
+            md.contains("## Depends on\n"),
+            "an untruncated heading carries no suffix: {md}"
+        );
+    }
+
+    /// A leaf package has no dependents and a vocabulary package no
+    /// dependencies; neither should render an empty table.
+    #[test]
+    fn empty_coupling_renders_no_heading() {
+        let mut c = concept();
+        c.used_by = Vec::new();
+        let md = render_concept(&c);
+        assert!(!md.contains("## Used by"), "no empty table: {md}");
+        assert!(md.contains("## Depends on"), "the other side still renders");
     }
 
     #[test]
@@ -557,14 +957,80 @@ mod tests {
             packages: 1,
             symbols: 1240,
             test_ratio_pct: 18,
+            domains_total: 0,
+            contracts_total: 0,
             freshness: "HEAD abc123".into(),
             timestamp: "2026-07-13T00:00:00Z".into(),
         };
-        let idx = render_index(&shape, std::slice::from_ref(&concept()), &[]);
+        let idx = render_index(&shape, std::slice::from_ref(&concept()), &[], &[]);
         assert!(!idx.starts_with("---"), "index.md carries no frontmatter");
         assert!(idx.contains("# code_with_me atlas"));
         assert!(idx.contains("1 packages · 0 domains · 1240 symbols · 18% test · rust, ts"));
-        assert!(idx.contains("[kenn-store](/packages/crates_kenn-store.md) — SQLite code graph"));
+        // Entry: link, then the counts the role came from, then the module-doc
+        // gloss. Two languages in the shape, so the language rides the note —
+        // role sections replaced the per-language ones.
+        assert!(
+            idx.contains(
+                "[kenn-store](/packages/crates_kenn-store.md) (Rust · 1 used by · 1 deps) — SQLite code graph"
+            ),
+            "{idx}"
+        );
+    }
+
+    /// Packages group by ROLE, not language, and each section states its rule.
+    /// A flat per-language list is what made a real 125-package solution render
+    /// as 123 alphabetical bullets. Mutation-checked: grouping on
+    /// `lang_display(&c.language)` again produces a `## Rust` heading and no
+    /// role heading.
+    #[test]
+    fn index_groups_packages_by_role() {
+        let shape = AtlasShape {
+            name: "ws".into(),
+            languages: vec!["rust".into()],
+            packages: 3,
+            symbols: 10,
+            test_ratio_pct: 0,
+            domains_total: 0,
+            contracts_total: 0,
+            freshness: "HEAD abc".into(),
+            timestamp: "2026-07-13T00:00:00Z".into(),
+        };
+        let mk = |title: &str, role: Role, used_by: u64| Concept {
+            title: title.into(),
+            id: format!("packages/rust_{title}"),
+            description: None,
+            role: Some(role),
+            used_by_total: used_by,
+            ..concept()
+        };
+        let idx = render_index(
+            &shape,
+            &[
+                mk("app", Role::Consumer, 0),
+                mk("util", Role::Provider, 40),
+                mk("core", Role::Provider, 90),
+            ],
+            &[],
+            &[],
+        );
+        assert!(idx.contains("## Providers — depended on, depending on little"));
+        assert!(idx.contains("## Consumers — depending on much, little depends on them"));
+        assert!(!idx.contains("## Rust"), "language is not the axis: {idx}");
+        // Foundation first, and within a section the most-depended-on leads —
+        // alphabetical would have put `util` above `core`.
+        let (providers, core, util, consumers) = (
+            idx.find("## Providers").unwrap(),
+            idx.find("[core]").unwrap(),
+            idx.find("[util]").unwrap(),
+            idx.find("## Consumers").unwrap(),
+        );
+        assert!(providers < core && core < util, "heaviest first: {idx}");
+        assert!(util < consumers, "providers precede consumers: {idx}");
+        // Single-language repo: no language noise in the counts note.
+        assert!(
+            idx.contains("[core](/packages/rust_core.md) (90 used by · 1 deps)"),
+            "{idx}"
+        );
     }
 
     fn domain() -> DomainConcept {
@@ -572,8 +1038,21 @@ mod tests {
             id: "domains/Hub".into(),
             title: "Hub".into(),
             size: 12,
-            packages: vec!["packages/alpha".into(), "packages/beta".into()],
-            central: vec![CentralSymbol {
+            packages: vec![
+                SpannedPackage {
+                    concept_id: "packages/rust_alpha".into(),
+                    title: "alpha".into(),
+                    members: 7,
+                    links: 4,
+                },
+                SpannedPackage {
+                    concept_id: "packages/rust_beta".into(),
+                    title: "beta".into(),
+                    members: 5,
+                    links: 4,
+                },
+            ],
+            central: vec![SymbolRef {
                 name: "Hub".into(),
                 pub_id: "rs:alpha::Hub".into(),
                 path: "alpha/src/hub.rs".into(),
@@ -583,12 +1062,50 @@ mod tests {
         }
     }
 
+    /// One separator for every atlas id: `_`, runs collapsed, ends trimmed.
     #[test]
     fn domain_id_slugifies_hub_name() {
         assert_eq!(domain_id("SharedEmbedder"), "domains/SharedEmbedder");
+        // A name's own underscores survive as single separators.
         assert_eq!(domain_id("build_concepts"), "domains/build_concepts");
-        assert_eq!(domain_id("a<b>"), "domains/a-b"); // angle brackets → one dash, trailing trimmed
-        assert_eq!(domain_id("<>"), "domains/domain"); // no identifier chars → fallback
+        assert_eq!(domain_id("a<b>"), "domains/a_b"); // angle brackets → one `_`, trailing trimmed
+        assert_eq!(domain_id("<>"), "domains/domain"); // nothing survives → fallback
+    }
+
+    /// Swift argument labels are mostly punctuation, and they are what forced
+    /// the separator change: a rule that mapped runs of "other" chars to `-`
+    /// while KEEPING the name's own `_` emitted `replacing-_-with`, three
+    /// separators for one word boundary. Mapping everything to `_` and
+    /// coalescing reads as the name does.
+    ///
+    /// Mutation-checked: putting `_` back in the keep-set and mapping the rest
+    /// to `-` fails here with `replacing-_-with--`, the stutter this replaced.
+    #[test]
+    fn punctuation_heavy_names_collapse_to_single_underscores() {
+        assert_eq!(domain_id("replacing(_:with:)"), "domains/replacing_with");
+        assert_eq!(
+            domain_id("AssertEqualStrings(actual:expected:file:line:sourceLocation:)"),
+            "domains/AssertEqualStrings_actual_expected_file_line_sourceLocation"
+        );
+        assert_eq!(contract_id("Cow<'_, B>"), "contracts/Cow_B");
+        // A generic C# interface keeps its arity readable, not stuttered.
+        assert_eq!(contract_id("IReadOnlyList<T>"), "contracts/IReadOnlyList_T");
+    }
+
+    /// A slug can never contain `-`, so the producer's `-{n}` collision suffix
+    /// is unambiguous by construction — a name cannot forge one.
+    #[test]
+    fn a_slug_never_contains_a_dash() {
+        for name in [
+            "replacing(_:with:)",
+            "kebab-cased-name",
+            "Cow<'_, B>",
+            "a-2",
+        ] {
+            let id = domain_id(name);
+            let slug = id.strip_prefix("domains/").expect("domain_id prefix");
+            assert!(!slug.contains('-'), "{name} → {id}");
+        }
     }
 
     #[test]
@@ -597,11 +1114,72 @@ mod tests {
         assert_eq!(concept_type(&md).as_deref(), Some("domain"));
         assert!(md.contains("## Central symbols"));
         assert!(md.contains("## Spanned packages"));
-        assert!(md.contains("[alpha](/packages/alpha.md)"));
+        // The link label is the package's display title, not the flattened,
+        // language-prefixed concept-id leaf (`rust_alpha`).
+        assert!(md.contains("| [alpha](/packages/rust_alpha.md) | 7 | 4 |"));
+        assert!(md.contains("| [beta](/packages/rust_beta.md) | 5 | 4 |"));
         assert!(md.contains("alpha/src/hub.rs:5-20"));
         // A domain is not directory-backed → no resource field.
         assert!(!md.contains("resource:"));
         assert_eq!(md, render_domain(&domain()));
+    }
+
+    fn impl_sym(name: &str, line: u32) -> SymbolRef {
+        SymbolRef {
+            name: name.into(),
+            pub_id: format!("rs:core::{name}"),
+            path: format!("src/{name}.rs"),
+            line_start: line,
+            line_end: line + 5,
+        }
+    }
+
+    fn contract() -> ContractConcept {
+        ContractConcept {
+            id: "contracts/Store".into(),
+            title: "Store".into(),
+            kind: "interface".into(),
+            symbol: impl_sym("Store", 5),
+            defined_in_id: "packages/rust_core".into(),
+            defined_in_title: "core".into(),
+            implementers: vec![
+                ContractImplementers {
+                    concept_id: "packages/rust_mem".into(),
+                    title: "mem".into(),
+                    symbols: vec![impl_sym("FastStore", 10), impl_sym("MemStore", 20)],
+                    count: 8, // 6 more than the 2 shown
+                },
+                ContractImplementers {
+                    concept_id: "packages/rust_disk".into(),
+                    title: "disk".into(),
+                    symbols: vec![impl_sym("DiskStore", 3)],
+                    count: 1,
+                },
+            ],
+            total_implementers: 9,
+            package_span: 3, // 3 spanned but only 2 rendered → the cap note fires
+        }
+    }
+
+    #[test]
+    fn render_contract_is_conformant_and_deterministic() {
+        let md = render_contract(&contract());
+        assert_eq!(concept_type(&md).as_deref(), Some("contract"));
+        // The `kind` rides the standard `tags` field.
+        assert!(md.contains("- interface"));
+        assert!(md.contains("_Defined in [core](/packages/rust_core.md)_"));
+        // The contract type itself is a resolvable ID | Location row.
+        assert!(md.contains("| `rs:core::Store` | src/Store.rs:5-10 |"));
+        // Heading names the full breadth (9 / 3) and that the package list is capped.
+        assert!(md.contains("## Implementers — 9 across 3 packages, heaviest 2 shown"));
+        // Each package is a section with an `ID | Location` table of implementers.
+        assert!(md.contains("### [mem](/packages/rust_mem.md) — 8"));
+        assert!(md.contains("| `rs:core::MemStore` | src/MemStore.rs:20-25 |"));
+        assert!(md.contains("### [disk](/packages/rust_disk.md) — 1"));
+        assert!(md.contains("| `rs:core::DiskStore` | src/DiskStore.rs:3-8 |"));
+        // The per-package cap names the dropped extras rather than truncating.
+        assert!(md.contains("_… (+6 more)_"));
+        assert_eq!(md, render_contract(&contract()));
     }
 
     #[test]
@@ -612,6 +1190,8 @@ mod tests {
             packages: 1,
             symbols: 1240,
             test_ratio_pct: 18,
+            domains_total: 1,
+            contracts_total: 0,
             freshness: "HEAD abc123".into(),
             timestamp: "2026-07-13T00:00:00Z".into(),
         };
@@ -619,9 +1199,105 @@ mod tests {
             &shape,
             std::slice::from_ref(&concept()),
             std::slice::from_ref(&domain()),
+            &[],
         );
         assert!(idx.contains("1 packages · 1 domains · 1240 symbols"));
-        assert!(idx.contains("## Domains"));
+        // Uncapped: the heading carries no suffix, so the suffix itself signals
+        // truncation wherever it appears.
+        assert!(idx.contains("## Domains\n"));
+        assert!(!idx.contains("## Domains —"));
         assert!(idx.contains("[Hub](/domains/Hub.md) — 2 packages · 12 symbols"));
+    }
+
+    /// A capped axis must not report its capped length as the total. On a real
+    /// 125-package solution the header read `24 domains` for a repo with 78 —
+    /// indistinguishable from a repo that genuinely has 24, and the `## Domains`
+    /// heading said nothing either. `MAX_DOMAINS`/`MAX_CONTRACTS` are 24, so
+    /// only a repo past that ever exposed it; every small repo passed silently.
+    ///
+    /// Mutation-checked twice: reverting the header to `domains.len()` fails the
+    /// first assertion, and making `cap_suffix` always return `String::new()`
+    /// fails the second.
+    #[test]
+    fn a_capped_axis_names_what_it_dropped() {
+        let shape = AtlasShape {
+            name: "big".into(),
+            languages: vec!["csharp".into()],
+            packages: 125,
+            symbols: 86_619,
+            test_ratio_pct: 19,
+            domains_total: 78,
+            contracts_total: 40,
+            freshness: "HEAD abc123".into(),
+            timestamp: "2026-07-13T00:00:00Z".into(),
+        };
+        let idx = render_index(
+            &shape,
+            std::slice::from_ref(&concept()),
+            std::slice::from_ref(&domain()),
+            std::slice::from_ref(&contract()),
+        );
+        // The header states the repo's shape, not the bundle's contents.
+        assert!(
+            idx.contains("125 packages · 78 domains ·"),
+            "header must report the pre-cap total: {idx}"
+        );
+        // Names the cap AND the verb that reaches the rest: a heading that only
+        // admits truncation leaves a reader with 77 domains and nowhere to go.
+        assert!(
+            idx.contains("## Domains — 78, heaviest 1 shown · all via `kenn domains`"),
+            "the domains heading must name the cap and the query: {idx}"
+        );
+        assert!(
+            idx.contains("## Contracts — 40, heaviest 1 shown · all via `kenn contracts`"),
+            "the contracts heading must name the cap and the query: {idx}"
+        );
+    }
+
+    /// A component is a package's source sub-area, not a document. It carries
+    /// `role: None`, so a role-first match files every one under `## Documents`
+    /// — which is what shipped: a single-dominant Swift repo listed all seven
+    /// `ArgumentParser / <area>` sub-areas as documents.
+    ///
+    /// Mutation-checked: restoring the role-first match puts the component back
+    /// under Documents and fails the second assertion.
+    #[test]
+    fn components_are_not_documents() {
+        let shape = AtlasShape {
+            name: "w".into(),
+            languages: vec!["rust".into()],
+            packages: 1,
+            symbols: 10,
+            test_ratio_pct: 0,
+            domains_total: 0,
+            contracts_total: 0,
+            freshness: "HEAD abc".into(),
+            timestamp: "2026-07-13T00:00:00Z".into(),
+        };
+        let pkg = concept();
+        let mut comp = concept();
+        comp.concept_type = "component".into();
+        comp.id = "packages/rust_pkg_parsing".into();
+        comp.title = "pkg / parsing".into();
+        comp.role = None;
+        let mut doc = concept();
+        doc.concept_type = "document".into();
+        doc.id = "documents/docs".into();
+        doc.title = "docs".into();
+        doc.role = None;
+
+        let md = render_index(&shape, &[pkg, comp, doc], &[], &[]);
+        let comp_head = md.find("## Components").expect("a Components heading");
+        let doc_head = md.find("## Documents").expect("a Documents heading");
+        let comp_at = md.find("pkg / parsing").expect("the component is listed");
+        assert!(
+            comp_head < comp_at && comp_at < doc_head,
+            "the component belongs under Components, above Documents:\n{md}"
+        );
+        let after_docs = md.get(doc_head..).unwrap_or_default();
+        assert!(
+            !after_docs.contains("pkg / parsing"),
+            "Documents must not hold a component:\n{md}"
+        );
     }
 }

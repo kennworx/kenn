@@ -123,7 +123,12 @@ fn css_internal_import_edges() {
     assert_eq!(base.kind, "module");
     let (inbound, total) = rt
         .block_on(Reader::list_inbound(
-            &reader, base.id, "imports", 50, None, false, true,
+            &reader,
+            base.id,
+            "imports",
+            50,
+            None,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound");
     assert_eq!(total, 1);
@@ -184,8 +189,7 @@ fn composes_extends_rule_edges() {
             "extends_rule",
             50,
             None,
-            false,
-            true,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound base");
     assert_eq!(total, 1);
@@ -206,8 +210,7 @@ fn composes_extends_rule_edges() {
             "extends_rule",
             50,
             None,
-            false,
-            true,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound big");
     assert_eq!(btotal, 1);
@@ -267,7 +270,12 @@ fn sass_barrel_entry_gets_module_and_imports() {
         .expect("_tokens module");
     let (inbound, total) = rt
         .block_on(Reader::list_inbound(
-            &reader, tokens.id, "imports", 50, None, false, true,
+            &reader,
+            tokens.id,
+            "imports",
+            50,
+            None,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound");
     assert_eq!(total, 1);
@@ -378,8 +386,7 @@ fn usage_edge_links_enclosing_symbol_to_class() {
             "uses_css_class",
             50,
             None,
-            false,
-            true,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound");
     assert_eq!(total, 1);
@@ -511,8 +518,7 @@ fn usage_falls_back_to_module_when_no_enclosing_symbol() {
             "uses_css_class",
             50,
             None,
-            false,
-            true,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound");
     assert_eq!(total, 1);
@@ -628,8 +634,7 @@ fn css_module_member_resolves_to_bound_file_class() {
             "uses_css_class",
             50,
             None,
-            false,
-            true,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound");
     assert!(
@@ -739,7 +744,12 @@ fn code_style_import_links_module_to_stylesheet() {
         .expect("button.css module");
     let (inbound, total) = rt
         .block_on(Reader::list_inbound(
-            &reader, btn.id, "imports", 50, None, false, true,
+            &reader,
+            btn.id,
+            "imports",
+            50,
+            None,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .expect("list_inbound");
     assert_eq!(total, 1);

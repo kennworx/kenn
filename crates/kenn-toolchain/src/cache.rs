@@ -98,6 +98,25 @@ impl ToolchainCache {
         self.path(language, version).is_dir()
     }
 
+    /// The provisioned versions of `language`, as their cache directory names.
+    /// Only complete toolchains are returned: entries that are directories and
+    /// not dot-prefixed — lock files (`.{version}.lock`) and in-flight staging
+    /// live under dot names, and the atomic stage→rename means a visible non-dot
+    /// dir is complete (same guarantee `is_provisioned` relies on). A cache with
+    /// no directory for `language` yet lists none rather than erroring.
+    #[must_use]
+    pub fn provisioned_versions(&self, language: &str) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(self.root.join(language)) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|name| !name.starts_with('.'))
+            .collect()
+    }
+
     /// Ensure `language` at `version` is present, running `install` to populate a
     /// staging directory if it is not.
     ///
@@ -253,6 +272,26 @@ mod tests {
         let (_tmp, c) = cache();
         assert_eq!(c.path("dotnet", "9.0.308"), c.root().join("dotnet/9.0.308"));
         assert!(!c.is_provisioned("dotnet", "9.0.308"));
+    }
+
+    #[test]
+    fn provisioned_versions_lists_only_complete_version_dirs() {
+        let (_tmp, c) = cache();
+        let swift = c.root().join("swift");
+        std::fs::create_dir_all(swift.join("6.0")).unwrap();
+        std::fs::create_dir_all(swift.join("6.3")).unwrap();
+        // A dot-prefixed staging dir and lock file, and a stray non-dir, are NOT
+        // versions — they must be excluded, matching the host busybox glob.
+        std::fs::create_dir_all(swift.join(".6.5.staging")).unwrap();
+        std::fs::write(swift.join(".6.0.lock"), b"").unwrap();
+        std::fs::write(swift.join("README"), b"").unwrap();
+
+        let mut got = c.provisioned_versions("swift");
+        got.sort();
+        assert_eq!(got, vec!["6.0".to_string(), "6.3".to_string()]);
+
+        // A language with no directory yet lists none, and does not error.
+        assert!(c.provisioned_versions("go").is_empty());
     }
 
     /// The cache volume is shared by every container on the host, so two

@@ -73,6 +73,86 @@ test-indexer-dotnet:
 test-indexers: test-indexer-dotnet test-indexer-swift probe-smoke index-stability
   @cd indexers/kenn-ts && bun test
 
+# Verify a repo's atlas bundle. Pass workspace paths; defaults to this repo.
+#   just atlas-verify                       # this workspace
+#   just atlas-verify "tmp/goex tmp/pyex"   # others
+#
+# Three checks, and the second is the point: a checker that only resolves each
+# `](...)` against the filesystem CANNOT see a link that is broken AS MARKDOWN. It
+# once reported "362 targets, 0 dangling" while two Swift package links carried an
+# unescaped space, which terminates a link destination in CommonMark — the files
+# existed, every markdown reader saw a broken link. So:
+#   1. every link destination resolves on disk
+#   2. no destination holds a space or a Windows-illegal char (: < > " | ? *)
+#   3. the `domains` stat row == `kenn domains` == the atlas index header
+# Check 3 compares the HEADER, never the file count: MAX_DOMAINS caps the rendered
+# documents, so a large repo legitimately holds 24 files for 78 domains.
+atlas-verify paths=".":
+  #!/usr/bin/env bash
+  set -uo pipefail
+  fail=0
+  printf "%-22s %6s %5s %7s %6s %7s %9s  %s\n" repo links bad unsafe raw earned q/hdr verdict
+  for ws in {{ paths }}; do
+    run=$(./build/kenn status -w "$ws" 2>/dev/null | awk '/^snapshot:/{print $2}')
+    atlas="$run/atlas"; db="$run/code.db"
+    if [ ! -d "$atlas" ]; then printf "%-22s %s\n" "$ws" "NO ATLAS"; fail=1; continue; fi
+    tot=0; bad=0; unsafe=0
+    while IFS= read -r t; do
+      tot=$((tot+1)); [ -f "$atlas$t" ] || bad=$((bad+1))
+      case "$t" in *' '*|*':'*|*'<'*|*'>'*|*'"'*|*'|'*|*'?'*|*'*'*) unsafe=$((unsafe+1));; esac
+    done < <(grep -rhoE '\]\([^)]+\.md\)' "$atlas" 2>/dev/null | sed 's/^](//; s/)$//' | sort -u)
+    stat_of() { sqlite3 "$db" "SELECT value FROM stats WHERE scope='global' AND subset='graph' AND metric='$1';" 2>/dev/null; }
+    raw=$(stat_of cross_anchor_communities); earned=$(stat_of domains)
+    q=$(./build/kenn domains -w "$ws" --json --all 2>/dev/null | jq '.items|length')
+    hdr=$(sed -n '3p' "$atlas/index.md" 2>/dev/null | grep -oE '[0-9]+ domains' | grep -oE '^[0-9]+')
+    verdict=ok
+    [ "$bad" -eq 0 ] || verdict=DANGLING
+    [ "$unsafe" -eq 0 ] || verdict=UNSAFE-LINK
+    # A missing value must FAIL, not compare equal to another missing value —
+    # an empty==empty check silently passed a stale snapshot once.
+    for v in "$raw" "$earned" "$q" "$hdr"; do [ -n "$v" ] || verdict=MISSING-STAT; done
+    if [ "$verdict" = ok ] && { [ "$earned" != "$q" ] || [ "$earned" != "$hdr" ]; }; then
+      verdict=COUNTER-MISMATCH
+    fi
+    [ "$verdict" = ok ] || fail=1
+    printf "%-22s %6s %5s %7s %6s %7s %9s  %s\n" \
+      "$ws" "$tot" "$bad" "$unsafe" "${raw:-–}" "${earned:-–}" "${q:-–}/${hdr:-–}" "$verdict"
+  done
+  exit $fail
+
+# Assert the Swift sidecar emits the same wire twice, in SEPARATE processes.
+#
+# Swift reseeds its hasher per process, so iterating a Dictionary or Set gives a
+# different order in every run. The emitter did both: `keyFor` hands the unsalted
+# key to whichever USR arrives first, and module stubs took ids in Set order — two
+# runs over an unchanged tree disagreed about which `Contained` was
+# `ArgumentParser.Contained` and which carried a `#<digest>` suffix.
+#
+# This must be a SUBPROCESS check. The in-process
+# `testEmitIsDeterministicAcrossRuns` catches the Set half but NOT the Dictionary
+# half: one process builds the same Dictionary the same way twice, so only a
+# reseed exposes it. Requires a Swift toolchain; skips cleanly without one.
+swift-determinism: build-indexer-swift
+  #!/usr/bin/env bash
+  set -euo pipefail
+  mkdir -p tmp
+  FIXTURE="indexers/kenn-swift/Fixtures/SampleApp"
+  # Build the store once, then read it twice with --skip-build so the only
+  # variable is the process, not the toolchain's output.
+  ./build/kenn-swift index --workspace "$FIXTURE" >/dev/null 2>tmp/swift-det-build.err || {
+    echo "swift-determinism: SKIP — sidecar could not index the fixture"; exit 0; }
+  for run in 1 2; do
+    ./build/kenn-swift index --workspace "$FIXTURE" --skip-build 2>/dev/null \
+      | grep -vE '"type":"(meta|end)"' > "tmp/swift-det-$run.jsonl"
+  done
+  if cmp -s tmp/swift-det-1.jsonl tmp/swift-det-2.jsonl; then
+    echo "swift-determinism: PASSED — two processes, identical wire ($(wc -l < tmp/swift-det-1.jsonl | tr -d ' ') frames)"
+  else
+    echo "swift-determinism: FAILED — the emitter depends on hash order"
+    diff tmp/swift-det-1.jsonl tmp/swift-det-2.jsonl | head -20
+    exit 1
+  fi
+
 # Stress kenn-dotnet index for abort regressions (8 runs, ~4s each). Requires a .NET SDK.
 index-stability: build-indexer-dotnet
   #!/usr/bin/env bash
@@ -246,6 +326,15 @@ embed-smoke:
 clippy:
   @cargo clippy --workspace --all-targets
 
+# Run the workspace test suite with the embedder backend pinned in-process.
+# Prefer this over bare `cargo test`: `kenn-store/tests/hybrid_search.rs`
+# otherwise selects a running `kenn server` daemon, which returns empty
+# embeddings on macOS, and 5 of its 6 tests fail in ~0.2s having embedded
+# nothing. Bare `cargo test` is fine when no daemon is up — but `kenn index`
+# and `kenn find` both auto-spawn one, so "no daemon" is not a safe default.
+test *ARGS:
+  KENN_EMBED_IN_PROCESS=1 cargo test --workspace {{ ARGS }}
+
 # Generate a cargo-crap CRAP report (cyclomatic complexity x test coverage).
 crap crate="":
   #!/usr/bin/env bash
@@ -260,6 +349,13 @@ crap crate="":
   # Excludes: examples/benches/tests are runnable scaffolding, not
   # production code — keep them out of the gate.
   EXCLUDES=(--exclude '**/examples/**' --exclude '**/benches/**' --exclude '**/tests/**')
+  # Same reason as `crap-ci`: pin the embedder backend so a running
+  # `kenn server` daemon can't empty out the real-model tests and take
+  # their coverage with it.
+  export KENN_EMBED_IN_PROCESS=1
+  # Stale `.profraw` from an earlier run merge in and understate coverage —
+  # see `crap-ci` for the numbers.
+  cargo llvm-cov clean --workspace
   if [ -n "{{ crate }}" ]; then
     cargo llvm-cov --package "{{ crate }}" --lcov --output-path tmp/lcov.info
     cargo crap --path "crates/{{ crate }}" --lcov tmp/lcov.info "${EXCLUDES[@]}"
@@ -288,13 +384,36 @@ crap-ci:
     exit 2
   fi
   EXCLUDES=(--exclude '**/examples/**' --exclude '**/benches/**' --exclude '**/tests/**')
-  # `RUST_TEST_THREADS=1` — `kenn-store/tests/hybrid_search.rs` shares
-  # the process-wide `init_shared_embedder` daemon at 127.0.0.1:41873.
-  # Under llvm-cov the embedder is slow enough that parallel tests
-  # race on init/release; serializing test threads keeps the suite
-  # reliable. `serial_test` covers the same suite under plain
-  # `cargo test`, but llvm-cov instrumentation needs the bigger hammer.
-  RUST_TEST_THREADS=1 cargo llvm-cov --workspace --lcov --output-path tmp/lcov.info
+  # `KENN_EMBED_IN_PROCESS=1` — the gate must not depend on whether a
+  # `kenn server` daemon happens to be running. `kenn-store/tests/
+  # hybrid_search.rs` sets this itself, but from INSIDE each test: the
+  # env is process-global while backend selection races ahead of it, so
+  # under parallel execution some tests still select the daemon. On
+  # macOS the daemon returns EMPTY embeddings (fork+Metal), so those
+  # tests fail in ~0.2s having embedded nothing — and because their
+  # coverage then vanishes, hundreds of unrelated functions read 0% and
+  # the CRAP gate fails with a wall of phantom regressions. Setting it
+  # for the whole run makes selection deterministic before any test
+  # starts. Reproduced: daemon up + parallel = 5/6 fail; daemon down +
+  # parallel = 6/6 pass. (Honoured only under `debug_assertions`, so it
+  # cannot affect a release binary — see kenn-embed/src/selector.rs.)
+  #
+  # `RUST_TEST_THREADS=1` stays as belt-and-braces: the in-process model
+  # is a heavyweight singleton, and serializing keeps the instrumented
+  # run's memory flat.
+  #
+  # `clean` FIRST, and it is not optional. Leftover `.profraw` from an
+  # earlier run merge into this one and UNDERSTATE coverage, which the
+  # CRAP formula then amplifies: 30 stale files cut the run from 37945
+  # covered lines to 12163 and produced 229 phantom "new over-threshold"
+  # entries in crates the change never touched. The gate failed twice
+  # that way in one session, each time right after an interleaved
+  # `cargo build` / `kenn index`, and "just run it again" happened to
+  # clear it — which is exactly how a flaky gate teaches people to
+  # ignore it.
+  cargo llvm-cov clean --workspace
+  KENN_EMBED_IN_PROCESS=1 RUST_TEST_THREADS=1 \
+    cargo llvm-cov --workspace --lcov --output-path tmp/lcov.info
   cargo crap --workspace --lcov tmp/lcov.info "${EXCLUDES[@]}" \
     --baseline crap-baseline.json --format json --output tmp/crap-delta.json
   # Predicate: any "regressed" entry, OR any "new" entry whose CRAP

@@ -313,10 +313,42 @@ pub struct ManagerPackages {
 }
 
 /// Whole-graph structure summary (from the clustering pass).
+///
+/// The two community counters answer DIFFERENT questions and must not be
+/// mistaken for each other — they routinely differ several-fold:
+///
+/// - `cross_anchor_communities` is the RAW clustering diagnostic: every
+///   flat-Louvain community that happens to touch more than one anchor,
+///   including packages joined only through a shared vendored type plus
+///   one-symbol stragglers. Useful for judging how the clustering behaved.
+/// - `domains` is the EARNED count: the communities that clear the domain
+///   axis's floors, i.e. exactly what `kenn domains` lists and what the atlas
+///   renders. This is the architectural number.
+///
+/// Publishing only the raw one under a name that reads like "the number of
+/// domains" is the bug this pair replaces: a reader comparing the overview to
+/// the generated atlas could not tell which surface had lied.
+///
+/// NEITHER BOUNDS THE OTHER — do not read `domains <= cross_anchor_communities`
+/// as an invariant, and do not "fix" a repo that violates it:
+///
+/// - A multi-package repo usually has `domains` FAR below the raw count, since
+///   the floors are doing their job (measured: 40→10, 20→2, 284→78).
+/// - A SINGLE-PACKAGE repo routinely has `cross_anchor_communities: 0` with a
+///   healthy `domains`, because nothing spans two anchors yet the domain axis
+///   deliberately keeps within-anchor clusters for a monolithic library —
+///   otherwise a one-package repo would have no domains at all. Measured on
+///   three real single-package repos: raw 0 with 8, 13 and 20 earned domains.
+///
+/// They answer different questions over different candidate sets. That is why
+/// both are published under their own names rather than one being derived.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GraphSummary {
     pub hierarchy_depth: u64,
+    /// Raw clustering diagnostic — see the type docs. NOT the domain count.
     pub cross_anchor_communities: u64,
+    /// Earned cross-package domains: what `kenn domains` returns.
+    pub domains: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

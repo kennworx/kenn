@@ -810,7 +810,8 @@ mod tests {
             Availability::Containerized { image } => {
                 assert_eq!(image, IMG_RUST);
                 assert!(
-                    image.starts_with("ghcr.io/kennworx/kenn-rust:v") && !image.contains("@sha256:"),
+                    image.starts_with("ghcr.io/kennworx/kenn-rust:v")
+                        && !image.contains("@sha256:"),
                     "minor-tag-pinned kennworx ref: {image}"
                 );
             }

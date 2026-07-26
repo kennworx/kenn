@@ -22,6 +22,7 @@ use crate::exit::ExitCodes;
 fn atlas_context(
     source_root: &Path,
     run_dir: &Path,
+    committed_root: &Path,
 ) -> kenn_indexer::atlas::producer::AtlasContext {
     let leaf = |p: &Path, dflt: &str| {
         p.file_name()
@@ -44,6 +45,7 @@ fn atlas_context(
     kenn_indexer::atlas::producer::AtlasContext {
         out_dir: run_dir.join("atlas"),
         source_root: source_root.to_path_buf(),
+        pointer_dir: Some(committed_root.to_path_buf()),
         workspace_name: leaf(source_root, "workspace"),
         freshness,
         timestamp: leaf(run_dir, "unknown"),
@@ -184,7 +186,7 @@ async fn run_async(
     let bench_t_pipeline = std::time::Instant::now();
     let batch_size = config.ingest.batch_size;
     let hook = kenn_analyze::analysis_hook_from_config(&config);
-    let atlas_ctx = atlas_context(source_root, handle.run_dir());
+    let atlas_ctx = atlas_context(source_root, handle.run_dir(), layout.committed_root());
     let outcome = tokio::task::spawn_blocking(move || {
         kenn_indexer::run_pipeline_with_progress(
             &runner,

@@ -112,13 +112,26 @@ pub(crate) struct BuildCache<'a> {
     pub volume: Option<&'a str>,
 }
 
-/// A language's docker caches: the dependency-*source* cache (a shared named
-/// volume, cross-repo — mac/Windows can't afford a bind-mounted hot cache) and,
-/// optionally, a build-artifact cache ([`BuildCache`]).
+/// Where a language's dependency SOURCES go: a shared named volume, cross-repo —
+/// mac/Windows can't afford a bind-mounted hot cache.
+pub(crate) struct SourceCache<'a> {
+    pub env: &'static str,
+    pub subdir: &'static str,
+    pub volume: &'a str,
+}
+
+/// A language's docker caches. Both halves are INDEPENDENTLY optional: Swift
+/// wants a build cache and no source cache ([`SwiftPM`] keeps its checkouts under
+/// `.build`, so redirecting that one directory covers both), while C# wants a
+/// source cache and no build cache. Nesting `build` under a present `source` —
+/// as this once did — silently dropped Swift's build cache entirely, leaving
+/// [`KENN_SWIFT_SCRATCH`] unset and [`SwiftPM`] writing to the slow host bind
+/// mount.
+///
+/// [`SwiftPM`]: https://www.swift.org/documentation/package-manager/
+/// [`KENN_SWIFT_SCRATCH`]: crate::docker::BuildCache
 pub(crate) struct LangCache<'a> {
-    pub source_env: &'static str,
-    pub source_subdir: &'static str,
-    pub source_volume: &'a str,
+    pub source: Option<SourceCache<'a>>,
     pub build: Option<BuildCache<'a>>,
 }
 
@@ -175,25 +188,30 @@ pub(crate) fn docker_launcher(
     argv.push(format!("{TOOLCHAIN_VOLUME}:{TOOLCHAIN_MOUNT}"));
     argv.push("-e".to_string());
     argv.push(format!("{TOOLCHAIN_ROOT_ENV}={TOOLCHAIN_MOUNT}"));
-    if let Some(c) = cache {
+    // The two caches are wired INDEPENDENTLY — a language may want either, both,
+    // or neither. Gating the build cache on the source cache is what made Swift's
+    // `KENN_SWIFT_SCRATCH` unreachable. Split up front so neither arm can grow a
+    // dependency on the other again.
+    let (source, build) = cache.map_or((None, None), |c| (c.source, c.build));
+    if let Some(s) = source {
         // Dependency sources → shared named volume (fast on mac/Windows).
         argv.push("-v".to_string());
-        argv.push(format!("{}:/kenn-cache", c.source_volume));
+        argv.push(format!("{}:/kenn-cache", s.volume));
         argv.push("-e".to_string());
-        argv.push(format!("{}=/kenn-cache/{}", c.source_env, c.source_subdir));
-        if let Some(b) = c.build {
-            // Build artifacts → per-workspace volume (persisted) or ephemeral.
-            let build_root = match b.volume {
-                Some(vol) => {
-                    argv.push("-v".to_string());
-                    argv.push(format!("{vol}:/kenn-build"));
-                    "/kenn-build"
-                }
-                None => "/tmp/kenn-build",
-            };
-            argv.push("-e".to_string());
-            argv.push(format!("{}={build_root}/{}", b.env, b.subdir));
-        }
+        argv.push(format!("{}=/kenn-cache/{}", s.env, s.subdir));
+    }
+    if let Some(b) = build {
+        // Build artifacts → per-workspace volume (persisted) or ephemeral.
+        let build_root = match b.volume {
+            Some(vol) => {
+                argv.push("-v".to_string());
+                argv.push(format!("{vol}:/kenn-build"));
+                "/kenn-build"
+            }
+            None => "/tmp/kenn-build",
+        };
+        argv.push("-e".to_string());
+        argv.push(format!("{}={build_root}/{}", b.env, b.subdir));
     }
     argv.push(image.to_string());
     argv.extend(command.iter().cloned());
@@ -315,6 +333,34 @@ pub fn toolchain_volume() -> CacheVolume {
     }
 }
 
+/// The chown script [`ensure_cache_volume`] runs over a cache volume. Pure, so
+/// the depth and failure rules below are testable without docker.
+///
+/// **Two levels deep, never `-R`.** On the toolchain volume those levels are the
+/// arch dirs (`/v/<arch>`) and the language dirs (`/v/<arch>/<lang>`) — exactly
+/// the two depths a `--user <uid>` container writes at: a sibling language's
+/// `mkdir`, and [`kenn_toolchain::cache`]'s `.{version}.lock` inside the language
+/// dir. Chowning only the root leaves such a volume permanently broken, while
+/// `chown -R` would walk multiple gigabytes of toolchain contents on every
+/// preflight for no benefit (those are only ever read). Two levels is a handful
+/// of directories, and it repairs volumes a kenn without
+/// [`swift_provision_script`]'s chown already left this way.
+///
+/// **`set -e`, and `if`/`then` rather than `&&`.** A failing root chown must
+/// still fail the preflight — under rootless Docker or userns-remap the uid can
+/// be outside the mapped range, and swallowing that turns a clean early error
+/// into an unattributed EACCES from the first indexer container. `[ -d … ] &&
+/// chown` would make the whole AND-list the loop's exit status, so an empty
+/// volume (unmatched glob, `[ -d … ]` false) would fail the run; `if`/`then`
+/// leaves the loop's status 0 in that case, with no trailing `:` needed to mask
+/// anything.
+fn cache_volume_chown_script(uid: u32, gid: u32) -> String {
+    format!(
+        "set -e; chown {uid}:{gid} /v; \
+         for d in /v/*/ /v/*/*/; do if [ -d \"$d\" ]; then chown {uid}:{gid} \"$d\"; fi; done"
+    )
+}
+
 /// Create the cache `vol` (idempotent), label it so `kenn docker-cache` can find
 /// and reason about it, and chown its mount point to the invoking user so a
 /// `--user <uid>` container can write it (a fresh named volume is root-owned).
@@ -347,9 +393,9 @@ pub(crate) fn ensure_cache_volume(vol: &CacheVolume) -> Result<(), String> {
         "-v".to_string(),
         format!("{}:/v", vol.name),
         "busybox".to_string(),
-        "chown".to_string(),
-        format!("{uid}:{gid}"),
-        "/v".to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        cache_volume_chown_script(uid, gid),
     ];
     run_docker_checked(&chown, &format!("chown cache volume {}", vol.name))
 }
@@ -476,6 +522,45 @@ pub fn list_toolchains() -> Result<Vec<ProvisionedToolchain>, String> {
     Ok(parse_du(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// Best-effort on-disk size of each kenn-managed volume, as docker's own
+/// human-readable string, keyed by volume name — one `docker system df -v` scan
+/// covers all of them. Empty on any failure so a listing degrades to "unknown"
+/// sizes rather than erroring. `df -v` reports a volume's size only as a
+/// preformatted string (there is no raw-byte field), so it is passed through
+/// verbatim rather than reformatted.
+#[must_use]
+pub fn volume_sizes() -> std::collections::HashMap<String, String> {
+    let out = std::process::Command::new("docker")
+        .args(["system", "df", "-v", "--format", "{{json .Volumes}}"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => parse_volume_sizes(&String::from_utf8_lossy(&o.stdout)),
+        _ => std::collections::HashMap::new(),
+    }
+}
+
+/// Extract `name -> size` for kenn-managed volumes from the `{{json .Volumes}}`
+/// array `docker system df -v` prints. Non-kenn volumes are dropped, and
+/// unparseable input yields an empty map (never a panic).
+fn parse_volume_sizes(json: &str) -> std::collections::HashMap<String, String> {
+    let mut sizes = std::collections::HashMap::new();
+    let Ok(vols) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+        return sizes;
+    };
+    for v in vols {
+        let (Some(name), Some(size)) = (
+            v.get("Name").and_then(serde_json::Value::as_str),
+            v.get("Size").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if name.starts_with("kenn-") {
+            sizes.insert(name.to_string(), size.to_string());
+        }
+    }
+    sizes
+}
+
 /// The architecture segments the cache is keyed by. Used to tell a current
 /// `<arch>/<language>` directory from a pre-arch `<language>/<version>` one,
 /// since both are two segments deep and `du` reports them identically.
@@ -598,6 +683,13 @@ pub fn remove_toolchain(language: &str, version: Option<&str>) -> RemoveOutcome 
     }
 }
 
+/// Where `swiftc` lands inside a provisioned toolchain, relative to its cache
+/// root. The provision script `test -x`'s it before the atomic rename, so a copy
+/// missing the compiler is never renamed into place as a complete toolchain.
+/// `cp --parents` preserves the leading `/usr`, so the binary is under `usr/bin`,
+/// not `bin`.
+const SWIFTC_SUBPATH: &str = "usr/bin/swiftc";
+
 /// The directories that make up a Swift toolchain inside the official image.
 /// Scattered rather than under one prefix, so each moves separately.
 const SWIFT_TOOLCHAIN_PATHS: &[&str] = &[
@@ -670,7 +762,25 @@ const SWIFT_BIN_PREFIXES: &[&str] = &[
 ///   type-checks fine and fails only at link, which reads as a project error
 ///   rather than a missing payload.
 pub fn provision_swift_from_image(image: &str, dest_version: &str) -> Result<(), String> {
-    use std::process::Command;
+    provision_swift_gated(
+        image,
+        dest_version,
+        &provisioned_swift_versions,
+        &|img, dest| run_swift_provision(img, dest_version, dest),
+    )
+}
+
+/// The gating around Swift provisioning, with the two docker touch-points — "what
+/// versions are already provisioned?" (`provisioned`) and "copy one out of the
+/// image" (`provision`) — injected so the decision is testable without a daemon.
+/// Order is load-bearing: the version is validated BEFORE it reaches either, so an
+/// attacker-controlled pin can never flow into a `docker run` argument.
+fn provision_swift_gated(
+    image: &str,
+    dest_version: &str,
+    provisioned: &dyn Fn(&str) -> Vec<String>,
+    provision: &dyn Fn(&str, &str) -> Result<(), String>,
+) -> Result<(), String> {
     if !is_safe_segment(dest_version) {
         return Err(format!("invalid swift version {dest_version:?}"));
     }
@@ -679,24 +789,109 @@ pub fn provision_swift_from_image(image: &str, dest_version: &str) -> Result<(),
     // writing it to an arch-blind path is what let an amd64 container pick up an
     // arm64 toolchain.
     let arch = kenn_toolchain::resolve::Arch::host().cache_key();
+    // `swift-tools-version` is a MINIMUM: reuse any provisioned toolchain `>=` it,
+    // never re-pulling or re-copying — a repo pinning 6.0 reuses a provisioned 6.3
+    // instead of pulling the ~5 GB swift:6.0 image. The in-container entrypoint
+    // applies the identical `best_compatible` rule over the same cache, so both
+    // agree on which toolchain runs. Only a genuinely unsatisfied minimum pulls.
+    if kenn_toolchain::select::best_compatible(dest_version, &provisioned(arch)).is_some() {
+        return Ok(());
+    }
     let dest = format!("/t/{arch}/swift/{dest_version}");
-    // Staged and renamed, exactly like the entrypoint's installs: a partial copy
-    // must never be visible as a complete toolchain.
-    let staging = format!("{dest}.staging");
+    provision(image, &dest)
+}
+
+/// Copy a Swift toolchain out of `image` into `dest` in the cache volume.
+/// Announced BEFORE the pull, and the child's stdout/stderr are INHERITED (via
+/// `.status()`, not captured by `.output()`) so `docker pull`'s progress is
+/// visible: a first provision moves a multi-GB image, and a silent producer for
+/// that window is indistinguishable from a hung one.
+/// The arch dir a toolchain `dest` lives under: `/t/<arch>/swift/<version>` →
+/// `/t/<arch>`. Falls back to the mount root when `dest` is shallower than that —
+/// including when climbing two levels lands on the empty string (`/t/arm64` →
+/// `/t` → `""`), which would otherwise render a `chown <uid>:<gid>` with no
+/// operand and abort the script under `set -e`.
+fn toolchain_arch_dir(dest: &str) -> String {
+    let climbed = dest
+        .rsplit_once('/')
+        .and_then(|(parent, _)| parent.rsplit_once('/'))
+        .map(|(arch_dir, _)| arch_dir);
+    match climbed {
+        Some(dir) if !dir.is_empty() => dir.to_string(),
+        _ => "/t".to_string(),
+    }
+}
+
+/// The language dir a toolchain `dest` lives in: `/t/<arch>/swift/<version>` →
+/// `/t/<arch>/swift`. This is where [`kenn_toolchain::cache`] takes its
+/// `.{version}.lock`, so it must be writable by the `--user` entrypoint even
+/// though the version dirs beneath it need not be. Same empty-operand fallback as
+/// [`toolchain_arch_dir`].
+fn toolchain_lang_dir(dest: &str) -> String {
+    match dest.rsplit_once('/') {
+        Some((parent, _)) if !parent.is_empty() => parent.to_string(),
+        _ => "/t".to_string(),
+    }
+}
+
+/// The shell script `run_swift_provision` hands the swift image. Pure, so the
+/// invariants below are testable without docker.
+///
+/// Staged and renamed, exactly like the entrypoint's installs: a partial copy
+/// must never be visible as a complete toolchain. The staging dir is DOT-prefixed
+/// (`.{version}.staging`) so an in-flight or crashed provision is excluded from
+/// the version enumeration on BOTH sides of the container boundary — the busybox
+/// `*/` glob and the entrypoint's `read_dir` both skip dotfiles — rather than
+/// relying on the parser to reject a `6.0.staging` name.
+///
+/// The trailing `chown` is load-bearing. This provision runs as ROOT (the swift
+/// image needs it to read and `cp -a` the toolchain), so every directory it
+/// creates is root-owned. Indexer containers run `--user <uid>:<gid>`
+/// ([`docker_launcher`]), and they write at TWO depths under the mount:
+///
+/// * `/t/<arch>/<lang>` — a sibling language's own provision
+///   (`mkdir /t/<arch>/go`). A root-owned ARCH dir makes that fail with EACCES:
+///   provisioning Swift once bricked Go/Python/dotnet for the whole volume.
+/// * `/t/<arch>/<lang>/.{version}.lock` — [`kenn_toolchain::cache`]'s per-version
+///   lock, taken inside the LANGUAGE dir it `create_dir_all`s first. A root-owned
+///   language dir makes the in-container entrypoint fail on any version this
+///   provision did not itself install, turning an actionable "no Swift toolchain
+///   in the cache" message into an opaque permission error.
+///
+/// So both dirs are handed back. The toolchain contents BELOW them stay
+/// root-owned, which is fine — the entrypoint only ever reads those.
+fn swift_provision_script(staging: &str, dest: &str, uid: u32, gid: u32) -> String {
     let bin_globs: Vec<String> = SWIFT_BIN_PREFIXES
         .iter()
         .map(|p| format!("/usr/bin/{p}*"))
         .collect();
-    let script = format!(
+    format!(
         "set -e; rm -rf {staging} {dest}; mkdir -p {staging}/usr/bin; \
          for p in {paths}; do [ -e \"$p\" ] && cp -a --parents \"$p\" {staging} || true; done; \
          for g in {globs}; do cp -a $g {staging}/usr/bin/ 2>/dev/null || true; done; \
-         test -x {staging}/usr/bin/swiftc; \
-         mv {staging} {dest}",
+         test -x {staging}/{SWIFTC_SUBPATH}; \
+         mv {staging} {dest}; \
+         chown {uid}:{gid} {arch_dir} {lang_dir}",
         paths = SWIFT_TOOLCHAIN_PATHS.join(" "),
         globs = bin_globs.join(" "),
+        arch_dir = toolchain_arch_dir(dest),
+        lang_dir = toolchain_lang_dir(dest),
+    )
+}
+
+fn run_swift_provision(image: &str, dest_version: &str, dest: &str) -> Result<(), String> {
+    use std::process::Command;
+    let staging = match dest.rsplit_once('/') {
+        Some((parent, _)) => format!("{parent}/.{dest_version}.staging"),
+        None => format!(".{dest_version}.staging"),
+    };
+    let (uid, gid) = current_ids();
+    let script = swift_provision_script(&staging, dest, uid, gid);
+    eprintln!(
+        "kenn: provisioning Swift {dest_version} toolchain from {image} \
+         — first run pulls a multi-GB image, this can take a few minutes…"
     );
-    let out = Command::new("docker")
+    let status = Command::new("docker")
         .args([
             "run",
             "--rm",
@@ -707,15 +902,46 @@ pub fn provision_swift_from_image(image: &str, dest_version: &str) -> Result<(),
             "-c",
             &script,
         ])
-        .output()
+        .status()
         .map_err(|e| format!("provisioning swift from {image}: {e}"))?;
-    if out.status.success() {
+    if status.success() {
         Ok(())
     } else {
         Err(format!(
-            "provisioning swift from {image}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "provisioning swift from {image} failed with {status} (see output above)"
         ))
+    }
+}
+
+/// The provisioned Swift versions in the cache volume for `arch`, as their
+/// directory names — the host counterpart to
+/// [`kenn_toolchain::cache::ToolchainCache::provisioned_versions`], enumerated
+/// with the same tiny `busybox` helper the rest of this module uses so it never
+/// pulls the multi-GB `swift:<tag>` image just to look. The `*/` glob matches
+/// directories only and skips dotfiles (lock files and `.staging`), matching the
+/// entrypoint's non-dot filter so both sides see the same set. Any failure (no
+/// docker, daemon down) lists none — the caller then provisions, surfacing the
+/// real docker error rather than this swallowing it.
+fn provisioned_swift_versions(arch: &str) -> Vec<String> {
+    let out = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &format!("{TOOLCHAIN_VOLUME}:/t"),
+            "busybox",
+            "sh",
+            "-c",
+            &format!("for d in /t/{arch}/swift/*/; do [ -d \"$d\" ] && basename \"$d\"; done"),
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -892,15 +1118,54 @@ mod tests {
 
     fn rust_cache(build_volume: Option<&str>) -> LangCache<'_> {
         LangCache {
-            source_env: "CARGO_HOME",
-            source_subdir: "cargo",
-            source_volume: "kenn-docker-cache",
+            source: Some(SourceCache {
+                env: "CARGO_HOME",
+                subdir: "cargo",
+                volume: "kenn-docker-cache",
+            }),
             build: Some(BuildCache {
                 env: "CARGO_TARGET_DIR",
                 subdir: "cargo",
                 volume: build_volume,
             }),
         }
+    }
+
+    /// Swift's shape: a build cache and NO source cache. This combination was
+    /// unrepresentable while `build` hung off a present `source`, so
+    /// `KENN_SWIFT_SCRATCH` and the `/kenn-build` mount were silently never
+    /// emitted and `SwiftPM` wrote its checkouts to the slow host bind mount
+    /// every run. Mutation-checked: re-nesting the build wiring under `source`
+    /// emits neither and fails both assertions.
+    #[test]
+    fn docker_launcher_wires_a_build_only_cache() {
+        let cache = LangCache {
+            source: None,
+            build: Some(BuildCache {
+                env: "KENN_SWIFT_SCRATCH",
+                subdir: "swift",
+                volume: Some("kenn-build-abc"),
+            }),
+        };
+        let argv = docker_launcher(
+            &["kenn-swift".to_string()],
+            "ghcr.io/kennworx/kenn-swift:v0.2",
+            Some(cache),
+            Path::new("/ws"),
+            MountStrategy::SamePath,
+        );
+        assert!(
+            argv.contains(&"KENN_SWIFT_SCRATCH=/kenn-build/swift".to_string()),
+            "build-only language must still get its scratch env: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"kenn-build-abc:/kenn-build".to_string()),
+            "and its build volume mount: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a.contains("/kenn-cache")),
+            "but no dependency-source cache it never asked for: {argv:?}"
+        );
     }
 
     #[test]
@@ -1043,6 +1308,170 @@ mod tests {
         }
     }
 
+    /// A provisioned toolchain that satisfies the minimum is reused: the
+    /// (expensive, docker-shelling) provision must NOT run. Here a provisioned 6.3
+    /// covers a 6.0 pin. Mutation-checked: deleting the `best_compatible` guard in
+    /// `provision_swift_gated` lets control reach the provision closure, tripping
+    /// this `!ran` assertion.
+    #[test]
+    fn a_compatible_toolchain_is_reused_without_reprovisioning() {
+        let ran = std::cell::Cell::new(false);
+        let out =
+            provision_swift_gated("swift:6.0", "6.0", &|_| vec!["6.3".to_string()], &|_, _| {
+                ran.set(true);
+                Ok(())
+            });
+        assert!(out.is_ok(), "reuse must succeed, got {out:?}");
+        assert!(
+            !ran.get(),
+            "a compatible toolchain must not be re-provisioned"
+        );
+    }
+
+    /// When nothing provisioned satisfies the minimum (only an older 5.9 present),
+    /// the pin IS provisioned into its own dir. Guards against a guard that always
+    /// short-circuits: making it always reuse leaves `ran` false and fails this.
+    #[test]
+    fn an_unsatisfied_minimum_provisions_the_pin() {
+        let ran = std::cell::Cell::new(false);
+        let out = provision_swift_gated(
+            "swift:6.0",
+            "6.0",
+            &|_| vec!["5.9".to_string()],
+            &|_, dest| {
+                ran.set(true);
+                assert!(dest.ends_with("/swift/6.0"), "provisions the pin: {dest}");
+                Ok(())
+            },
+        );
+        assert!(out.is_ok(), "{out:?}");
+        assert!(ran.get(), "an unsatisfied minimum must provision the pin");
+    }
+
+    #[test]
+    fn toolchain_arch_dir_climbs_to_the_shared_level() {
+        // The arch dir is SHARED across languages — two levels up from a
+        // versioned toolchain, not one (that is the language dir, which is not
+        // what a sibling language needs to write into).
+        assert_eq!(toolchain_arch_dir("/t/arm64/swift/6.3"), "/t/arm64");
+        assert_eq!(toolchain_arch_dir("/t/amd64/dotnet/9.0.308"), "/t/amd64");
+        // Shallower than `<arch>/<lang>/<version>` falls back to the mount root.
+        assert_eq!(toolchain_arch_dir("/t/arm64"), "/t");
+        assert_eq!(toolchain_arch_dir("nested"), "/t");
+    }
+
+    #[test]
+    fn toolchain_lang_dir_is_the_lock_holding_parent() {
+        // One level up from the version — where `.{version}.lock` is taken.
+        assert_eq!(toolchain_lang_dir("/t/arm64/swift/6.3"), "/t/arm64/swift");
+        assert_eq!(
+            toolchain_lang_dir("/t/amd64/dotnet/9.0.308"),
+            "/t/amd64/dotnet"
+        );
+        assert_eq!(toolchain_lang_dir("bare"), "/t");
+    }
+
+    /// The swift provision runs as root, so every directory it creates is
+    /// root-owned. A `--user <uid>` container writes at TWO depths: the arch dir
+    /// (a sibling language's `mkdir /t/<arch>/go`) and the language dir
+    /// (`kenn_toolchain::cache`'s `.{version}.lock`, taken inside it). Both must
+    /// be handed back — chowning only the arch dir still leaves the entrypoint
+    /// unable to provision a second Swift version, with an opaque EACCES instead
+    /// of the actionable "no toolchain in the cache" message. Mutation-checked:
+    /// dropping either operand fails its assertion below, and dropping the whole
+    /// `chown` clause fails both.
+    #[test]
+    fn swift_provision_hands_back_both_writable_depths() {
+        let script =
+            swift_provision_script("/t/arm64/swift/.6.3.staging", "/t/arm64/swift/6.3", 501, 20);
+        assert!(
+            script.contains("chown 501:20 /t/arm64 /t/arm64/swift"),
+            "both the arch dir (sibling languages) and the language dir (version locks): {script}"
+        );
+        assert!(
+            !script.contains("/t/arm64/swift/6.3\n") && !script.ends_with("/t/arm64/swift/6.3"),
+            "never the version dir — its contents are read-only to the entrypoint: {script}"
+        );
+        // The chown must come AFTER the atomic rename: chowning the staging dir
+        // would leave the published toolchain's parent root-owned anyway.
+        let (mv, chown) = (
+            script
+                .find("mv /t/arm64/swift/.6.3.staging")
+                .expect("mv present"),
+            script.find("chown").expect("chown present"),
+        );
+        assert!(mv < chown, "chown must follow the rename: {script}");
+    }
+
+    /// A volume an older kenn left root-owned must heal on the next preflight, at
+    /// BOTH depths a `--user` container writes to. Mutation-checked: reverting to
+    /// the single `chown {uid}:{gid} /v` fails the arch-dir assertion, and
+    /// dropping `/v/*/*/` fails the language-dir one.
+    #[test]
+    fn cache_volume_chown_repairs_both_writable_depths() {
+        let script = cache_volume_chown_script(501, 20);
+        assert!(script.contains("chown 501:20 /v"), "the root: {script}");
+        assert!(
+            script.contains("/v/*/ "),
+            "the arch dirs — a sibling language's mkdir: {script}"
+        );
+        assert!(
+            script.contains("/v/*/*/"),
+            "the language dirs — where the version lock is taken: {script}"
+        );
+        assert!(
+            !script.contains("-R"),
+            "never recursive — that walks gigabytes of toolchain every preflight: {script}"
+        );
+    }
+
+    /// A failing root chown must fail the preflight. The earlier form ended in a
+    /// `:` that made the script exit 0 unconditionally, so a chown rejected under
+    /// rootless Docker / userns-remap was swallowed and surfaced later as an
+    /// unattributed EACCES from the first indexer container. Mutation-checked:
+    /// dropping `set -e` (or re-appending `; :`) fails this.
+    #[test]
+    fn cache_volume_chown_does_not_swallow_a_failing_chown() {
+        let script = cache_volume_chown_script(501, 20);
+        assert!(
+            script.starts_with("set -e;"),
+            "a failing chown must abort, not be reported as success: {script}"
+        );
+        assert!(
+            !script.trim_end().ends_with(':'),
+            "no trailing `:` masking the exit status: {script}"
+        );
+        // `if`/`then` rather than `[ -d … ] && chown`: the AND-list form makes the
+        // false branch the loop's exit status, so an EMPTY volume would fail.
+        assert!(
+            script.contains("if [ -d") && !script.contains("] &&"),
+            "empty-volume safety must come from `if`, not from masking: {script}"
+        );
+    }
+
+    /// Validation precedes BOTH docker touch-points: a hostile version never
+    /// reaches the version enumeration or the provision. Mutation-checked: moving
+    /// the `is_safe_segment` check below the enumeration sets `listed` and fails
+    /// the `!listed` assertion.
+    #[test]
+    fn the_version_is_validated_before_any_docker_touch_point() {
+        let listed = std::cell::Cell::new(false);
+        let out = provision_swift_gated(
+            "swift:6.1",
+            "a;rm -rf /",
+            &|_| {
+                listed.set(true);
+                Vec::new()
+            },
+            &|_, _| panic!("must not provision a rejected version"),
+        );
+        assert!(out.is_err(), "a hostile version must be refused");
+        assert!(
+            !listed.get(),
+            "validation must precede the version enumeration"
+        );
+    }
+
     /// The toolchain directories move; `/usr/bin` deliberately does NOT, because
     /// it is 507 entries of ubuntu userland around 49 toolchain binaries.
     /// Copying it wholesale and prepending it to PATH shadowed the indexer
@@ -1084,6 +1513,32 @@ mod tests {
         // An empty volume, and du's noise on a missing path, yield nothing.
         assert!(parse_du("").is_empty());
         assert!(parse_du("du: /t/*/*: No such file or directory\n").is_empty());
+    }
+
+    #[test]
+    fn parse_volume_sizes_keeps_only_kenn_volumes() {
+        let json = r#"[
+          {"Name":"kenn-deps-abc","Size":"906.7MB"},
+          {"Name":"kenn-toolchains","Size":"5.2GB"},
+          {"Name":"some-other-volume","Size":"1GB"}
+        ]"#;
+        let got = parse_volume_sizes(json);
+        assert_eq!(
+            got.get("kenn-deps-abc").map(String::as_str),
+            Some("906.7MB")
+        );
+        assert_eq!(
+            got.get("kenn-toolchains").map(String::as_str),
+            Some("5.2GB")
+        );
+        // The filter is load-bearing: docker reports EVERY volume on the host,
+        // and only kenn's belong in a `kenn docker-cache` listing.
+        assert!(
+            !got.contains_key("some-other-volume"),
+            "non-kenn dropped: {got:?}"
+        );
+        // Malformed input degrades to empty rather than panicking.
+        assert!(parse_volume_sizes("not json").is_empty());
     }
 
     /// The listing globs two depths, so `<arch>/<language>` intermediate dirs

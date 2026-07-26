@@ -31,10 +31,25 @@ pub struct Concept {
     pub test: bool,
     /// Total symbol count in the package (a `kenn.*` fact).
     pub symbols: u64,
-    /// Directed dependencies: the concept ids of packages this one depends on.
-    pub deps: Vec<String>,
+    /// Outgoing coupling: packages this one depends on, heaviest first.
+    pub deps: Vec<Coupling>,
+    /// How many packages this one depends on BEFORE the render cap — so the
+    /// renderer can name what it dropped rather than truncate silently.
+    pub deps_total: u64,
+    /// Incoming coupling: packages that depend on this one, heaviest first.
+    /// The inverse of [`Self::deps`] — and the direction a reader usually wants
+    /// first, since "who breaks if I change this" is not answerable from the
+    /// outgoing list alone.
+    pub used_by: Vec<Coupling>,
+    /// How many packages depend on this one before the render cap. See
+    /// [`Self::deps_total`].
+    pub used_by_total: u64,
+    /// Where this package sits in the dependency graph — the `index.md`
+    /// grouping axis. `None` for a component or document, which are not
+    /// packages and take no part in it.
+    pub role: Option<Role>,
     /// Most central non-test symbols, ranked (highest weighted degree first).
-    pub central: Vec<CentralSymbol>,
+    pub central: Vec<SymbolRef>,
     /// Individual member files, workspace-relative. Populated for a `component`
     /// (which maps one directory, so it lists every file) and a `document`;
     /// empty for a `package`, which summarizes via [`Self::file_count`] +
@@ -55,11 +70,81 @@ pub struct Concept {
     pub components: Vec<String>,
 }
 
-/// A central symbol: its name and the workspace-relative location it is defined
-/// at — `line_start`..`line_end` (a range for a multiline def). `line_start` 0
-/// when unknown; `line_end == line_start` for a single line.
+/// A package's place in the dependency graph — the axis `index.md` groups by.
+///
+/// Grouping by LANGUAGE is a filesystem fact, and it collapses at scale: a real
+/// 125-package solution rendered as 123 alphabetical bullets under one `## C#`
+/// heading, which tells a reader nothing about which packages matter or how they
+/// relate. Role is derived from one number — how much a package is depended on
+/// versus how much it depends — because that is the number with a defensible
+/// threshold. Finer labels (adapter vs engine, vocabulary vs contract) need axes
+/// that had almost no dynamic range on the repos measured, and a confident wrong
+/// label in a bird's-eye view is worse than a number.
+///
+/// The rendered entry always carries the dependent/dependency counts the label
+/// came from, so a reader can check the classification rather than trust it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Role {
+    /// Depended on far more than it depends. The foundation everything rests on.
+    Provider,
+    /// Both depended on and depending — the middle of the stack.
+    Layer,
+    /// Depends on much, little depends on it. Entry points, apps, leaves.
+    Consumer,
+    /// Test-dominant. Split out first: on a large solution these are ~30% of the
+    /// package list and none of its architecture.
+    Tests,
+    /// No cross-package coupling in either direction — vendored, dead, or not
+    /// wired up. Worth seeing precisely because it is invisible in a flat list.
+    Isolated,
+}
+
+impl Role {
+    /// The `index.md` section heading, and its rule stated so the grouping is
+    /// checkable.
+    #[must_use]
+    pub const fn heading(self) -> &'static str {
+        match self {
+            Self::Provider => "Providers — depended on, depending on little",
+            Self::Layer => "Layers — both depended on and depending",
+            Self::Consumer => "Consumers — depending on much, little depends on them",
+            Self::Tests => "Tests",
+            Self::Isolated => "Isolated — no cross-package coupling",
+        }
+    }
+}
+
+/// One directed coupling between two packages: the other package's concept id,
+/// the summed aggregate-edge weight, and the per-relation split.
+///
+/// The weight was always computed (it ranks the dependency list) and always
+/// thrown away at render. Keeping it — and the relation split with it — is what
+/// separates "kenn-store depends on kenn-model" from "kenn-store depends on
+/// kenn-model 2007 times, almost all type references": the first is a fact, the
+/// second is the architecture. `implements` in the split is the sharpest signal
+/// of the set, marking a contract/implementer pair rather than incidental use.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CentralSymbol {
+pub struct Coupling {
+    /// The other package's concept id (a bundle-relative link target).
+    pub concept_id: String,
+    /// The other package's display name — its anchor, as the reader knows it.
+    /// Carried rather than derived from [`Self::concept_id`], whose leaf is the
+    /// flattened, language-prefixed filename (`rust_kenn-config`) and not a name
+    /// anyone types.
+    pub title: String,
+    /// Summed weight across every relation in [`Self::relations`].
+    pub weight: u64,
+    /// `(relation, weight)` — the edge kind's `db_name`, heaviest first.
+    pub relations: Vec<(String, u64)>,
+}
+
+/// A resolvable reference to one symbol: its name, stable `pub_id`, and the
+/// workspace-relative location it is defined at — `line_start`..`line_end` (a
+/// range for a multiline def). `line_start` 0 when unknown; `line_end ==
+/// line_start` for a single line. Used wherever the atlas lists symbols a reader
+/// can act on — a package/domain's central symbols, a contract's implementers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRef {
     pub name: String,
     /// The stable `pub_id` — usable directly with kenn (`kenn get <pub_id>`),
     /// so the atlas is actionable, not just descriptive.
@@ -82,13 +167,82 @@ pub struct DomainConcept {
     /// Display title — the domain's hub symbol (its highest-weighted-degree
     /// member): the most recognizable handle for an otherwise anonymous cluster.
     pub title: String,
-    /// Member count (aggregate nodes in the community).
+    /// Member count — the domain's members that live in a [`Self::packages`]
+    /// package. Members glued in only through shared external types (no
+    /// first-party edge to the span) are excluded, so this is the honest size of
+    /// the cluster, not the raw community.
     pub size: u64,
-    /// The packages this domain spans, as `package` concept ids, heaviest
-    /// (most members) first.
-    pub packages: Vec<String>,
+    /// The packages this domain genuinely spans, heaviest (most members) first.
+    /// Only packages that clear the member floor AND connect by a first-party
+    /// edge to another such package survive — see the producer's `supported_span`.
+    pub packages: Vec<SpannedPackage>,
     /// The domain's most central members, ranked by weighted degree.
-    pub central: Vec<CentralSymbol>,
+    pub central: Vec<SymbolRef>,
+}
+
+/// One package a domain genuinely spans: which package, how many of the domain's
+/// members live in it, and how many intra-domain edges connect it to the domain's
+/// OTHER spanned packages. The link count is what earned it the span — a package
+/// with no first-party edge into the rest of the community is a reference into
+/// the domain, not part of it, and the producer drops it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpannedPackage {
+    /// The package's concept id (a bundle-relative link target).
+    pub concept_id: String,
+    /// The package's display name — its anchor, as the reader knows it. Carried
+    /// rather than derived from [`Self::concept_id`], whose leaf is the flattened,
+    /// language-prefixed filename (`rust_kenn-store`) and not a name anyone types.
+    pub title: String,
+    /// The domain's members living in this package.
+    pub members: u64,
+    /// Intra-domain aggregate edges connecting this package to the domain's other
+    /// spanned packages — the coupling that earned it the span.
+    pub links: u64,
+}
+
+/// One **contract** — a first-party interface / base class / protocol whose
+/// implementers span more than one package. Unlike a [`DomainConcept`] (an
+/// emergent Louvain cluster), a contract is read STRAIGHT from the `implements` /
+/// `extends_type` edges: it is explicit, complete (every implementer, not the
+/// subset a clustering happens to merge), and deterministic. It answers the one
+/// question the package axis can't — "where is this abstraction implemented
+/// across the tree" — which is the reader's question when touching a shared type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractConcept {
+    /// Path-qualified concept id, e.g. `contracts/IValidator`.
+    pub id: String,
+    /// The contract's name (the interface / base type).
+    pub title: String,
+    /// The contract's kind `db_name` — `interface`, `class` (base class), etc.
+    pub kind: String,
+    /// The contract type itself — its resolvable `pub_id` and definition
+    /// location, so a reader can `kenn get` the interface or jump to it.
+    pub symbol: SymbolRef,
+    /// The package the contract is DEFINED in: `(concept_id, display title)`.
+    pub defined_in_id: String,
+    pub defined_in_title: String,
+    /// Implementers grouped by package, widest (most implementers) first, capped.
+    pub implementers: Vec<ContractImplementers>,
+    /// Distinct implementers across all packages, BEFORE the render cap.
+    pub total_implementers: u64,
+    /// Distinct implementer packages, BEFORE the render cap — the breadth that
+    /// makes this a cross-package contract.
+    pub package_span: u64,
+}
+
+/// The implementers of a [`ContractConcept`] that live in one package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractImplementers {
+    /// The implementer package's concept id (a bundle-relative link target).
+    pub concept_id: String,
+    /// The implementer package's display name.
+    pub title: String,
+    /// Implementer types in this package — each with its resolvable `pub_id` and
+    /// source location (`kenn get <pub_id>` / jump-to-def), sorted, capped for
+    /// render. Same shape the package concept uses for its central symbols.
+    pub symbols: Vec<SymbolRef>,
+    /// Total distinct implementers in this package, BEFORE the render cap.
+    pub count: u64,
 }
 
 /// The `index.md` shape/status header — all structural facts. The `timestamp`
@@ -106,6 +260,13 @@ pub struct AtlasShape {
     pub symbols: u64,
     /// Test-symbol ratio as a whole percent (0..=100).
     pub test_ratio_pct: u8,
+    /// Domains and contracts the repo HAS, counted before the render caps
+    /// (`MAX_DOMAINS` / `MAX_CONTRACTS`) bound what the bundle writes. The
+    /// header states the repo's shape; the axis heading names the cap when it
+    /// binds. Without these the index reported the capped count as the total —
+    /// a 125-package solution read as "24 domains" when it has 78.
+    pub domains_total: usize,
+    pub contracts_total: usize,
     /// Concrete freshness: HEAD sha, or the staleness key when git is absent.
     pub freshness: String,
     /// ISO-8601 build timestamp (header-only, ephemeral).

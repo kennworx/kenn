@@ -15,10 +15,14 @@
 //! - [`support`] — shared leaf helpers.
 
 mod anchors;
+mod contracts;
 mod css;
+mod documents;
+mod domains;
 mod findings;
 mod lifecycle;
 mod links;
+mod packages;
 mod query;
 mod semantic;
 mod state;
@@ -31,7 +35,12 @@ pub use anchors::{
     check_anchors, find_directives, record_anchor, CheckAnchorsArgs, FindDirectivesArgs,
     RecordAnchorArgs,
 };
+pub use contracts::{list_contracts, ContractView, ImplementerView, ListContractsArgs};
 pub use css::{check_css, CheckCssArgs, CheckCssResponse, CssDiagnostic};
+pub use documents::{list_documents, DocumentView, ListDocumentsArgs};
+pub use domains::{
+    list_domains, DomainMemberView, DomainView, ListDomainsArgs, SpannedPackageView,
+};
 pub use findings::{
     find_predecessors, find_successors, get_finding, merge_findings, search_findings,
     store_finding, FindingDagArgs, GetFindingArgs, MergeFindingsArgs, SearchFindingsArgs,
@@ -43,6 +52,7 @@ pub use lifecycle::{
     WatchStopArgs, WatchStopResult,
 };
 pub use links::{check_links, CheckLinksArgs, CheckLinksResponse, LinkDiagnostic};
+pub use packages::{list_packages, CouplingView, ListPackagesArgs, PackageView};
 pub use query::{
     find_at_location, find_similar, find_symbol, find_usages, get_symbol, get_workspace_overview,
     list_callees, list_callers, list_correspondences, list_implementers, list_imports,

@@ -5,9 +5,13 @@
 //! - [`model`] — the domain structs a package concept carries.
 //! - [`okf`] — OKF serialization (concept docs, `index.md`, `log.md`).
 //!
-//! The Reader-backed producer and the shared `finalize_atlas` wiring land here
-//! next (tasks 3–5).
+//! [`coupling`], [`domains`], and [`contracts`] hold the per-axis SELECTION
+//! rules, shared so the producer and the query surface can never disagree about
+//! the same snapshot; render caps stay in [`producer`].
 
+pub mod contracts;
+pub mod coupling;
+pub mod domains;
 pub mod model;
 pub mod okf;
 pub mod producer;

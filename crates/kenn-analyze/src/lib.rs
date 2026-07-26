@@ -6,7 +6,8 @@
 //! of that runs:
 //!
 //!   - god-node ranking split by live / test / external,
-//!   - flat Louvain over the whole graph,
+//!   - flat Louvain over the first-party view (external nodes excluded,
+//!     is-a edges up-weighted — see `AggregatedGraph::clustering_view`),
 //!   - anchored hierarchical Louvain (L0 = anchor, L1+ = recursive
 //!     Louvain on induced subgraphs),
 //!
@@ -79,7 +80,10 @@ pub fn compute_analysis(graph: &AggregatedGraph, opts: &AnalysisOptions) -> Anal
             min_cluster: opts.min_cluster,
         },
     );
-    let flat = cluster::louvain_flat(graph);
+    // Flat community detection runs on the first-party, kind-reweighted view —
+    // the atlas domain axis maps project code, not the vendored/stdlib types it
+    // references. God-nodes and the hierarchy below keep the full `graph`.
+    let flat = cluster::louvain_flat(&graph.clustering_view());
     let god_live = projection::top_by_weighted_degree(graph, opts.top_n, NodeFilter::UserLiveOnly);
     let god_test = projection::top_by_weighted_degree(graph, opts.top_n, NodeFilter::UserTestOnly);
     let god_external =
@@ -625,6 +629,32 @@ mod tests {
         assert_eq!(r1.hierarchy.anchors.len(), r2.hierarchy.anchors.len());
     }
 
+    /// Flat community detection runs on the first-party view, so no external
+    /// node (5, 6 in the fixture) may appear in any flat community — even though
+    /// they are edge-connected (5↔6, 4→5). They still get a membership row
+    /// downstream (the unassigned sentinel), which `to_records_shapes_match_graph`
+    /// covers. Mutation-checked: clustering over the full graph puts 5 and 6 in a
+    /// community here.
+    #[test]
+    fn flat_communities_exclude_external_nodes() {
+        let g = fixture();
+        let r = compute_analysis(&g, &AnalysisOptions::default());
+        let clustered: std::collections::HashSet<ShortId> =
+            r.flat.iter().flatten().copied().collect();
+        assert!(
+            !clustered.contains(&5),
+            "external node 5 must not be clustered"
+        );
+        assert!(
+            !clustered.contains(&6),
+            "external node 6 must not be clustered"
+        );
+        assert!(
+            clustered.contains(&1),
+            "first-party nodes are still clustered"
+        );
+    }
+
     #[test]
     fn to_records_shapes_match_graph() {
         let g = fixture();
@@ -651,6 +681,7 @@ mod tests {
             language: lang,
             external: false,
             test: false,
+            example: false,
             anchor_id: anchor,
             anchor_name: format!("a{anchor}"),
         };

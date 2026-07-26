@@ -365,12 +365,29 @@ final class Indexer {
     /// here once collection across all stores is complete.
     func emit() {
         // Index defined nominal types by USR length (desc) for extension-parent
-        // prefix resolution.
+        // prefix resolution. The USR breaks length ties: `sorted` is not a stable
+        // sort and its input is a Dictionary's keys, so comparing on `count`
+        // alone left equal-length USRs in per-run order — and `resolveParent`
+        // takes the FIRST prefix match, so which type an extension member
+        // attached to could change between runs.
         typeUsrsByLen = defs.filter { isTypeKindStr($0.value.kindStr) }
-            .keys.sorted { $0.count > $1.count }
+            .keys.sorted { $0.count != $1.count ? $0.count > $1.count : $0 < $1 }
 
-        // Assign a wire id + key to every definition.
-        for usr in defs.keys {
+        // Assign a wire id + key to every definition, in USR order.
+        //
+        // `defs` is a Dictionary and Swift seeds its hasher PER PROCESS, so
+        // iterating it visits USRs in a different order every run. `keyFor`
+        // gives the unsalted key to whichever USR arrives first and salts the
+        // rest, so that order decided identity: two runs of one binary over an
+        // unchanged tree produced `ArgumentParser.Contained` at line 414 in one
+        // and at line 441 in the other, with the loser carrying a `#<digest>`
+        // suffix. Nine atlas documents differed between runs.
+        //
+        // Sorted by USR rather than by source position on purpose: a USR is a
+        // stable identity, so inserting a declaration ABOVE a collision cannot
+        // move the unsalted key onto a different symbol. A line-ordered sort
+        // would be deterministic per run but still churn ids on unrelated edits.
+        for usr in defs.keys.sorted() {
             _ = ensureSymId(usr)
         }
         // Stubs: edge endpoints that were never defined in-workspace.
@@ -385,8 +402,13 @@ final class Indexer {
             sink.countEdge()
             sink.write(["type": "edge", "edge_kind": edge.kind, "source": Int(s), "target": Int(t)])
         }
-        // `imports` edges between synthetic module nodes.
-        for pair in moduleImports {
+        // `imports` edges between synthetic module nodes. Sorted because
+        // `moduleImports` is a Set: iterating it directly allocated module-stub
+        // ids in per-run order, so `ArgumentParserUnitTests` and
+        // `ArgumentParserExampleTests` swapped ids 5704/5705 between two runs of
+        // one binary over an unchanged store. Ids are the wire identity, so every
+        // consumer downstream inherited the churn.
+        for pair in moduleImports.sorted() {
             let parts = pair.split(separator: "\u{1}", maxSplits: 1)
             guard parts.count == 2 else { continue }
             let from = ensureModuleNode(String(parts[0]))

@@ -24,8 +24,8 @@ impl SqliteWriter {
         {
             let mut ins = tx
                 .prepare_cached(
-                    "INSERT INTO aggregate_nodes(id,kind,name,language,external,test,\
-                     anchor_id,anchor_name) VALUES(?,?,?,?,?,?,?,?)",
+                    "INSERT INTO aggregate_nodes(id,kind,name,language,external,test,example,\
+                     anchor_id,anchor_name) VALUES(?,?,?,?,?,?,?,?,?)",
                 )
                 .map_err(be)?;
             for n in nodes {
@@ -36,6 +36,7 @@ impl SqliteWriter {
                     n.language.db_name(),
                     n.external,
                     n.test,
+                    n.example,
                     n.anchor_id,
                     n.anchor_name,
                 ])

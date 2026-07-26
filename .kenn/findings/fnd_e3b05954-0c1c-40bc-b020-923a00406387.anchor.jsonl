@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-store/src/meta.rs","ts":"2026-07-25T19:39:22.503402Z","sha":"b595f2f9b30b659b"}
+{"op":"attach","anchor":"crates/kenn-store/src/db/sqlite/schema.rs","ts":"2026-07-25T19:39:22.503402Z","sha":"63ee95f0732e01d6"}
+{"op":"attach","anchor":"crates/kenn-store/src/db/sqlite/reader/scan.rs","ts":"2026-07-25T19:39:22.503402Z","sha":"43e0c07acdb1450c"}
+{"op":"attach","anchor":"crates/kenn-store/src/db/sqlite/writer/aggregate.rs","ts":"2026-07-25T19:39:22.503402Z","sha":"ffdcf9ac4a369b78"}

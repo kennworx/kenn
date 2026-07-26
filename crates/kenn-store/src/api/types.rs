@@ -175,6 +175,44 @@ pub struct SymbolRow {
     pub enclosing_sym_id: u32,
 }
 
+/// Row-level narrowing applied during traversal, BEFORE `limit` is taken — so a
+/// filtered page is still a full page and the cursor stays correct.
+///
+/// `include_external` / `include_tests` were the only two predicates the
+/// traversal honoured; `package`, `kind` and `language` were accepted by every
+/// `list` command and silently dropped, so a narrowed query returned the
+/// unnarrowed list and looked like an answer.
+#[derive(Debug, Clone, Default)]
+pub struct RowNarrow {
+    pub include_external: bool,
+    pub include_tests: bool,
+    /// Package NAMES; resolved to ids once per traversal.
+    pub packages: Option<Vec<String>>,
+    /// `Kind::db_name()` values.
+    pub kinds: Option<Vec<String>>,
+    /// `Language::db_name()` values.
+    pub languages: Option<Vec<String>>,
+}
+
+impl RowNarrow {
+    /// The pre-existing two-flag form, for callers that narrow no further.
+    #[must_use]
+    pub fn visibility(include_external: bool, include_tests: bool) -> Self {
+        Self {
+            include_external,
+            include_tests,
+            ..Self::default()
+        }
+    }
+
+    /// Whether any name-resolved predicate is set (i.e. a package lookup is
+    /// worth doing).
+    #[must_use]
+    pub fn narrows_packages(&self) -> bool {
+        self.packages.is_some()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RankedSymbolRow {
     pub id: u32,
@@ -263,6 +301,10 @@ pub struct AggregateNodeRow {
     pub language: String,
     pub external: bool,
     pub test: bool,
+    /// The node's primary definition lies under an example/sample/demo/
+    /// fixture path — the third provenance flag, beside `external` and
+    /// `test`. Read it; never re-derive it from paths.
+    pub example: bool,
     pub anchor_id: u32,
     pub anchor_name: String,
 }

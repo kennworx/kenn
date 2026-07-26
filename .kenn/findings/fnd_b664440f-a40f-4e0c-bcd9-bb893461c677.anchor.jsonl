@@ -1,0 +1,5 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/docker.rs","ts":"2026-07-23T21:06:56.874584Z","sha":"191d2daa7ee469a9"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/docker.rs","ts":"2026-07-23T21:06:56.736273Z","sha":"ed37e0ee42f2530e"}
+{"op":"attach","anchor":"crates/kenn-toolchain/src/select.rs","ts":"2026-07-23T21:06:56.736273Z","sha":"e9f85f38f5889c45"}
+{"op":"attach","anchor":"crates/kenn-toolchain/src/run.rs","ts":"2026-07-23T21:06:56.736273Z","sha":"3817e16266bdb493"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/docker.rs","ts":"2026-07-24T11:10:24.708471Z","sha":"e48822ba588da8fb"}

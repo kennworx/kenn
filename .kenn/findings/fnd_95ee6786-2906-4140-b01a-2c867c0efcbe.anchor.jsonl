@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/aggregate.rs","ts":"2026-07-25T19:39:01.656482Z","sha":"eb87a0b501fb5c64"}
+{"op":"attach","anchor":"crates/kenn-mcp/src/tools/domains.rs","ts":"2026-07-25T19:39:01.656482Z","sha":"471a5fdce5536003"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/atlas/domains.rs","ts":"2026-07-25T19:39:01.656482Z","sha":"d70d044a7dda5e22"}
+{"op":"attach","anchor":"crates/kenn-model/src/record.rs","ts":"2026-07-25T19:39:01.656482Z","sha":"7713e7866fc514bc"}

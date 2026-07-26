@@ -23,10 +23,10 @@ pub mod staleness;
 pub mod worktree;
 
 pub use api::types::{
-    AggregateEdgeRow, AggregateNodeRow, BlendedFileRow, BlendedHit, BlendedSymbolRow,
-    CodeSymbolHit, DbError, DefLineRow, DefRow, FileRow, Finding, FindingHit, FoundSymbolRow,
-    LinkDiagnosticRow, MatchKind, PackageRow, RankedSymbolRow, StatRow, SymbolDocsRow, SymbolRow,
-    WriterOptions,
+    AggregateEdgeRow, AggregateNodeRow, AnalysisFlatCommunityRow, AnalysisNodeMembershipRow,
+    BlendedFileRow, BlendedHit, BlendedSymbolRow, CodeSymbolHit, DbError, DefLineRow, DefRow,
+    FileRow, Finding, FindingHit, FoundSymbolRow, LinkDiagnosticRow, MatchKind, PackageRow,
+    RankedSymbolRow, RowNarrow, StatRow, SymbolDocsRow, SymbolRow, WriterOptions,
 };
 pub use clock::Timestamp;
 

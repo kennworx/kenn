@@ -126,6 +126,7 @@ fn shape_stats(rows: Vec<StatRow>) -> ShapedStats {
                 match r.metric.as_str() {
                     "hierarchy_depth" => gsum.hierarchy_depth = v,
                     "cross_anchor_communities" => gsum.cross_anchor_communities = v,
+                    "domains" => gsum.domains = v,
                     _ => {}
                 }
             }
@@ -568,7 +569,11 @@ mod stats_shape_tests {
             row("manager", "cargo", "internal", "packages", 1),
             row("manager", "cargo", "external", "packages", 8),
             row("global", "", "graph", "hierarchy_depth", 5),
+            // The two community counters are DIFFERENT questions and routinely
+            // differ several-fold; the pair is the whole point (38 raw vs 9
+            // earned on this repo, unlabelled, was the reported bug).
             row("global", "", "graph", "cross_anchor_communities", 6),
+            row("global", "", "graph", "domains", 2),
             row("global", "", "graph", "weird", 1),
         ];
         let s = shape_stats(rows);
@@ -595,7 +600,12 @@ mod stats_shape_tests {
 
         let graph = s.graph.expect("whole-graph summary present");
         assert_eq!(graph.hierarchy_depth, 5);
+        // Both counters are reported, each carrying its own row's value — the
+        // earned count must never be filled from the raw one (or vice versa).
+        // Mutation-checked: dropping the `"domains"` arm from the reshaping match
+        // leaves this 0.
         assert_eq!(graph.cross_anchor_communities, 6);
+        assert_eq!(graph.domains, 2);
     }
 
     #[test]

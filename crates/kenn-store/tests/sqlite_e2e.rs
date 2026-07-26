@@ -3,6 +3,7 @@
 //! path `kenn-indexer` writes and `kenn-mcp` reads.
 
 use kenn_store::api::{Reader, WriteBatch, WriterOptions};
+use kenn_store::RowNarrow;
 use kenn_store::{open_reader, open_writer};
 
 use kenn_model::{
@@ -86,9 +87,16 @@ async fn open_writer_ingest_finalize_open_reader_query() {
     );
 
     // graph traversal
-    let (out, total) = Reader::list_outbound(&reader, 1, "calls", 10, None, false, false)
-        .await
-        .unwrap();
+    let (out, total) = Reader::list_outbound(
+        &reader,
+        1,
+        "calls",
+        10,
+        None,
+        &RowNarrow::visibility(false, false),
+    )
+    .await
+    .unwrap();
     assert_eq!(total, 1);
     assert_eq!(out[0].id, 2);
 

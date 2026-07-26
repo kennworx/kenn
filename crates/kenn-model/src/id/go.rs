@@ -12,6 +12,59 @@ use crate::language::Language;
 const SCHEME: &str = "scip-go";
 const MANAGER: &str = "gomod";
 
+/// The Go PACKAGE a symbol belongs to — the unit of import — named
+/// module-relatively: `(name, version)` where name is `<module-leaf>/<subpath>`.
+///
+/// scip-go's moniker head names the MODULE (`github.com/spf13/afero`), which
+/// covers every package in it; the package itself is the descriptor's leading
+/// namespace (`` `github.com/spf13/afero/mem` ``, backtick-quoted because it
+/// contains `/`). Taking the head would collapse a module's packages into one —
+/// the same mistake manifest-based anchoring makes, one `go.mod` for eight
+/// importable packages.
+///
+/// The DOMAIN PREFIX is then dropped: `github.com/spf13/afero/mem` reads as
+/// `afero/mem`. The full path is unambiguous across repos, but inside one
+/// workspace it only adds `github.com/<owner>/` to every Go package name, and
+/// this name is what the atlas renders as a heading and `--package` matches on.
+/// `parse_go_mod_name` reduces the module the same way, so a Go package is named
+/// consistently whether it was resolved from the moniker or the manifest.
+///
+/// Falls back to the module when the descriptor has no leading namespace, so a
+/// symbol always belongs to something.
+#[must_use]
+pub fn go_package_of(scip_symbol: &str) -> Option<(String, &str)> {
+    let head = split_scip_head(scip_symbol).ok()?;
+    if head.scheme != SCHEME || head.manager != MANAGER {
+        return None;
+    }
+    let full = parse_descriptor(head.descriptor)
+        .ok()
+        .and_then(|segs| match segs.first() {
+            Some(Segment::Namespace(n)) => Some(n.trim_matches('`')),
+            _ => None,
+        })
+        .unwrap_or(head.package);
+    if full.is_empty() {
+        return None;
+    }
+    let leaf = head.package.rsplit('/').next().unwrap_or(head.package);
+    let name = match full.strip_prefix(head.package) {
+        // `<module>/mem` → `<leaf>/mem`; the module itself → just the leaf.
+        Some(rest) => {
+            let rest = rest.trim_start_matches('/');
+            if rest.is_empty() {
+                leaf.to_string()
+            } else {
+                format!("{leaf}/{rest}")
+            }
+        }
+        // Not under the module (vendored or oddly-emitted) — keep it verbatim
+        // rather than inventing a relationship.
+        None => full.to_string(),
+    };
+    Some((name, head.version))
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GoTransformer;
 

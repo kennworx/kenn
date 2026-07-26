@@ -69,7 +69,7 @@ CREATE INDEX packages_id ON packages(id);
 
 CREATE TABLE aggregate_nodes (
   id INTEGER NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, language TEXT NOT NULL,
-  external INTEGER NOT NULL, test INTEGER NOT NULL,
+  external INTEGER NOT NULL, test INTEGER NOT NULL, example INTEGER NOT NULL,
   anchor_id INTEGER NOT NULL, anchor_name TEXT NOT NULL
 );
 CREATE TABLE aggregate_edges (

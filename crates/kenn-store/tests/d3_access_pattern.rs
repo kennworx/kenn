@@ -22,6 +22,7 @@
 //! bulk scans + in-RAM walks — runs in a few hundred milliseconds even
 //! in a debug build.
 
+use kenn_store::RowNarrow;
 use std::time::{Duration, Instant};
 
 use kenn_model::{DefRecord, EdgeProperties, EdgeRecord, FileRecord, Kind, Language, SymbolRecord};
@@ -129,7 +130,13 @@ async fn d3_reader_surface_has_no_per_item_loop() {
     // Traversal + batched hydration — walk the hub's CSR adjacency and
     // resolve every neighbour id to a `SymbolRow` in one `take()`.
     let (neighbours, total) = reader
-        .list_outbound(HUB, "calls", SYMBOLS, None, true, true)
+        .list_outbound(
+            HUB,
+            "calls",
+            SYMBOLS,
+            None,
+            &RowNarrow::visibility(true, true),
+        )
         .await
         .expect("list_outbound");
 

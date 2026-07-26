@@ -85,6 +85,13 @@ pub struct AggregateNodeRecord {
     pub external: bool,
     #[serde(default)]
     pub test: bool,
+    /// The node's primary definition lies under an example/sample/demo/
+    /// fixture path. Evaluated once at aggregation time (the only place
+    /// that holds both the def→file map and the file paths) so no consumer
+    /// has to re-derive it — a consumer that cannot see paths would
+    /// otherwise have to guess, and one of them did.
+    #[serde(default)]
+    pub example: bool,
     /// Interned anchor id (package `short_id`, or a path-prefix id
     /// interned at aggregation time).
     pub anchor_id: u32,

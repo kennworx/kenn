@@ -14,19 +14,24 @@ use std::path::{Path, PathBuf};
 
 use kenn_model::{
     AggregateEdgeRecord, AggregateNodeRecord, AnalysisFlatCommunityRecord,
-    AnalysisNodeMembershipRecord, Kind, ShortId, SymbolRecord,
+    AnalysisNodeMembershipRecord, EdgeKind, Kind, ShortId, SymbolRecord,
 };
 
-use super::model::{AtlasShape, CentralSymbol, Concept, DomainConcept};
+use crate::aggregate::is_example_path;
+
+use super::contracts;
+use super::coupling::{classify, couplings, Direction, PairWeights};
+use super::domains;
+use super::model::{
+    AtlasShape, Concept, ContractConcept, ContractImplementers, DomainConcept, SpannedPackage,
+    SymbolRef,
+};
 use super::okf;
 
 const UNANCHORED: &str = "<unanchored>";
+const MAX_MEMBERS: usize = 6;
 const MAX_CENTRAL: usize = 8;
 
-/// A domain (cross-package flat community) must span >1 package and clear this
-/// member floor to earn a concept — below it, a "community" is noise, not a
-/// domain. `MAX_DOMAINS` bounds the axis to the heaviest clusters.
-const MIN_DOMAIN_SIZE: usize = 4;
 const MAX_DOMAINS: usize = 24;
 const MAX_DOMAIN_PKGS: usize = 8;
 
@@ -34,12 +39,12 @@ const MAX_DOMAIN_PKGS: usize = 8;
 /// (markdown, text, css, sass, html) are documentation, not code packages: their
 /// "symbols" are headings, so they must not seed a package, its central symbols,
 /// or its language (design: the atlas maps the code).
-fn is_code_lang(db_name: &str) -> bool {
-    matches!(
-        db_name,
-        "rust" | "typescript" | "csharp" | "go" | "python" | "swift"
-    )
-}
+///
+/// Re-exported from [`domains::is_code_lang`] rather than kept as a second copy:
+/// this file had its own identical `matches!` list, and the packages query has a
+/// third caller. Three copies of "which languages are code" is how the query and
+/// the document start disagreeing about what a package is — which they did.
+use super::domains::is_code_lang;
 
 /// Plurality language of a symbol set (ties broken by `db_name` descending, for
 /// determinism), matching kenn's own convention. Empty when no symbol resolves.
@@ -54,23 +59,6 @@ fn plurality_language(syms: &[ShortId], symbols: &HashMap<ShortId, SymbolRecord>
         .into_iter()
         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
         .map_or_else(String::new, |(l, _)| l.to_string())
-}
-
-const MAX_DEPS: usize = 8;
-const MAX_MEMBERS: usize = 6;
-
-/// Full path segments that mark bundled example/sample/demo code. Symbols under
-/// one are excluded from domain + central eligibility (like tests), so a demo app
-/// referencing a library type never fabricates a "domain" or a "central" symbol.
-const EXAMPLE_SEGMENTS: &[&str] = &[
-    "example", "examples", "sample", "samples", "demo", "demos", "fixtures",
-];
-
-/// Whether `path` lies under an example/sample/demo/fixtures directory segment
-/// (case-insensitive, full segment).
-fn is_example_path(path: &str) -> bool {
-    path.split(['/', '\\'])
-        .any(|seg| EXAMPLE_SEGMENTS.contains(&seg.to_ascii_lowercase().as_str()))
 }
 
 /// A dominant package subdivides into source-directory `component` concepts only
@@ -146,7 +134,8 @@ fn common_dir_prefix(paths: &[&str]) -> String {
 /// heading + per-directory lines for `src/` (Rust/TS), `Source/` (Swift), and
 /// flat (Go) layouts alike. Empty when the files share no leading directory (a
 /// package spanning several top-level dirs) — the caller falls back to the anchor.
-fn package_root(paths: &[&str]) -> String {
+#[must_use]
+pub fn package_root(paths: &[&str]) -> String {
     let prefix = common_dir_prefix(paths);
     match prefix.rsplit_once('/') {
         Some((parent, leaf)) if is_source_wrapper(leaf) => parent.to_string(),
@@ -159,7 +148,8 @@ fn package_root(paths: &[&str]) -> String {
 /// each file's directory is its parent relative to `root` (files directly under
 /// the root use `(root)`); counts sorted descending, then by directory path.
 /// `files` are workspace-relative def-file paths.
-fn dir_histogram(files: &[&str], root: &str) -> Vec<(String, u64)> {
+#[must_use]
+pub fn dir_histogram(files: &[&str], root: &str) -> Vec<(String, u64)> {
     let prefix = format!("{root}/");
     let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
     for f in files {
@@ -198,7 +188,8 @@ fn basename(p: &str) -> &str {
 /// the file matching the highest-precedence language root, ties broken by the
 /// shallowest then lexicographically-first path (determinism). `None` when the
 /// language has no root convention or no file matches.
-fn pick_root_file(pkg_files: &[(ShortId, &str)], language: &str) -> Option<ShortId> {
+#[must_use]
+pub fn pick_root_file(pkg_files: &[(ShortId, &str)], language: &str) -> Option<ShortId> {
     root_file_names(language).iter().find_map(|&want| {
         pkg_files
             .iter()
@@ -276,10 +267,10 @@ fn build_components(
                 .cmp(degree.get(&a).unwrap_or(&0))
                 .then_with(|| symbols[&a].name.cmp(&symbols[&b].name))
         });
-        let c_central: Vec<CentralSymbol> = ranked
+        let c_central: Vec<SymbolRef> = ranked
             .iter()
             .take(MAX_CENTRAL)
-            .map(|&s| central_symbol(s, symbols, primary_def_file, files, primary_def_range))
+            .map(|&s| symbol_ref(s, symbols, primary_def_file, files, primary_def_range))
             .collect();
         // A component maps ONE source directory, so it lists ALL its files
         // (unlike a package, which summarizes by a per-directory histogram).
@@ -298,6 +289,12 @@ fn build_components(
             format!("{common_prefix}/{sa}")
         };
         components.push(Concept {
+            // A component is a slice of ONE package; coupling is tracked at the
+            // package it belongs to, never re-derived per sub-area.
+            used_by: Vec::new(),
+            used_by_total: 0,
+            deps_total: 0,
+            role: None,
             concept_type: "component".to_string(),
             id: okf::concept_id(language, &format!("{anchor}/{sa}")),
             title: format!("{anchor} / {sa}"),
@@ -318,22 +315,22 @@ fn build_components(
     components
 }
 
-/// Project an aggregate node (its leaf symbol) into a [`CentralSymbol`]: name,
+/// Project an aggregate node (its leaf symbol) into a [`SymbolRef`]: name,
 /// stable `pub_id`, workspace-relative path, and its primary def range. Shared
 /// by the package and domain central-symbol lists.
-fn central_symbol(
+fn symbol_ref(
     s: ShortId,
     symbols: &HashMap<ShortId, SymbolRecord>,
     primary_def_file: &HashMap<ShortId, ShortId>,
     files: &HashMap<ShortId, String>,
     primary_def_range: &HashMap<ShortId, (u32, u32)>,
-) -> CentralSymbol {
+) -> SymbolRef {
     let (line_start, line_end) = primary_def_range.get(&s).copied().unwrap_or((0, 0));
     let path = primary_def_file
         .get(&s)
         .and_then(|f| files.get(f))
         .map_or_else(String::new, String::clone);
-    CentralSymbol {
+    SymbolRef {
         name: symbols.get(&s).map_or_else(String::new, |r| r.name.clone()),
         pub_id: symbols
             .get(&s)
@@ -376,7 +373,12 @@ pub fn build_concepts(
     primary_def_range: &HashMap<ShortId, (u32, u32)>,
     file_docs: &HashMap<ShortId, String>,
     shape_meta: &ShapeMeta<'_>,
-) -> (Vec<Concept>, Vec<DomainConcept>, AtlasShape) {
+) -> (
+    Vec<Concept>,
+    Vec<DomainConcept>,
+    Vec<ContractConcept>,
+    AtlasShape,
+) {
     // Each internal (non-external) symbol → its anchor name, skipping the
     // unanchored sentinel. Container kinds (namespace/module/package) are excluded:
     // a C# namespace is `pkg = 0` by design (it spans assemblies), so it would
@@ -417,14 +419,20 @@ pub fn build_concepts(
         *degree.entry(e.dst_id).or_default() += u64::from(e.weight);
     }
 
-    // Directed cross-anchor dependency weights: A → B carries the summed weight
-    // of every aggregate edge from a node in A to a node in B. Direction is
-    // preserved (the aggregate rollup is directed).
-    let mut dep_w: HashMap<&str, HashMap<&str, u64>> = HashMap::new();
+    // Directed cross-anchor coupling: (A, B) carries the weight of every
+    // aggregate edge from a node in A to a node in B, split by relation.
+    // Direction is preserved (the aggregate rollup is directed), and BOTH
+    // directions are read off this one map — `## Depends on` filters on the
+    // source, `## Used by` on the target.
+    let mut pair_w: PairWeights<'_> = HashMap::new();
     for e in edges {
         if let (Some(&a), Some(&b)) = (node_anchor.get(&e.src_id), node_anchor.get(&e.dst_id)) {
             if a != b {
-                *dep_w.entry(a).or_default().entry(b).or_default() += u64::from(e.weight);
+                *pair_w
+                    .entry((a, b))
+                    .or_default()
+                    .entry(e.kind.db_name())
+                    .or_default() += u64::from(e.weight);
             }
         }
     }
@@ -453,20 +461,37 @@ pub fn build_concepts(
         // Example/sample/demo code never seeds a domain or a central list (like
         // tests): a bundled demo referencing a library type must not fabricate a
         // "domain". It still counts in the package member/symbol totals below.
-        let is_example = primary_def_file
-            .get(&n.id)
-            .and_then(|f| files.get(f))
-            .is_some_and(|p| is_example_path(p));
-        if is_example {
+        // Read off the node, not re-derived from paths — a snapshot query sees
+        // no paths, and when this was a local join the query had to invent an
+        // answer and reported a domain the atlas did not.
+        if n.example {
             continue;
         }
         if let Some(&anchor) = node_anchor.get(&n.id) {
             if n.test {
                 test_nodes.entry(anchor).or_default().push(n.id);
             } else {
-                domain_eligible.insert(n.id);
                 central_nodes.entry(anchor).or_default().push(n.id);
             }
+        }
+        // Domain eligibility goes through the SHARED predicate, so the query
+        // cannot drift from it. The early `continue`s above already applied
+        // most of it; routing through one function is what keeps the two
+        // surfaces honest (a query that omitted the language filter titled a
+        // domain with a markdown note).
+        if domains::is_domain_eligible(
+            &domains::NodeFacts {
+                id: n.id,
+                language: n.language.db_name(),
+                kind: n.kind.db_name(),
+                name: n.name.as_str(),
+                external: n.external,
+                test: n.test,
+                example: n.example,
+            },
+            node_anchor.contains_key(&n.id),
+        ) {
+            domain_eligible.insert(n.id);
         }
     }
     // Single-dominant: the top code anchor owns at least half the (non-test,
@@ -546,10 +571,10 @@ pub fn build_concepts(
                 .cmp(degree.get(&a).unwrap_or(&0))
                 .then_with(|| symbols[&a].name.cmp(&symbols[&b].name))
         });
-        let central: Vec<CentralSymbol> = ranked
+        let central: Vec<SymbolRef> = ranked
             .iter()
             .take(MAX_CENTRAL)
-            .map(|&s| central_symbol(s, symbols, primary_def_file, files, primary_def_range))
+            .map(|&s| symbol_ref(s, symbols, primary_def_file, files, primary_def_range))
             .collect();
 
         // Members: distinct def-files, summarized as a per-directory histogram
@@ -564,25 +589,29 @@ pub fn build_concepts(
         def_files.sort_unstable();
         let file_count = def_files.len() as u64;
 
-        // Directed deps, heaviest first.
-        let mut deps: Vec<(&str, u64)> = dep_w
-            .get(anchor)
-            .map(|m| m.iter().map(|(&k, &v)| (k, v)).collect())
-            .unwrap_or_default();
-        deps.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        let deps: Vec<String> = deps
-            .into_iter()
-            .take(MAX_DEPS)
-            .map(|(a, _)| okf::concept_id(anchor_lang.get(a).map_or("", String::as_str), a))
-            .collect();
+        // Both coupling directions off the one pair map, heaviest first.
+        let deps = couplings(&pair_w, &anchor_lang, anchor, Direction::Out);
+        let used_by = couplings(&pair_w, &anchor_lang, anchor, Direction::In);
+        // Weighed over the FULL coupling sets, not the rendered rows: the cap is
+        // a display concern and must not move a package between roles. Hence
+        // `.weight` (pre-cap) rather than a sum over the truncated rows.
+        let role = classify(test_dominant.contains(anchor), used_by.weight, deps.weight);
+        let (deps, deps_total) = (deps.rows, deps.total);
+        let (used_by, used_by_total) = (used_by.rows, used_by.total);
 
         // resource: the package root — the common directory of its files minus a
         // conventional source-wrapper (language-agnostic, so the `## Files under`
-        // heading + per-dir lines align for non-`src` layouts too). Falls back to
-        // the anchor name when the files share no common directory.
+        // heading + per-dir lines align for non-`src` layouts too).
+        //
+        // Sharing no common directory means the package is rooted at the WORKSPACE
+        // root, so the resource is `.` — a real path. It used to fall back to the
+        // anchor NAME, which is not a path at all: a package named `Flask` whose
+        // files span `src/` and `docs/` advertised `resource: Flask`, a directory
+        // that does not exist. That went unnoticed while the anchor happened to be
+        // named `.` for exactly these packages.
         let root = package_root(&def_files);
         let resource = if root.is_empty() {
-            anchor.to_string()
+            ".".to_string()
         } else {
             root
         };
@@ -594,10 +623,28 @@ pub fn build_concepts(
         // module + re-exports (no first-class symbol), yet holds the crate's `//!`
         // doc. `None` when the language has no root convention or the file carries
         // no module doc — never synthesized.
+        // A package rooted at the workspace root has no prefix to strip — every
+        // indexed file is nominally under it. Prefixing with `./` matched nothing
+        // (paths are stored workspace-relative, without a leading `./`), so these
+        // packages silently never got a description.
+        //
+        // "Every file" is too wide, though: a nested package's root module would be
+        // a candidate and a root package with no doc of its own could adopt it. So
+        // scope to the top-level directories this package's OWN files occupy.
+        let own_tops: std::collections::HashSet<&str> = def_files
+            .iter()
+            .filter_map(|p| p.split('/').next())
+            .collect();
         let root_prefix = format!("{resource}/");
         let root_candidates: Vec<(ShortId, &str)> = files
             .iter()
-            .filter(|(_, p)| p.starts_with(&root_prefix))
+            .filter(|(_, p)| {
+                if resource == "." {
+                    p.split('/').next().is_some_and(|t| own_tops.contains(t))
+                } else {
+                    p.starts_with(&root_prefix)
+                }
+            })
             .map(|(&id, p)| (id, p.as_str()))
             .collect();
         let description = pick_root_file(&root_candidates, &language)
@@ -626,6 +673,10 @@ pub fn build_concepts(
         let component_ids: Vec<String> = components.iter().map(|c| c.id.clone()).collect();
 
         concepts.push(Concept {
+            used_by,
+            used_by_total,
+            deps_total,
+            role: Some(role),
             concept_type: "package".to_string(),
             id: okf::concept_id(&language, anchor),
             title: anchor.to_string(),
@@ -671,6 +722,11 @@ pub fn build_concepts(
             .map(|p| (*p).to_string())
             .collect();
         concepts.push(Concept {
+            // A non-code directory participates in no package graph.
+            used_by: Vec::new(),
+            used_by_total: 0,
+            deps_total: 0,
+            role: None,
             concept_type: "document".to_string(),
             id: format!(
                 "documents/{}",
@@ -704,6 +760,30 @@ pub fn build_concepts(
         reason = "a 0..=100 percentage always fits u8"
     )]
     let test_ratio_pct = (100 * test_syms).checked_div(total_syms).unwrap_or(0) as u8;
+    let (domains, domains_total) = build_domains(
+        membership,
+        flat,
+        edges,
+        &node_anchor,
+        &anchor_lang,
+        &domain_eligible,
+        symbols,
+        primary_def_file,
+        files,
+        primary_def_range,
+        single_dominant,
+    );
+    let (contracts, contracts_total) = build_contracts(
+        nodes,
+        edges,
+        &node_anchor,
+        &anchor_lang,
+        symbols,
+        primary_def_file,
+        files,
+        primary_def_range,
+    );
+    // Built after both axes so the header can carry their pre-cap totals.
     let shape = AtlasShape {
         name: shape_meta.workspace_name.to_string(),
         languages,
@@ -713,32 +793,158 @@ pub fn build_concepts(
             .count(),
         symbols: total_syms,
         test_ratio_pct,
+        domains_total,
+        contracts_total,
         freshness: shape_meta.freshness.to_string(),
         timestamp: shape_meta.timestamp.to_string(),
     };
-    let domains = build_domains(
-        membership,
-        flat,
-        &node_anchor,
-        &anchor_lang,
-        &domain_eligible,
-        &degree,
-        symbols,
-        primary_def_file,
-        files,
-        primary_def_range,
-        single_dominant,
-    );
-    (concepts, domains, shape)
+    (concepts, domains, contracts, shape)
+}
+
+/// One [`SpannedPackage`] row from a package name + its member/link counts,
+/// resolving the anchor's language so the link targets the right concept file.
+fn spanned_package(
+    anchor: &str,
+    members: u64,
+    links: u64,
+    anchor_lang: &HashMap<&str, String>,
+) -> SpannedPackage {
+    SpannedPackage {
+        concept_id: okf::concept_id(anchor_lang.get(anchor).map_or("", String::as_str), anchor),
+        title: anchor.to_string(),
+        members,
+        links,
+    }
+}
+
+const MAX_CONTRACTS: usize = 24;
+const MAX_CONTRACT_PKGS: usize = 12;
+const MAX_IMPLEMENTERS_PER_PKG: usize = 6;
+
+/// Build the **contract** concepts — first-party interfaces / base types whose
+/// implementers span more than one package, read STRAIGHT from the `implements`
+/// and `extends_type` edges (implementer → contract).
+///
+/// This is the deterministic, complete counterpart to the domain axis: where
+/// Louvain merges an interface with a fragile subset of its implementers, this
+/// lists EVERY first-party implementer grouped by package. It answers "where is
+/// this abstraction implemented across the tree" — the question the package axis
+/// can't. Test nodes are excluded on both ends (a production contract's test
+/// doubles are not its architecture), matching domain/central eligibility.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "resolving each implementer to its pub_id + location needs the same symbol maps the central-symbol pass holds; a struct only adds indirection"
+)]
+fn build_contracts(
+    nodes: &[AggregateNodeRecord],
+    edges: &[AggregateEdgeRecord],
+    node_anchor: &HashMap<ShortId, &str>,
+    anchor_lang: &HashMap<&str, String>,
+    symbols: &HashMap<ShortId, SymbolRecord>,
+    primary_def_file: &HashMap<ShortId, ShortId>,
+    files: &HashMap<ShortId, String>,
+    primary_def_range: &HashMap<ShortId, (u32, u32)>,
+) -> (Vec<ContractConcept>, usize) {
+    // Project this caller's records into the shared selection's neutral inputs.
+    let is_a_edges: Vec<(ShortId, ShortId)> = edges
+        .iter()
+        .filter(|e| matches!(e.kind, EdgeKind::Implements | EdgeKind::ExtendsType))
+        .map(|e| (e.src_id, e.dst_id))
+        .collect();
+    let node_info: HashMap<ShortId, contracts::NodeInfo<'_>> = nodes
+        .iter()
+        .map(|n| {
+            (
+                n.id,
+                contracts::NodeInfo {
+                    name: n.name.as_str(),
+                    kind: n.kind.db_name(),
+                    test: n.test,
+                },
+            )
+        })
+        .collect();
+    let symbol_name: HashMap<ShortId, &str> =
+        symbols.iter().map(|(&s, r)| (s, r.name.as_str())).collect();
+
+    let selected = contracts::select_contracts(&is_a_edges, node_anchor, &node_info, &symbol_name);
+
+    // Counted BEFORE the cap, so the index can name what it dropped.
+    let total = selected.len();
+
+    // Render the selection: resolve symbols, apply the display caps.
+    let mut built: Vec<ContractConcept> = selected
+        .into_iter()
+        .take(MAX_CONTRACTS)
+        .map(|c| {
+            let implementers: Vec<ContractImplementers> = c
+                .by_package
+                .iter()
+                .take(MAX_CONTRACT_PKGS)
+                .map(|(pkg, ids)| ContractImplementers {
+                    concept_id: okf::concept_id(
+                        anchor_lang.get(pkg).map_or("", String::as_str),
+                        pkg,
+                    ),
+                    title: (*pkg).to_string(),
+                    symbols: ids
+                        .iter()
+                        .take(MAX_IMPLEMENTERS_PER_PKG)
+                        .map(|&s| {
+                            symbol_ref(s, symbols, primary_def_file, files, primary_def_range)
+                        })
+                        .collect(),
+                    count: ids.len() as u64,
+                })
+                .collect();
+            ContractConcept {
+                id: okf::contract_id(c.name),
+                title: c.name.to_string(),
+                kind: c.kind.to_string(),
+                symbol: symbol_ref(c.node, symbols, primary_def_file, files, primary_def_range),
+                defined_in_id: okf::concept_id(
+                    anchor_lang.get(c.defined_in).map_or("", String::as_str),
+                    c.defined_in,
+                ),
+                defined_in_title: c.defined_in.to_string(),
+                implementers,
+                total_implementers: c.total_implementers,
+                package_span: c.package_span,
+            }
+        })
+        .collect();
+    dedupe_contract_ids(&mut built);
+    (built, total)
+}
+
+/// Ensure contract concept ids are unique — two interfaces can share a name
+/// (hence slug) across packages. Deterministic: the sorted-then-truncated order
+/// is stable, so a collision always resolves the same way.
+fn dedupe_contract_ids(contracts: &mut [ContractConcept]) {
+    let mut seen: HashSet<String> = HashSet::new();
+    for c in contracts.iter_mut() {
+        if !seen.insert(c.id.clone()) {
+            let mut n = 2;
+            while !seen.insert(format!("{}-{n}", c.id)) {
+                n += 1;
+            }
+            c.id = format!("{}-{n}", c.id);
+        }
+    }
 }
 
 /// Build the **domain** concepts — cross-package flat-Louvain communities, the
 /// second atlas axis. Pure projection of the persisted analysis (`membership` +
 /// `flat`, both read back from the snapshot the hook wrote); never recomputes
 /// clustering. Only communities that span >1 package (`cross_anchor`) and clear
-/// [`MIN_DOMAIN_SIZE`] qualify — a single-package community just duplicates its
-/// package concept. `node_anchor` (code + anchored nodes) and `degree` (the
-/// weighted-degree metric) are the same maps the package pass computed.
+/// [`domains::MIN_DOMAIN_SIZE`] qualify — a single-package community just
+/// duplicates its package concept.
+///
+/// This projects the records into [`domains::select_domains`], which owns the
+/// earned-span rule shared with the domains query, then RENDERS the selection:
+/// resolving symbols and applying the display caps ([`MAX_CENTRAL`],
+/// [`MAX_DOMAIN_PKGS`], [`MAX_DOMAINS`]). The caps stay here on purpose — they
+/// are presentation policy for a page with a reader, and must not bound a query.
 #[expect(
     clippy::too_many_arguments,
     reason = "the same aggregation-stage maps build_concepts already holds; a struct only adds indirection"
@@ -746,64 +952,61 @@ pub fn build_concepts(
 fn build_domains(
     membership: &[AnalysisNodeMembershipRecord],
     flat: &[AnalysisFlatCommunityRecord],
+    edges: &[AggregateEdgeRecord],
     node_anchor: &HashMap<ShortId, &str>,
     anchor_lang: &HashMap<&str, String>,
     eligible: &HashSet<ShortId>,
-    degree: &HashMap<ShortId, u64>,
     symbols: &HashMap<ShortId, SymbolRecord>,
     primary_def_file: &HashMap<ShortId, ShortId>,
     files: &HashMap<ShortId, String>,
     primary_def_range: &HashMap<ShortId, (u32, u32)>,
     single_dominant: bool,
-) -> Vec<DomainConcept> {
+) -> (Vec<DomainConcept>, usize) {
     // Cross-anchor communities are always the domain axis (the structure packages
     // can't show). For a single-dominant repo (a monolithic library), also keep
     // within-anchor communities — otherwise a one-package repo has no domains.
     let keep: HashSet<u32> = flat
         .iter()
-        .filter(|f| (f.cross_anchor || single_dominant) && f.size as usize >= MIN_DOMAIN_SIZE)
+        .filter(|f| {
+            (f.cross_anchor || single_dominant) && f.size as usize >= domains::MIN_DOMAIN_SIZE
+        })
         .map(|f| f.community_id)
         .collect();
-    if keep.is_empty() {
-        return Vec::new();
-    }
 
-    // Members per kept community, restricted to code + anchored nodes (the same
-    // set the package centrality ranks) — a container/external/content node
-    // never seeds a domain's central list.
-    let mut members: HashMap<u32, Vec<ShortId>> = HashMap::new();
-    for m in membership {
-        if keep.contains(&m.flat_community_id) && eligible.contains(&m.short_id) {
-            members
-                .entry(m.flat_community_id)
-                .or_default()
-                .push(m.short_id);
-        }
-    }
+    // Project this caller's records into the shared selection's neutral inputs.
+    let membership_pairs: Vec<(ShortId, u32)> = membership
+        .iter()
+        .map(|m| (m.short_id, m.flat_community_id))
+        .collect();
+    let projected: Vec<domains::Edge> = edges
+        .iter()
+        .map(|e| domains::Edge {
+            src: e.src_id,
+            dst: e.dst_id,
+            weight: e.weight,
+        })
+        .collect();
+    let symbol_name: HashMap<ShortId, &str> =
+        symbols.iter().map(|(&s, r)| (s, r.name.as_str())).collect();
 
-    let name_of = |s: ShortId| symbols.get(&s).map_or("", |r| r.name.as_str());
+    let selected = domains::select_domains(
+        &keep,
+        &membership_pairs,
+        eligible,
+        &projected,
+        node_anchor,
+        &symbol_name,
+        single_dominant,
+    );
+
+    // Render the selection: resolve symbols, apply the display caps.
     let mut built: Vec<DomainConcept> = Vec::new();
-    let mut cids: Vec<u32> = members.keys().copied().collect();
-    cids.sort_unstable();
-    for cid in cids {
-        let Some(nodes) = members.get(&cid) else {
-            continue;
-        };
-        if nodes.len() < MIN_DOMAIN_SIZE {
-            continue; // enough code members after filtering to be a real domain
-        }
-        let mut ranked = nodes.clone();
-        ranked.sort_by(|&a, &b| {
-            degree
-                .get(&b)
-                .unwrap_or(&0)
-                .cmp(degree.get(&a).unwrap_or(&0))
-                .then_with(|| name_of(a).cmp(name_of(b)))
-        });
-        let central: Vec<CentralSymbol> = ranked
+    for d in selected {
+        let central: Vec<SymbolRef> = d
+            .ranked
             .iter()
             .take(MAX_CENTRAL)
-            .map(|&s| central_symbol(s, symbols, primary_def_file, files, primary_def_range))
+            .map(|&s| symbol_ref(s, symbols, primary_def_file, files, primary_def_range))
             .collect();
         let Some(title) = central
             .first()
@@ -812,43 +1015,30 @@ fn build_domains(
         else {
             continue; // no nameable hub → not a useful concept
         };
-
-        // Spanned packages, heaviest (most members) first.
-        let mut pkg_count: HashMap<&str, usize> = HashMap::new();
-        for &s in &ranked {
-            if let Some(&a) = node_anchor.get(&s) {
-                *pkg_count.entry(a).or_default() += 1;
-            }
-        }
-        let mut pkgs: Vec<(&str, usize)> = pkg_count.into_iter().collect();
-        if !single_dominant && pkgs.len() < 2 {
-            // In a multi-package repo, a community whose real types (after
-            // excluding containers + tests) live in ONE package is that package
-            // concept's job, not a domain. A single-dominant repo keeps it — a
-            // within-library semantic cluster IS the useful axis there.
-            continue;
-        }
-        pkgs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        let packages: Vec<String> = pkgs
-            .into_iter()
+        let packages = d
+            .packages
+            .iter()
             .take(MAX_DOMAIN_PKGS)
-            .map(|(a, _)| okf::concept_id(anchor_lang.get(a).map_or("", String::as_str), a))
+            .map(|&(a, m, l)| spanned_package(a, m, l, anchor_lang))
             .collect();
 
         built.push(DomainConcept {
             id: okf::domain_id(&title),
             title,
-            size: ranked.len() as u64,
+            size: d.ranked.len() as u64,
             packages,
             central,
         });
     }
 
-    // Surface the heaviest domains (ties by title); bound the axis.
+    // Surface the heaviest domains (ties by title); bound the axis. The total is
+    // counted BEFORE the cap — a renderer cannot reconstruct what it never
+    // received, and a capped axis that says nothing reads as the whole axis.
     built.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.title.cmp(&b.title)));
+    let total = built.len();
     built.truncate(MAX_DOMAINS);
     dedupe_domain_ids(&mut built);
-    built
+    (built, total)
 }
 
 /// Ensure domain concept ids are unique — two communities can share a hub name
@@ -876,6 +1066,9 @@ pub struct AtlasContext {
     pub out_dir: PathBuf,
     /// Repo root — used to drop concepts whose dir is gitignored.
     pub source_root: PathBuf,
+    /// The committed store root (`.kenn/`) to hang the stable `atlas` pointer
+    /// off, or `None` to write no pointer. See [`refresh_atlas_pointer`].
+    pub pointer_dir: Option<PathBuf>,
     pub workspace_name: String,
     pub freshness: String,
     pub timestamp: String,
@@ -890,6 +1083,58 @@ pub struct ShapeMeta<'a> {
     pub timestamp: &'a str,
 }
 
+/// The stable, browsable handle to the current atlas: `<pointer_dir>/atlas`, a
+/// symlink to the run directory's bundle. Replaced on every index.
+///
+/// It points at the RESOLVED run dir, never through `live`. `live` is a pointer
+/// FILE, not a symlink — that is what makes the atomic flip work unprivileged on
+/// Windows — so it is not traversable, and the previous
+/// `.kenn/atlas -> local/live/atlas` dangled the moment that landed. Resolving
+/// first and linking to the concrete run is the only shape that survives.
+///
+/// Best-effort by design, and the reason the caller ignores the result: creating
+/// a symlink is exactly the operation Windows withholds without privilege, so on
+/// any platform or filesystem that refuses, the atlas is still reachable by the
+/// `atlas: <path>` line every index prints. The pointer is a convenience, never
+/// the contract.
+///
+/// Refuses to remove anything that is not a symlink, so a user who has replaced
+/// `.kenn/atlas` with a real directory of their own keeps it.
+pub fn refresh_atlas_pointer(pointer_dir: &Path, atlas_dir: &Path) -> std::io::Result<()> {
+    let link = pointer_dir.join("atlas");
+    match std::fs::symlink_metadata(&link) {
+        // `remove_file` is what unlinks a symlink — including a dangling one,
+        // which `Path::exists` reports as absent because it follows the link.
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::remove_file(&link)?,
+        Ok(_) => return Ok(()),
+        Err(_) => {}
+    }
+    // Relative when the bundle lives under the pointer dir (the default store
+    // layout), so the link survives the repo being moved; absolute otherwise —
+    // a `derived_root = "global"` store puts runs in an XDG cache entirely
+    // outside `.kenn/`.
+    let target = atlas_dir
+        .strip_prefix(pointer_dir)
+        .map_or_else(|_| atlas_dir.to_path_buf(), Path::to_path_buf);
+    symlink_dir(&target, &link)
+}
+
+#[cfg(unix)]
+fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    // Fails without Developer Mode or admin; the caller treats that as fine.
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn symlink_dir(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Write the bundle to `out_dir`: one concept file per package under
 /// `packages/`, the reserved `index.md`, and an append-preserved `log.md`.
 /// Returns the `index.md` path.
@@ -901,6 +1146,7 @@ pub fn write_bundle(
     shape: &AtlasShape,
     concepts: &[Concept],
     domains: &[DomainConcept],
+    contracts: &[ContractConcept],
 ) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(out_dir.join("packages"))?;
     for c in concepts {
@@ -919,8 +1165,19 @@ pub fn write_bundle(
         }
         std::fs::write(path, okf::render_domain(d))?;
     }
+    for c in contracts {
+        // Contract id is `contracts/<name-slug>`; same `<id>.md` layout.
+        let path = out_dir.join(format!("{}.md", c.id));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, okf::render_contract(c))?;
+    }
     let index_path = out_dir.join(okf::INDEX_MD);
-    std::fs::write(&index_path, okf::render_index(shape, concepts, domains))?;
+    std::fs::write(
+        &index_path,
+        okf::render_index(shape, concepts, domains, contracts),
+    )?;
 
     let log_path = out_dir.join(okf::LOG_MD);
     let existing = std::fs::read_to_string(&log_path).ok();
@@ -999,6 +1256,7 @@ mod tests {
             language: Language::Rust,
             external: false,
             test,
+            example: false,
             anchor_id,
             anchor_name: anchor.to_string(),
         }
@@ -1081,7 +1339,7 @@ mod tests {
     }
 
     fn build(f: &Fx) -> (Vec<Concept>, AtlasShape) {
-        let (concepts, _domains, shape) = build_concepts(
+        let (concepts, _domains, _contracts, shape) = build_concepts(
             &f.symbols,
             &f.files,
             &f.pdf,
@@ -1190,6 +1448,435 @@ mod tests {
         .1
     }
 
+    /// The render side of the same rule the domains query asserts in
+    /// `a_span_carried_only_by_example_code_is_not_a_domain`: a community whose
+    /// entire second package is example code collapses to one package and is
+    /// not a domain. Both surfaces now read `AggregateNodeRecord::example`, so
+    /// this and its query twin must agree — that agreement is the point.
+    ///
+    /// `gamma` holds the single-dominant escape open, exactly as `other` does
+    /// in the query test.
+    ///
+    /// Mutation-checked, and the result is worth recording: this producer
+    /// excludes example nodes TWICE — the early `continue` below, and the
+    /// `example` fact handed to `is_domain_eligible`. Neutering either alone
+    /// leaves the other standing and the test still passes; only neutering both
+    /// renders a domain spanning `alpha` + `beta`. The early `continue` is not
+    /// redundant overall — it also keeps example code out of the package
+    /// central list — but for the domain axis the shared predicate is what
+    /// decides, which is exactly the property this change is buying.
+    #[test]
+    fn a_span_carried_only_by_example_code_is_not_a_domain() {
+        let ids: Vec<ShortId> = (1..=10).collect();
+        let symbols: HashMap<ShortId, SymbolRecord> = ids
+            .iter()
+            .map(|&i| {
+                let name = format!("N{i}");
+                (i, sym(i, &name, Language::Rust, false, false))
+            })
+            .collect();
+        // alpha 1,2,3,4 · beta 5,6 (example) · gamma 7,8,9,10
+        let anchor_of = |i: ShortId| match i {
+            1..=4 => (1u32, "alpha"),
+            5..=6 => (2, "beta"),
+            _ => (3, "gamma"),
+        };
+        let files: HashMap<ShortId, String> = [
+            (100, "alpha/src/a.rs"),
+            (200, "beta/examples/spike.rs"),
+            (300, "gamma/src/g.rs"),
+        ]
+        .into_iter()
+        .map(|(i, p)| (i, p.to_string()))
+        .collect();
+        let pdf: HashMap<ShortId, ShortId> = ids
+            .iter()
+            .map(|&i| {
+                (
+                    i,
+                    if i <= 4 {
+                        100
+                    } else if i <= 6 {
+                        200
+                    } else {
+                        300
+                    },
+                )
+            })
+            .collect();
+        let agg: HashMap<ShortId, ShortId> = ids.iter().map(|&i| (i, i)).collect();
+        let anchors: HashMap<ShortId, (u32, String)> = ids
+            .iter()
+            .map(|&i| {
+                let (aid, name) = anchor_of(i);
+                (i, (aid, name.to_string()))
+            })
+            .collect();
+        let nodes: Vec<AggregateNodeRecord> = ids
+            .iter()
+            .map(|&i| {
+                let (aid, name) = anchor_of(i);
+                AggregateNodeRecord {
+                    // The fact the aggregation pass persisted for us.
+                    example: (5..=6).contains(&i),
+                    ..agg_node(i, &format!("N{i}"), Kind::Class, aid, name)
+                }
+            })
+            .collect();
+        // Two distinct alpha↔beta references, so only the example flag can be
+        // what withholds beta's place in the span.
+        let edges = vec![
+            agg_edge(1, 2, 3),
+            agg_edge(1, 3, 3),
+            agg_edge(1, 4, 3),
+            agg_edge(1, 5, 3),
+            agg_edge(2, 6, 3),
+        ];
+        let membership: Vec<AnalysisNodeMembershipRecord> =
+            (1..=6).map(|i| membership(i, 1)).collect();
+        let flat = vec![flat_community(1, 6, true)];
+
+        let domains = build_concepts(
+            &symbols,
+            &files,
+            &pdf,
+            &agg,
+            &anchors,
+            &nodes,
+            &edges,
+            &membership,
+            &flat,
+            &HashMap::new(),
+            &HashMap::new(),
+            &meta(),
+        )
+        .1;
+        assert!(
+            domains.is_empty(),
+            "beta's whole presence is example code, so the community collapses to \
+             alpha alone — got {:?}",
+            domains.iter().map(|d| &d.title).collect::<Vec<_>>()
+        );
+    }
+
+    /// Contracts are read straight from the is-a edges: an interface whose
+    /// implementers span >1 package becomes a contract listing every first-party,
+    /// non-test implementer grouped by package. A single-package interface does
+    /// not. Mutation-checked: dropping the test filter counts `FakeStore` (total
+    /// 3, mem span 2); dropping the `MIN_CONTRACT_PKGS` floor admits the
+    /// single-package `Local` (2 contracts).
+    #[test]
+    fn cross_package_interface_becomes_a_contract_excluding_tests() {
+        let impl_edge = |s: ShortId, d: ShortId| AggregateEdgeRecord {
+            src_id: s,
+            dst_id: d,
+            kind: EdgeKind::Implements,
+            weight: 2,
+        };
+        let nodes = vec![
+            agg_node(1, "Store", Kind::Interface, 1, "core"),
+            agg_node(2, "MemStore", Kind::Class, 2, "mem"),
+            agg_node(3, "DiskStore", Kind::Class, 3, "disk"),
+            agg_node_t(4, "FakeStore", Kind::Class, true, 2, "mem"), // a test double
+            agg_node(5, "Local", Kind::Interface, 1, "core"),
+            agg_node(6, "LocalImpl", Kind::Class, 1, "core"), // same-package impl
+        ];
+        let edges = vec![
+            impl_edge(2, 1),
+            impl_edge(3, 1),
+            impl_edge(4, 1), // test implementer — excluded
+            impl_edge(6, 5), // single-package interface — not a contract
+        ];
+        let node_anchor: HashMap<ShortId, &str> = [
+            (1, "core"),
+            (2, "mem"),
+            (3, "disk"),
+            (4, "mem"),
+            (5, "core"),
+            (6, "core"),
+        ]
+        .into_iter()
+        .collect();
+        let anchor_lang: HashMap<&str, String> =
+            [("core", "rust"), ("mem", "rust"), ("disk", "rust")]
+                .into_iter()
+                .map(|(a, l)| (a, l.to_string()))
+                .collect();
+        // Symbol maps so each implementer resolves to a `pub_id` + location.
+        let s = |id, name| sym(id, name, Language::Rust, false, false);
+        let symbols: HashMap<ShortId, SymbolRecord> = [
+            s(1, "Store"),
+            s(2, "MemStore"),
+            s(3, "DiskStore"),
+            s(4, "FakeStore"),
+            s(5, "Local"),
+            s(6, "LocalImpl"),
+        ]
+        .into_iter()
+        .map(|r| (r.id, r))
+        .collect();
+        let files: HashMap<ShortId, String> = [(10, "src/store.rs")]
+            .into_iter()
+            .map(|(i, p)| (i, p.to_string()))
+            .collect();
+        let pdf: HashMap<ShortId, ShortId> = (1..=6).map(|i| (i, 10)).collect();
+        let ranges: HashMap<ShortId, (u32, u32)> = [(2, (5, 9))].into_iter().collect();
+
+        let (contracts, _contracts_total) = build_contracts(
+            &nodes,
+            &edges,
+            &node_anchor,
+            &anchor_lang,
+            &symbols,
+            &pdf,
+            &files,
+            &ranges,
+        );
+        assert_eq!(contracts.len(), 1, "only the cross-package interface Store");
+        let c = &contracts[0];
+        assert_eq!(c.title, "Store");
+        assert_eq!(c.defined_in_title, "core");
+        // The contract type itself resolves to a pub_id.
+        assert_eq!(c.symbol.pub_id, "rs:pkg::Store");
+        // Implementers carry a resolvable pub_id + location.
+        let mem = c.implementers.iter().find(|i| i.title == "mem").unwrap();
+        assert_eq!(mem.symbols[0].pub_id, "rs:pkg::MemStore");
+        assert_eq!(mem.symbols[0].line_start, 5);
+        assert_eq!(
+            c.package_span, 2,
+            "mem + disk; core defines, doesn't implement"
+        );
+        assert_eq!(c.total_implementers, 2, "FakeStore (test) excluded");
+        let impl_pkgs: Vec<&str> = c.implementers.iter().map(|i| i.title.as_str()).collect();
+        assert!(impl_pkgs.contains(&"mem") && impl_pkgs.contains(&"disk"));
+    }
+
+    /// A community whose eligible members touch two packages but where the second
+    /// is a lone straggler (one symbol, swept in via an external hub) is NOT a
+    /// domain: only the dominant package clears the member floor, so the span has
+    /// fewer than two survivors. Mutation-checked end-to-end: without the member
+    /// floor the straggler would fabricate a 2-package domain.
+    #[test]
+    fn a_lone_straggler_package_does_not_make_a_domain() {
+        let s = |id, name| sym(id, name, Language::Rust, false, false);
+        let symbols: HashMap<ShortId, SymbolRecord> = [
+            s(1, "A"),
+            s(2, "B"),
+            s(3, "C"),
+            s(4, "D"),
+            s(5, "Straggler"),
+        ]
+        .into_iter()
+        .map(|r| (r.id, r))
+        .collect();
+        let files: HashMap<ShortId, String> = [(10, "alpha/src/a.rs"), (20, "beta/src/s.rs")]
+            .into_iter()
+            .map(|(i, p)| (i, p.to_string()))
+            .collect();
+        let pdf: HashMap<ShortId, ShortId> = [(1, 10), (2, 10), (3, 10), (4, 10), (5, 20)]
+            .into_iter()
+            .collect();
+        let agg: HashMap<ShortId, ShortId> = (1..=5).map(|i| (i, i)).collect();
+        let anchors: HashMap<ShortId, (u32, String)> = [
+            (1, (1u32, "alpha".to_string())),
+            (2, (1, "alpha".to_string())),
+            (3, (1, "alpha".to_string())),
+            (4, (1, "alpha".to_string())),
+            (5, (2, "beta".to_string())),
+        ]
+        .into_iter()
+        .collect();
+        let nodes = vec![
+            agg_node(1, "A", Kind::Class, 1, "alpha"),
+            agg_node(2, "B", Kind::Class, 1, "alpha"),
+            agg_node(3, "C", Kind::Class, 1, "alpha"),
+            agg_node(4, "D", Kind::Class, 1, "alpha"),
+            agg_node(5, "Straggler", Kind::Class, 2, "beta"),
+        ];
+        // The straggler links to alpha (edge 1→5) — but beta has one member, so it
+        // never clears the floor and the community stays single-package.
+        let edges = vec![
+            agg_edge(1, 2, 3),
+            agg_edge(1, 3, 3),
+            agg_edge(1, 4, 3),
+            agg_edge(1, 5, 3),
+        ];
+        let membership = vec![
+            membership(1, 1),
+            membership(2, 1),
+            membership(3, 1),
+            membership(4, 1),
+            membership(5, 1),
+        ];
+        let flat = vec![flat_community(1, 5, true)];
+        let (_c, domains, _contracts, _s) = build_concepts(
+            &symbols,
+            &files,
+            &pdf,
+            &agg,
+            &anchors,
+            &nodes,
+            &edges,
+            &membership,
+            &flat,
+            &HashMap::new(),
+            &HashMap::new(),
+            &meta(),
+        );
+        assert!(
+            domains.is_empty(),
+            "a one-symbol straggler package does not make a cross-package domain"
+        );
+    }
+
+    /// Two substantial packages joined by exactly ONE cross-package edge are NOT
+    /// a domain: a single reference is what the package-coupling table already
+    /// shows, and a named domain with a hub overstates it. Mutation-checked:
+    /// without the `MIN_DOMAIN_LINKS` floor this forms a spurious 2-package domain.
+    #[test]
+    fn a_single_cross_package_edge_is_not_a_domain() {
+        let s = |id, name| sym(id, name, Language::Rust, false, false);
+        let symbols: HashMap<ShortId, SymbolRecord> = [s(1, "A"), s(2, "B"), s(3, "C"), s(4, "D")]
+            .into_iter()
+            .map(|r| (r.id, r))
+            .collect();
+        let files: HashMap<ShortId, String> = [(10, "alpha/src/a.rs"), (20, "beta/src/c.rs")]
+            .into_iter()
+            .map(|(i, p)| (i, p.to_string()))
+            .collect();
+        let pdf: HashMap<ShortId, ShortId> =
+            [(1, 10), (2, 10), (3, 20), (4, 20)].into_iter().collect();
+        let agg: HashMap<ShortId, ShortId> = (1..=4).map(|i| (i, i)).collect();
+        let anchors: HashMap<ShortId, (u32, String)> = [
+            (1, (1u32, "alpha".to_string())),
+            (2, (1, "alpha".to_string())),
+            (3, (2, "beta".to_string())),
+            (4, (2, "beta".to_string())),
+        ]
+        .into_iter()
+        .collect();
+        let nodes = vec![
+            agg_node(1, "A", Kind::Class, 1, "alpha"),
+            agg_node(2, "B", Kind::Class, 1, "alpha"),
+            agg_node(3, "C", Kind::Class, 2, "beta"),
+            agg_node(4, "D", Kind::Class, 2, "beta"),
+        ];
+        // Both packages are substantial (2 members each), but exactly ONE edge
+        // (2→3) crosses between them; the rest are intra-package.
+        let edges = vec![agg_edge(1, 2, 3), agg_edge(3, 4, 3), agg_edge(2, 3, 1)];
+        let membership = vec![
+            membership(1, 1),
+            membership(2, 1),
+            membership(3, 1),
+            membership(4, 1),
+        ];
+        let flat = vec![flat_community(1, 4, true)];
+        let (_c, domains, _contracts, _s) = build_concepts(
+            &symbols,
+            &files,
+            &pdf,
+            &agg,
+            &anchors,
+            &nodes,
+            &edges,
+            &membership,
+            &flat,
+            &HashMap::new(),
+            &HashMap::new(),
+            &meta(),
+        );
+        assert!(
+            domains.is_empty(),
+            "a single cross-package edge is a reference, not a domain"
+        );
+    }
+
+    /// The hub (title) is the member most connected WITHIN the domain, not the
+    /// one with the highest degree repo-wide. `Flag` here is a value type
+    /// referenced everywhere (a huge edge to an out-of-community node), but inside
+    /// the cluster it is peripheral; `Engine` is the intra-domain hub.
+    /// Mutation-checked: ranking by global degree (counting the 3→5 edge) titles
+    /// this domain by the `Flag` enum instead.
+    #[test]
+    fn domain_hub_ranks_by_intra_domain_degree_not_global() {
+        let s = |id, name| sym(id, name, Language::Rust, false, false);
+        let symbols: HashMap<ShortId, SymbolRecord> = [
+            s(1, "Engine"),
+            s(2, "Widget"),
+            s(3, "Flag"),
+            s(4, "Gadget"),
+            s(5, "Ext"),
+        ]
+        .into_iter()
+        .map(|r| (r.id, r))
+        .collect();
+        let files: HashMap<ShortId, String> = [
+            (10, "core/src/engine.rs"),
+            (20, "data/src/model.rs"),
+            (30, "ext/src/e.rs"),
+        ]
+        .into_iter()
+        .map(|(i, p)| (i, p.to_string()))
+        .collect();
+        let pdf: HashMap<ShortId, ShortId> = [(1, 10), (2, 10), (3, 20), (4, 20), (5, 30)]
+            .into_iter()
+            .collect();
+        let agg: HashMap<ShortId, ShortId> = (1..=5).map(|i| (i, i)).collect();
+        let anchors: HashMap<ShortId, (u32, String)> = [
+            (1, (1u32, "core".to_string())),
+            (2, (1, "core".to_string())),
+            (3, (2, "data".to_string())),
+            (4, (2, "data".to_string())),
+            (5, (3, "ext".to_string())),
+        ]
+        .into_iter()
+        .collect();
+        let nodes = vec![
+            agg_node(1, "Engine", Kind::Class, 1, "core"),
+            agg_node(2, "Widget", Kind::Class, 1, "core"),
+            agg_node(3, "Flag", Kind::Enum, 2, "data"),
+            agg_node(4, "Gadget", Kind::Class, 2, "data"),
+            AggregateNodeRecord {
+                external: true,
+                ..agg_node(5, "Ext", Kind::Class, 3, "ext")
+            },
+        ];
+        // 1 is the intra hub (intra-degree 9); 3 has ONE intra edge (1→3) but a
+        // huge edge to the out-of-community node 5, so its GLOBAL degree is highest.
+        let edges = vec![
+            agg_edge(1, 2, 3),
+            agg_edge(1, 3, 3),
+            agg_edge(1, 4, 3),
+            agg_edge(3, 5, 100),
+        ];
+        let membership = vec![
+            membership(1, 1),
+            membership(2, 1),
+            membership(3, 1),
+            membership(4, 1),
+        ];
+        let flat = vec![flat_community(1, 4, true)];
+        let (_c, domains, _contracts, _s) = build_concepts(
+            &symbols,
+            &files,
+            &pdf,
+            &agg,
+            &anchors,
+            &nodes,
+            &edges,
+            &membership,
+            &flat,
+            &HashMap::new(),
+            &HashMap::new(),
+            &meta(),
+        );
+        assert_eq!(domains.len(), 1);
+        assert_eq!(
+            domains[0].title, "Engine",
+            "hub is the intra-domain hub, not the globally-ubiquitous enum"
+        );
+    }
+
     #[test]
     fn cross_package_community_becomes_a_domain() {
         let membership = vec![
@@ -1206,14 +1893,17 @@ mod tests {
         assert_eq!(d.id, "domains/A");
         assert_eq!(d.size, 4);
         assert_eq!(d.central[0].name, "A");
-        // Spans both packages (2 members each → tie broken by name).
+        // Spans both packages (2 members each → tie broken by name). Three
+        // cross-package aggregate edges (1→3, 1→4, 2→3) connect them, so each
+        // carries 3 links — the coupling that earned the span.
         assert_eq!(
-            d.packages,
-            vec![
-                okf::concept_id("rust", "alpha"),
-                okf::concept_id("rust", "beta")
-            ]
+            d.packages
+                .iter()
+                .map(|p| (p.title.as_str(), p.members, p.links))
+                .collect::<Vec<_>>(),
+            vec![("alpha", 2, 3), ("beta", 2, 3)]
         );
+        assert_eq!(d.packages[0].concept_id, okf::concept_id("rust", "alpha"));
     }
 
     #[test]
@@ -1304,7 +1994,7 @@ mod tests {
             membership(4, 1),
         ];
         let flat = vec![flat_community(1, 4, true)];
-        let (_c, domains, _s) = build_concepts(
+        let (_c, domains, _contracts, _s) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -1356,7 +2046,7 @@ mod tests {
             membership(4, 1),
         ];
         let flat = vec![flat_community(1, 4, false)]; // NOT cross_anchor
-        let (_c, domains, _s) = build_concepts(
+        let (_c, domains, _contracts, _s) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -1432,7 +2122,13 @@ mod tests {
             agg_node(4, "P", Kind::Class, 2, "other"),
             agg_node(5, "Q", Kind::Class, 2, "other"),
             agg_node(6, "R", Kind::Class, 2, "other"),
-            agg_node(7, "Demo", Kind::Class, 3, "app"),
+            // `app/examples/demo.rs` — the flag the aggregation pass persists
+            // for this path. The producer reads it rather than re-deriving it,
+            // so the fixture states it here where the node is built.
+            AggregateNodeRecord {
+                example: true,
+                ..agg_node(7, "Demo", Kind::Class, 3, "app")
+            },
         ];
         let edges = vec![agg_edge(7, 1, 3), agg_edge(1, 2, 3), agg_edge(1, 3, 3)];
         let membership = vec![
@@ -1442,7 +2138,7 @@ mod tests {
             membership(7, 1),
         ];
         let flat = vec![flat_community(1, 4, true)];
-        let (concepts, domains, _s) = build_concepts(
+        let (concepts, domains, _contracts, _s) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -1528,7 +2224,7 @@ mod tests {
             .map(|(i, p)| (i, p.to_string()))
             .collect();
         let pdf = [(1, 10), (2, 20)].into_iter().collect();
-        let (concepts, _, _) = build_concepts(
+        let (concepts, _, _, _) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -1601,7 +2297,7 @@ mod tests {
             agg_node(3, "Gadget", Kind::Class, 1, "alpha"),
         ];
         let edges = vec![agg_edge(1, 2, 3), agg_edge(1, 3, 3), agg_edge(2, 3, 1)];
-        let (concepts, _, _) = build_concepts(
+        let (concepts, _, _, _) = build_concepts(
             &symbols,
             &HashMap::new(),
             &HashMap::new(),
@@ -1676,7 +2372,7 @@ mod tests {
             agg_edge(6, 7, 3),
             agg_edge(7, 8, 3),
         ];
-        let (concepts, _, _) = build_concepts(
+        let (concepts, _, _, _) = build_concepts(
             &symbols,
             &HashMap::new(),
             &HashMap::new(),
@@ -1728,11 +2424,28 @@ mod tests {
         let (concepts, _) = build(&fixture());
         let alpha = concepts.iter().find(|c| c.title == "alpha").unwrap();
         let beta = concepts.iter().find(|c| c.title == "beta").unwrap();
-        assert_eq!(alpha.deps, vec![okf::concept_id("rust", "beta")]);
+        assert_eq!(
+            alpha
+                .deps
+                .iter()
+                .map(|c| c.concept_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![okf::concept_id("rust", "beta")]
+        );
         assert!(
             beta.deps.is_empty(),
             "beta has no outgoing cross-anchor edge"
         );
+        // The inverse is the same edge read from the other side.
+        assert_eq!(
+            beta.used_by
+                .iter()
+                .map(|c| c.concept_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![okf::concept_id("rust", "alpha")],
+            "beta is used BY alpha"
+        );
+        assert!(alpha.used_by.is_empty(), "nothing depends on alpha");
     }
 
     #[test]
@@ -1898,7 +2611,7 @@ mod tests {
         let nodes: Vec<AggregateNodeRecord> = (1..=8)
             .map(|i| agg_node(i, &format!("S{i}"), Kind::Function, 1, "mono"))
             .collect();
-        let (concepts, _domains, _shape) = build_concepts(
+        let (concepts, _domains, _contracts, _shape) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -1963,7 +2676,7 @@ mod tests {
     #[test]
     fn dominant_structured_package_subdivides_into_components() {
         let (symbols, files, pdf, agg, anchors, nodes) = structured_mono();
-        let (concepts, _domains, _shape) = build_concepts(
+        let (concepts, _domains, _contracts, _shape) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -2026,7 +2739,7 @@ mod tests {
         let nodes: Vec<AggregateNodeRecord> = (1..=7)
             .map(|i| agg_node(i, &format!("S{i}"), Kind::Class, 1, "mono"))
             .collect();
-        let (concepts, _domains, _shape) = build_concepts(
+        let (concepts, _domains, _contracts, _shape) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -2050,12 +2763,72 @@ mod tests {
         assert!(!concepts.iter().any(|c| c.concept_type == "component"));
     }
 
+    /// The pointer must survive the exact history that broke the last one: a
+    /// DANGLING `.kenn/atlas` left by the store's move from a symlink `live` to
+    /// a pointer file. `Path::exists` follows the link and reports absent, so a
+    /// naive "create if missing" leaves the corpse in place forever — which is
+    /// what users are looking at today. Mutation-checked: swapping
+    /// `symlink_metadata` for `metadata` (which follows) fails this.
+    #[cfg(unix)]
+    #[test]
+    fn atlas_pointer_replaces_a_dangling_link() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let stale = root.join("atlas");
+        std::os::unix::fs::symlink("local/live/atlas", &stale).unwrap();
+        assert!(!stale.exists(), "the corpse reads as absent");
+
+        let bundle = root.join("local/runs/2026-07-24T00-00-00Z/atlas");
+        std::fs::create_dir_all(&bundle).unwrap();
+        refresh_atlas_pointer(root, &bundle).unwrap();
+
+        assert!(stale.exists(), "now resolves");
+        assert_eq!(
+            std::fs::read_link(&stale).unwrap(),
+            Path::new("local/runs/2026-07-24T00-00-00Z/atlas"),
+            "relative to the pointer dir, so moving the repo keeps it valid"
+        );
+    }
+
+    /// A bundle outside the pointer dir (`derived_root = "global"`, an XDG
+    /// cache) has no relative path to it, so the link must be absolute.
+    #[cfg(unix)]
+    #[test]
+    fn atlas_pointer_is_absolute_for_an_out_of_tree_store() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let other = tempfile::TempDir::new().unwrap();
+        let bundle = other.path().join("runs/x/atlas");
+        std::fs::create_dir_all(&bundle).unwrap();
+        refresh_atlas_pointer(dir.path(), &bundle).unwrap();
+        assert_eq!(
+            std::fs::read_link(dir.path().join("atlas")).unwrap(),
+            bundle
+        );
+    }
+
+    /// Never delete something the user put there. Only a symlink is ours.
+    #[cfg(unix)]
+    #[test]
+    fn atlas_pointer_refuses_to_replace_a_real_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mine = dir.path().join("atlas");
+        std::fs::create_dir_all(mine.join("notes")).unwrap();
+        let bundle = dir.path().join("local/runs/x/atlas");
+        std::fs::create_dir_all(&bundle).unwrap();
+
+        refresh_atlas_pointer(dir.path(), &bundle).unwrap();
+        assert!(
+            mine.join("notes").is_dir(),
+            "a real directory at the pointer path is left alone"
+        );
+    }
+
     #[test]
     fn write_bundle_writes_index_concepts_and_log() {
         let f = fixture();
         let (concepts, shape) = build(&f);
         let dir = tempfile::TempDir::new().unwrap();
-        let index = write_bundle(dir.path(), &shape, &concepts, &[]).unwrap();
+        let index = write_bundle(dir.path(), &shape, &concepts, &[], &[]).unwrap();
         assert!(index.exists());
         assert!(dir.path().join("packages/rust_alpha.md").exists());
         assert!(dir.path().join("documents/docs.md").exists());

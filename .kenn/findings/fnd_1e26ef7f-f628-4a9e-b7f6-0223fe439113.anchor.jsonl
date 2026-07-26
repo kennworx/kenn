@@ -2,3 +2,4 @@
 {"op":"attach","anchor":"crates/kenn-mcp/src/tools/semantic.rs","ts":"2026-07-05T10:25:10.518644Z","sha":"48bcd6c9cbfe12e1"}
 {"op":"attach","anchor":"indexers/kenn-dotnet/src/Indexing/IndexerCore.cs","ts":"2026-07-05T10:25:10.518644Z","sha":"9925c6d67f0435d2"}
 {"op":"attach","anchor":"indexers/kenn-swift/Sources/kenn-swift/BodyExtents.swift","ts":"2026-07-05T10:52:19.598477Z","sha":"8a8a7055f669e6be"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/transform/document/walk.rs","ts":"2026-07-24T11:10:24.810722Z","sha":"f27a9e72516bb55d"}

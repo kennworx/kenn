@@ -10,17 +10,20 @@ use crate::language::Language;
 
 pub mod css;
 pub mod descriptor;
-mod go;
+pub mod go;
 pub mod html;
 pub mod md;
+pub mod package;
 mod py;
 mod rs;
 pub mod text;
 mod ts;
 
-pub use go::GoTransformer;
+pub use go::{go_package_of, GoTransformer};
 pub use py::PythonTransformer;
-pub use rs::RustTransformer;
+pub use rs::{
+    base_type_name, head_package_of, terminal_type_name, trait_impl_of, RustTransformer, TraitImpl,
+};
 pub use ts::TypeScriptTransformer;
 
 /// A normalized public symbol ID (`cs:Foo.Bar`, `rs:foo::bar`, etc.).
@@ -132,10 +135,6 @@ pub(crate) fn split_scip_head(scip: &str) -> Result<ScipHead<'_>, IdError> {
     })
 }
 
-#[expect(
-    dead_code,
-    reason = "scheme/manager/package/version are part of the parsed view; only `descriptor` is consumed today"
-)]
 pub(crate) struct ScipHead<'a> {
     pub scheme: &'a str,
     pub manager: &'a str,

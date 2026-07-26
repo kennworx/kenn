@@ -27,7 +27,7 @@ use crate::api::types::{
     DefLineRow, DefRow, FileRow, FoundSymbolRow, PackageRow, RankedSymbolRow, SymbolDocsRow,
     SymbolRow, WriterOptions,
 };
-use crate::api::{Reader, WriteBatch};
+use crate::api::{Reader, RowNarrow, WriteBatch};
 use kenn_model::ShortId;
 
 use super::reader::SqliteReader;
@@ -177,8 +177,7 @@ impl Reader for DbReader {
         relation: &str,
         limit: u32,
         cursor_after: Option<ShortId>,
-        include_external: bool,
-        include_tests: bool,
+        narrow: &RowNarrow,
     ) -> Result<(Vec<SymbolRow>, u64), DbError> {
         Reader::list_inbound(
             &self.0,
@@ -186,8 +185,7 @@ impl Reader for DbReader {
             relation,
             limit,
             cursor_after,
-            include_external,
-            include_tests,
+            narrow,
         )
         .await
     }
@@ -197,8 +195,7 @@ impl Reader for DbReader {
         relation: &str,
         limit: u32,
         cursor_after: Option<ShortId>,
-        include_external: bool,
-        include_tests: bool,
+        narrow: &RowNarrow,
     ) -> Result<(Vec<SymbolRow>, u64), DbError> {
         Reader::list_outbound(
             &self.0,
@@ -206,8 +203,7 @@ impl Reader for DbReader {
             relation,
             limit,
             cursor_after,
-            include_external,
-            include_tests,
+            narrow,
         )
         .await
     }
@@ -286,6 +282,15 @@ impl Reader for DbReader {
     }
     async fn scan_symbols(&self) -> Result<Vec<SymbolRow>, DbError> {
         Reader::scan_symbols(&self.0).await
+    }
+    async fn scan_files(&self) -> Result<Vec<FileRow>, DbError> {
+        Reader::scan_files(&self.0).await
+    }
+    async fn scan_def_files(&self) -> Result<Vec<(ShortId, ShortId)>, DbError> {
+        Reader::scan_def_files(&self.0).await
+    }
+    async fn scan_file_docs(&self) -> Result<Vec<(ShortId, String)>, DbError> {
+        Reader::scan_file_docs(&self.0).await
     }
     async fn scan_edges(&self, relation: &str) -> Result<Vec<(ShortId, ShortId)>, DbError> {
         Reader::scan_edges(&self.0, relation).await

@@ -65,8 +65,26 @@ two commands degrade to empty/lexical.
 - `kenn list imports <id> --direction outbound|inbound|both` — module deps.
 - `kenn list module-files <id>` — the files of a module.
 
-**Orient**
+**Orient — the structural axes**
 - `kenn overview`, `kenn status`.
+- `kenn packages [<name>]` — every package with its role (provider / layer /
+  consumer / tests / isolated) and coupling counts, most-depended-on first. With
+  a name: its typed coupling both directions, its root doc, and its most
+  connected symbols.
+- `kenn domains [<query>]` — clusters that span more than one package: the
+  structure the package list can't show. With a name (hub id or title): the
+  packages it spans and its central symbols.
+- `kenn contracts [<query>]` — interfaces / base types implemented in more than
+  one package, widest span first. With a name: every implementer grouped by
+  package, each with a resolvable id. An EMPTY result is a real answer, not a
+  failure: Rust and Go keep abstractions package-local, so their contracts axis
+  is legitimately empty, while C# and Swift spread them across the tree.
+- `kenn documents [<name>]` — the non-code directories kenn tracks (docs,
+  specs), with file counts.
+
+A name argument on `domains` / `contracts` is a QUERY, not an identifier: type
+names are not unique, so a title matching several entities returns them all,
+each tagged with its own id. Pass the id to get exactly one.
 
 **Test / external symbols** — `--include-tests` and `--include-external` are
 global flags, **default off** (focused output). Pass `--include-tests` (bare =

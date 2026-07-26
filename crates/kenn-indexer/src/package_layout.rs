@@ -56,7 +56,9 @@ impl PackageLayout {
     #[must_use]
     pub fn discover(root: &Path, excluded_dirs: &[PathBuf]) -> Self {
         let mut markers: Vec<PackageMarker> = Vec::new();
-        walk_for_markers(root, root, excluded_dirs, &mut markers, 0);
+        let mut go = GoDirs::default();
+        walk_for_markers(root, root, excluded_dirs, &mut markers, &mut go, 0);
+        markers.extend(go.package_markers());
 
         // Deduplicate: a directory may have BOTH a Cargo.toml and a
         // pyproject.toml; keep the first-seen (walker order is
@@ -102,6 +104,59 @@ impl PackageLayout {
     }
 }
 
+/// Go source directories seen during the walk, and the modules they belong to.
+///
+/// Go is the one language whose unit of import is the DIRECTORY, not the
+/// manifest: a single `go.mod` covers every package in the module. Anchoring by
+/// manifest alone therefore collapses them all into the module — `spf13/afero`,
+/// with 8 importable packages, resolves to ONE anchor, and every edge between
+/// them (`afero/zipfs.File.Truncate` → `afero.File.Truncate`) becomes
+/// intra-anchor and vanishes from the package graph. Rust and C# escape this
+/// only because Cargo and `MSBuild` happen to put one manifest per unit.
+#[derive(Debug, Default)]
+struct GoDirs {
+    /// `(rel_dir, module anchor name)` for each `go.mod` found.
+    modules: Vec<(String, String)>,
+    /// Workspace-relative dirs holding at least one `.go` file.
+    sources: Vec<String>,
+}
+
+impl GoDirs {
+    /// A marker per Go source directory, named `<module>/<path-from-module>` —
+    /// the import path a Go developer actually writes, minus the module's
+    /// domain prefix (`parse_go_mod_name` already reduces `github.com/spf13/afero`
+    /// to `afero`). The module's own directory is skipped: `walk_for_markers`
+    /// already emitted its `go.mod` marker, and a duplicate would only be
+    /// deduped away.
+    fn package_markers(&self) -> Vec<PackageMarker> {
+        let mut out = Vec::new();
+        for dir in &self.sources {
+            // Deepest enclosing module — nested modules are legal in Go.
+            let Some((mod_dir, anchor)) = self
+                .modules
+                .iter()
+                .filter(|(m, _)| path_is_under(dir, m))
+                .max_by_key(|(m, _)| depth_of(m))
+            else {
+                continue;
+            };
+            if dir == mod_dir {
+                continue;
+            }
+            let rel = dir.strip_prefix(mod_dir.as_str()).unwrap_or(dir);
+            let rel = rel.trim_start_matches('/');
+            if rel.is_empty() {
+                continue;
+            }
+            out.push(PackageMarker {
+                rel_dir: dir.clone(),
+                anchor_name: format!("{anchor}/{rel}"),
+            });
+        }
+        out
+    }
+}
+
 /// Pruned recursive walk. Avoids the well-known noisy directories
 /// (`.git`, `.kenn`, `node_modules`, `target`, `bin`, `obj`) and any
 /// path under `excluded_dirs`. Depth-capped at 12 to avoid runaway
@@ -112,6 +167,7 @@ fn walk_for_markers(
     cur: &Path,
     excluded_dirs: &[PathBuf],
     out: &mut Vec<PackageMarker>,
+    go: &mut GoDirs,
     depth: usize,
 ) {
     const MAX_DEPTH: usize = 12;
@@ -124,6 +180,7 @@ fn walk_for_markers(
     let Ok(entries) = std::fs::read_dir(cur) else {
         return;
     };
+    let mut has_go = false;
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -139,16 +196,10 @@ fn walk_for_markers(
             ) {
                 continue;
             }
-            walk_for_markers(root, &path, excluded_dirs, out, depth + 1);
+            walk_for_markers(root, &path, excluded_dirs, out, go, depth + 1);
             continue;
         }
         if !file_type.is_file() {
-            continue;
-        }
-        let Some(anchor_name) = anchor_name_from_marker(&path, file_name) else {
-            continue;
-        };
-        if anchor_name.is_empty() {
             continue;
         }
         let Ok(rel) = cur.strip_prefix(root) else {
@@ -157,10 +208,37 @@ fn walk_for_markers(
         let rel_str = rel
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
+        // This dir is a Go package if it holds any `.go` file, whatever manifest
+        // covers it. Flagged rather than pushed inline: the entry loop recurses
+        // into subdirectories between files, so an inline push would record the
+        // same directory once per `.go` file it contains.
+        if std::path::Path::new(file_name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("go"))
+        {
+            has_go = true;
+        }
+        let Some(anchor_name) = anchor_name_from_marker(&path, file_name) else {
+            continue;
+        };
+        if anchor_name.is_empty() {
+            continue;
+        }
+        if file_name == "go.mod" {
+            go.modules.push((rel_str.clone(), anchor_name.clone()));
+        }
         out.push(PackageMarker {
             rel_dir: rel_str,
             anchor_name,
         });
+    }
+    if has_go {
+        if let Ok(rel) = cur.strip_prefix(root) {
+            go.sources.push(
+                rel.to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
+            );
+        }
     }
 }
 
@@ -264,12 +342,19 @@ fn parse_package_json_name(path: &Path) -> Option<String> {
     if name.is_empty() {
         None
     } else {
-        // Strip scope prefix when present: "@scope/foo" → "foo".
-        if let Some(rest) = name.strip_prefix('@') {
-            if let Some(idx) = rest.find('/') {
-                return rest.get(idx + 1..).map(str::to_string);
-            }
-        }
+        // The name is returned WHOLE, scope included. It used to strip
+        // `@scope/` for readability, and that gave one package two anchor names:
+        // a symbol the TypeScript producer attributed to a package carries its
+        // `pkg_id`, whose `packages` row holds the full `@nestjs/core`, while a
+        // symbol with no `pkg_id` (a markdown doc, say) falls through to this
+        // marker and got `core`. Both anchors then appear in the graph, so
+        // `kenn packages` listed 26 packages for a 17-package repo — nine of them
+        // bare-name duplicates of scoped ones already in the list.
+        //
+        // Stripping is also lossy: `@a/utils` and `@b/utils` are different
+        // packages that collapse onto one `utils` anchor. Concept ids already
+        // carry the scope (`packages/typescript_@acme_web`), so keeping it here is
+        // what makes the two naming paths agree.
         Some(name)
     }
 }
@@ -348,6 +433,59 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
+    /// Go's unit of import is the directory: one `go.mod` covers every package
+    /// in the module, so anchoring by manifest alone collapses them all and every
+    /// edge between them becomes intra-anchor and disappears from the package
+    /// graph. Layout mirrors spf13/afero. Mutation-checked: dropping the
+    /// `go.package_markers()` extend leaves every path anchored to `afero`.
+    #[test]
+    fn go_source_dirs_anchor_per_package_not_per_module() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        write(&root.join("go.mod"), "module github.com/spf13/afero\n");
+        write(&root.join("afero.go"), "package afero\n");
+        write(&root.join("mem/file.go"), "package mem\n");
+        write(&root.join("zipfs/zipfs.go"), "package zipfs\n");
+        write(&root.join("internal/common/common.go"), "package common\n");
+        // A directory with no `.go` file is NOT a package.
+        write(&root.join("docs/readme.md"), "# docs\n");
+
+        let layout = PackageLayout::discover(root, &[]);
+        assert_eq!(layout.anchor_for("afero.go"), Some("afero"), "module root");
+        assert_eq!(layout.anchor_for("mem/file.go"), Some("afero/mem"));
+        assert_eq!(layout.anchor_for("zipfs/zipfs.go"), Some("afero/zipfs"));
+        assert_eq!(
+            layout.anchor_for("internal/common/common.go"),
+            Some("afero/internal/common"),
+            "nested package keeps its full path"
+        );
+        // A non-Go directory falls back to the enclosing module.
+        assert_eq!(layout.anchor_for("docs/readme.md"), Some("afero"));
+    }
+
+    /// The rule is Go-only: a Rust workspace already has one manifest per unit,
+    /// and a stray `.go` file must not invent an anchor where no module exists.
+    #[test]
+    fn go_markers_require_an_enclosing_module() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        write(
+            &root.join("crates/a/Cargo.toml"),
+            "[package]\nname = \"a\"\n",
+        );
+        write(&root.join("crates/a/src/lib.rs"), "");
+        // No go.mod anywhere — this dir gets no synthesized anchor.
+        write(&root.join("scripts/tool.go"), "package main\n");
+
+        let layout = PackageLayout::discover(root, &[]);
+        assert_eq!(layout.anchor_for("crates/a/src/lib.rs"), Some("a"));
+        assert_eq!(
+            layout.anchor_for("scripts/tool.go"),
+            None,
+            "a .go file outside any module anchors nothing"
+        );
+    }
+
     #[test]
     fn depth_helper_handles_root_and_nested() {
         assert_eq!(depth_of(""), 0);
@@ -386,8 +524,14 @@ version = "0.1.0"
         assert_eq!(layout.anchor_for("crates/foo/src/lib.rs"), Some("foo-pkg"));
     }
 
+    /// A scoped package keeps its scope, because the OTHER path to an anchor name
+    /// — a symbol's `pkg_id` → `packages` row — carries the full `@scope/name`.
+    /// Stripping here gave one package two anchors, so `kenn packages` reported 26
+    /// packages for a 17-package repo: nine bare-name duplicates of scoped ones.
+    ///
+    /// Mutation-checked: restoring the strip makes this `Some("util")`.
     #[test]
-    fn discovers_package_json_strips_scope() {
+    fn discovers_package_json_keeps_the_scope() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         write(
@@ -397,8 +541,21 @@ version = "0.1.0"
         let layout = PackageLayout::discover(root, &[]);
         assert_eq!(
             layout.anchor_for("packages/util/src/index.ts"),
-            Some("util")
+            Some("@myscope/util")
         );
+    }
+
+    /// Two scopes can publish the same leaf name. Stripping collapsed them onto
+    /// one anchor, merging two unrelated packages into a single node.
+    #[test]
+    fn same_leaf_name_in_two_scopes_stays_two_packages() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        write(&root.join("a/package.json"), r#"{"name":"@alpha/utils"}"#);
+        write(&root.join("b/package.json"), r#"{"name":"@beta/utils"}"#);
+        let layout = PackageLayout::discover(root, &[]);
+        assert_eq!(layout.anchor_for("a/src/index.ts"), Some("@alpha/utils"));
+        assert_eq!(layout.anchor_for("b/src/index.ts"), Some("@beta/utils"));
     }
 
     #[test]

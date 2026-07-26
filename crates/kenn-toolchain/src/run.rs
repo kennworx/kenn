@@ -113,10 +113,24 @@ pub fn provision(
         fetch_text,
     )?;
 
-    if cache.is_provisioned(language.key(), &resolved.version) {
+    // Swift's `swift-tools-version` is a MINIMUM, so any provisioned toolchain
+    // `>=` the pin satisfies it and is reused; the host preflight applies the
+    // identical rule, so both agree on which one runs. Every other language keys
+    // on its exact resolved version.
+    let reuse = if language == Language::Swift {
+        crate::select::best_compatible(
+            &resolved.version,
+            &cache.provisioned_versions(language.key()),
+        )
+    } else if cache.is_provisioned(language.key(), &resolved.version) {
+        Some(resolved.version.clone())
+    } else {
+        None
+    };
+    if let Some(version) = reuse {
         return Ok(Outcome::AlreadyPresent {
-            path: cache.path(language.key(), &resolved.version),
-            version: resolved.version,
+            path: cache.path(language.key(), &version),
+            version,
         });
     }
 
@@ -891,5 +905,43 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("host"), "says where it comes from: {msg}");
         assert!(msg.contains("local"), "offers the way forward: {msg}");
+    }
+
+    /// Swift's `swift-tools-version` is a MINIMUM: a provisioned 6.3 satisfies a
+    /// 6.0 pin and is reused, reported as the version that actually ran.
+    /// Mutation-checked: reverting the swift branch to the exact `is_provisioned`
+    /// check makes this hard-error (no `6.0` dir), not resolve to `6.3`.
+    #[test]
+    fn a_higher_provisioned_swift_satisfies_a_lower_pin() {
+        let ws = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            ws.path().join("Package.swift"),
+            "// swift-tools-version:6.0\n",
+        )
+        .expect("write");
+        let cache_dir = tempfile::tempdir().expect("tempdir");
+        // Seed swift 6.3 (only) under the arch the call asks for — no 6.0.
+        std::fs::create_dir_all(cache_dir.path().join("arm64/swift/6.3")).expect("mkdir");
+        let mut progress: Vec<u8> = Vec::new();
+
+        let outcome = with_cache_root(Some(cache_dir.path()), || {
+            provision(
+                Language::Swift,
+                ws.path(),
+                Arch::Arm64,
+                &mut progress,
+                &|_| panic!("swift resolves without fetching metadata"),
+                &|_, _| panic!("must not install a host-provisioned language"),
+            )
+        })
+        .expect("provision");
+
+        match outcome {
+            Outcome::AlreadyPresent { version, .. } => {
+                assert_eq!(version, "6.3", "reused the higher toolchain");
+            }
+            other => panic!("expected reuse of 6.3, got {other:?}"),
+        }
+        assert!(progress.is_empty(), "reuse announces nothing");
     }
 }

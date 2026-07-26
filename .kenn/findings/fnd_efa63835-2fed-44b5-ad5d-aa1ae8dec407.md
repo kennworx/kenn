@@ -1,0 +1,8 @@
+---
+id: fnd_efa63835-2fed-44b5-ad5d-aa1ae8dec407
+tags:
+- guide
+parent_ids: []
+created_at: 2026-07-24T11:11:00.503851Z
+---
+Edge-kind coverage across indexers is UNEVEN — measured on real repos, not assumed. Only 'calls' is emitted by every code indexer. Rust (rust-analyzer) emits ONLY calls + type_use: no defined_in / contains / field_access / instantiates / imports — containment lives on the symbols.enclosing_sym_id COLUMN instead, whereas C#/TS carry it BOTH ways, so any graph analysis reading the edges table alone sees a containment hierarchy for C#/TS/markdown and none for Rust. Swift (index-store sidecar) emits calls / implements / overrides / imports and ZERO type_use, so anything weighted by type_use collapses on a Swift codebase. C# (Roslyn sidecar) is the richest — every kind, including generic_constraint and extends_type (both near-zero in this repo only because its own C# is tiny; they are 76 and 649 on a large real solution). TypeScript's sidecar has the full vocabulary in code (edges.ts emits implements/overrides/generic_constraint/instantiates from heritage clauses) but a repo without heritage clauses exercises none of it — absent data is not an absent capability. Go and Python get implements free via SCIP relationships. corresponds_to and embeds are emitted by nothing. CONSEQUENCE for any feature keyed on a single edge kind: it silently renders EMPTY on some languages. Distinguish 'no such relationship' from 'this indexer cannot see that relationship' — rendering the second as the first tells a user their Rust workspace has no abstractions, with total confidence.

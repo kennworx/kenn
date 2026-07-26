@@ -295,7 +295,13 @@ fn emit_code_style_imports(
 /// The code `module` node that `contains` `file_id` (a code file has exactly one).
 fn module_of_file(reader: &DbReader, handle: &Handle, file_id: ShortId) -> Option<ShortId> {
     handle
-        .block_on(reader.list_inbound(file_id, "contains", 1, None, false, true))
+        .block_on(reader.list_inbound(
+            file_id,
+            "contains",
+            1,
+            None,
+            &kenn_store::RowNarrow::visibility(false, true),
+        ))
         .ok()
         .and_then(|(rows, _)| rows.first().map(|r| r.id))
 }

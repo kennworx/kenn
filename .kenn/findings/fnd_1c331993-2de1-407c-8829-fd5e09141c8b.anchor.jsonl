@@ -5,3 +5,4 @@
 {"op":"attach","anchor":"crates/kenn-cli/src/cmd_index.rs","ts":"2026-07-07T17:20:28.236814Z","sha":"cda0d45826f450cf"}
 {"op":"rename","from":"crates/kenn-cli/src/cmd_index.rs","to":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-15T16:45:54.557386Z"}
 {"op":"attach","anchor":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-15T16:49:02.440372Z","sha":"e06bf93c4e2d4faf"}
+{"op":"attach","anchor":"crates/kenn-store/src/meta.rs","ts":"2026-07-25T19:38:41.202203Z","sha":"b595f2f9b30b659b"}

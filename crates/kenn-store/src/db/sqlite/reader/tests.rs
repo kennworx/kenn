@@ -1,5 +1,6 @@
 use super::projection::SqliteReader;
 use crate::api::Reader;
+use crate::api::RowNarrow;
 use crate::api::WriteBatch;
 use kenn_model::{
     EdgeKind, EdgeProperties, EdgeRecord, FileRecord, Kind, Language, PackageRecord, SymbolRecord,
@@ -194,7 +195,7 @@ async fn traversal_walks_the_csr_both_directions() {
     let calls = EdgeKind::Calls.db_name();
 
     let (out, total) = r
-        .list_outbound(1, calls, 10, None, false, false)
+        .list_outbound(1, calls, 10, None, &RowNarrow::visibility(false, false))
         .await
         .unwrap();
     assert_eq!(total, 1);
@@ -203,7 +204,7 @@ async fn traversal_walks_the_csr_both_directions() {
     assert_eq!(out[0].name, "callee");
 
     let (inb, itotal) = r
-        .list_inbound(2, calls, 10, None, false, false)
+        .list_inbound(2, calls, 10, None, &RowNarrow::visibility(false, false))
         .await
         .unwrap();
     assert_eq!(itotal, 1);
@@ -211,13 +212,13 @@ async fn traversal_walks_the_csr_both_directions() {
 
     // No inbound calls to the caller; unknown relation errors.
     assert_eq!(
-        r.list_inbound(1, calls, 10, None, false, false)
+        r.list_inbound(1, calls, 10, None, &RowNarrow::visibility(false, false))
             .await
             .unwrap()
             .1,
         0
     );
-    r.list_outbound(1, "bogus", 10, None, false, false)
+    r.list_outbound(1, "bogus", 10, None, &RowNarrow::visibility(false, false))
         .await
         .unwrap_err();
 }

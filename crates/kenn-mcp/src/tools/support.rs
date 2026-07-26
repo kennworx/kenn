@@ -232,3 +232,122 @@ pub(crate) async fn embed_query(query: &str) -> Result<Option<Vec<f32>>, McpErro
         Err(other) => Err(internal(other)),
     }
 }
+
+/// Take one page of an already-ordered, in-memory axis listing.
+///
+/// The atlas axes are computed whole (they are small and their ordering is
+/// deterministic for a snapshot), so pagination is a plain offset walk rather
+/// than a cache-backed one: the cursor carries the offset, and the snapshot id
+/// in it makes a cursor from a previous index run fail loudly instead of
+/// silently paging a different corpus.
+///
+/// Render caps are NOT applied here. A cap is presentation policy for a page
+/// with a reader; a query must be able to reach every entity, which is what
+/// paging is for (design D8).
+pub(crate) fn page_axis_items<T>(
+    mut items: Vec<T>,
+    pagination: Option<&crate::types::Pagination>,
+    snapshot: crate::cursor::SnapshotId,
+) -> Result<(Vec<T>, Option<String>), crate::error::McpError> {
+    let page_size = pagination
+        .and_then(|p| p.page_size)
+        .unwrap_or(crate::types::DEFAULT_PAGE)
+        .clamp(1, crate::types::MAX_PAGE) as usize;
+
+    let offset = match pagination.and_then(|p| p.cursor.as_deref()) {
+        None => 0usize,
+        Some(c) => {
+            let decoded = crate::cursor::decode_cursor(c)?;
+            if decoded.list_snapshot() != Some(snapshot) {
+                return Err(crate::error::McpError::new(
+                    crate::error::McpErrorCode::InvalidInput,
+                    "cursor is from a different snapshot; restart the listing",
+                ));
+            }
+            match decoded {
+                crate::cursor::DecodedCursor::List { last_short_id, .. } => last_short_id as usize,
+                _ => 0,
+            }
+        }
+    };
+
+    if offset >= items.len() {
+        return Ok((Vec::new(), None));
+    }
+    let rest = items.split_off(offset);
+    let has_more = rest.len() > page_size;
+    let page: Vec<T> = rest.into_iter().take(page_size).collect();
+    let next = has_more.then(|| {
+        let next_offset = u32::try_from(offset + page_size).unwrap_or(u32::MAX);
+        crate::cursor::encode_list_cursor(snapshot, next_offset)
+    });
+    Ok((page, next))
+}
+
+#[cfg(test)]
+mod page_axis_tests {
+    use super::page_axis_items;
+    use crate::cursor::{decode_cursor, DecodedCursor, SnapshotId};
+    use crate::types::Pagination;
+
+    fn snap() -> SnapshotId {
+        SnapshotId([1, 2, 3, 4, 5, 6])
+    }
+
+    fn page(size: u32, cursor: Option<String>) -> Pagination {
+        Pagination {
+            page_size: Some(size),
+            cursor,
+        }
+    }
+
+    /// Draining an axis returns every entity exactly once, in order — no gap at
+    /// a page boundary, no repeat. Mutation-checked: an off-by-one in the offset
+    /// (`offset + page_size - 1`) duplicates a row and this fails.
+    #[test]
+    fn draining_returns_every_item_exactly_once() {
+        let all: Vec<u32> = (0..10).collect();
+        let mut seen: Vec<u32> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let (items, next) =
+                page_axis_items(all.clone(), Some(&page(3, cursor.clone())), snap()).unwrap();
+            seen.extend(items);
+            match next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(seen, all, "every item once, in order");
+    }
+
+    /// A listing that fits in one page carries no cursor — a `next` that leads
+    /// nowhere invites a pointless round-trip.
+    #[test]
+    fn a_single_page_has_no_cursor() {
+        let (items, next) = page_axis_items(vec![1, 2, 3], Some(&page(25, None)), snap()).unwrap();
+        assert_eq!(items.len(), 3);
+        assert!(next.is_none());
+    }
+
+    /// A cursor minted against another snapshot must fail loudly rather than
+    /// silently page a different corpus.
+    #[test]
+    fn a_cursor_from_another_snapshot_is_rejected() {
+        let (_, next) = page_axis_items(vec![1, 2, 3, 4], Some(&page(2, None)), snap()).unwrap();
+        let c = next.expect("a second page exists");
+        // Same cursor, different snapshot.
+        let other = SnapshotId([9, 9, 9, 9, 9, 9]);
+        let err = page_axis_items(vec![1, 2, 3, 4], Some(&page(2, Some(c.clone()))), other)
+            .expect_err("stale cursor must error");
+        assert!(format!("{err}").contains("different snapshot"), "{err}");
+        // And it still works against the snapshot it was minted for.
+        let (items, _) =
+            page_axis_items(vec![1, 2, 3, 4], Some(&page(2, Some(c.clone()))), snap()).unwrap();
+        assert_eq!(items, vec![3, 4], "the second page");
+        assert!(matches!(
+            decode_cursor(&c).unwrap(),
+            DecodedCursor::List { .. }
+        ));
+    }
+}

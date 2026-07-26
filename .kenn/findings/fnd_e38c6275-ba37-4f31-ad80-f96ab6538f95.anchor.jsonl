@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/atlas/okf.rs","ts":"2026-07-24T15:09:06.435536Z","sha":"0f2bd064d581fe25"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/atlas/producer.rs","ts":"2026-07-24T15:09:06.435536Z","sha":"47ea84bbb1ced47f"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/atlas/model.rs","ts":"2026-07-24T15:09:06.435536Z","sha":"92118e56c2e5511f"}

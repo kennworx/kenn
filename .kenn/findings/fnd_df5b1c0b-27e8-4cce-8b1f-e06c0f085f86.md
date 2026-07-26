@@ -1,0 +1,9 @@
+---
+id: fnd_df5b1c0b-27e8-4cce-8b1f-e06c0f085f86
+tags:
+- directive
+- polarity:do
+parent_ids: []
+created_at: 2026-07-24T12:38:42.05425Z
+---
+Go anchors PER DIRECTORY, not per go.mod — PackageLayout synthesizes a marker for every directory holding a .go file, named <module>/<path-from-module>. Go is the one language whose unit of import is the DIRECTORY: a single go.mod covers every package in the module, so manifest-only anchoring collapses them all. Measured on spf13/afero: 8 importable packages resolved to ONE anchor, and every edge between them (afero/zipfs.File.Truncate -> afero.File.Truncate) became intra-anchor and vanished from the package graph — 0 cross-package arrows. After the fix: 5 anchors, 4 relations, including the contract/implementer shape that is the whole point (afero/mem, afero/tarfs, afero/zipfs each ---implements---> afero, which defines Fs and File). Rust and C# escape this only because Cargo and MSBuild happen to put one manifest per unit; do not generalize 'manifest = package' from them. Python does NOT need the same treatment and must not get it: scip-python's moniker head is the DISTRIBUTION (httpx), so a single-distribution repo is correctly one anchor and its modules are intra-package structure the atlas already renders as components. TENSION worth knowing (see fnd_eaaf8c6f): that directive says package naming belongs in the sidecar, not in the Rust PackageLayout. Go has no sidecar package channel — scip-go writes no package rows and the SCIP ingest path hardcodes pkg_id: 0 — so the identity is either derived from the filesystem here, or read from the moniker, which needs pkg_id plumbed through the whole SCIP ingest path. The filesystem route was chosen for size; revisit if that plumbing ever lands.

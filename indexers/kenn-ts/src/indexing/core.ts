@@ -8,6 +8,7 @@ import type { JsonlSink } from "../wire/sink";
 import { emitFileEdges } from "./edges";
 import { extractFileDoc } from "./file-doc";
 import { IdRegistry } from "./ids";
+import { OutDirMap, type OutDirPair } from "./outdir";
 import { Packages } from "./packages";
 import { emitFileSymbols } from "./symbols";
 import { isTestPath } from "./test-path";
@@ -23,8 +24,14 @@ interface WalkedFile {
 
 type SourceCache = Map<string, ts.SourceFile>;
 
+interface BuiltProject {
+  program: ts.Program;
+  /** Declared `outDir`/`rootDir`, when the project sets both. */
+  out?: OutDirPair;
+}
+
 /** Build a program for one tsconfig, sharing parsed source files across projects. */
-function buildProgram(tsconfigPath: string, cache: SourceCache): ts.Program {
+function buildProgram(tsconfigPath: string, cache: SourceCache): BuiltProject {
   const cfg = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
   const parsed = ts.parseJsonConfigFileContent(
     cfg.config ?? {},
@@ -54,7 +61,13 @@ function buildProgram(tsconfigPath: string, cache: SourceCache): ts.Program {
     if (sf) cache.set(fileName, sf);
     return sf;
   };
-  return ts.createProgram(parsed.fileNames, parsed.options, host);
+  const { outDir, rootDir } = parsed.options;
+  return {
+    program: ts.createProgram(parsed.fileNames, parsed.options, host),
+    // Both or neither: without a declared `rootDir` there is no inverse to
+    // apply, and guessing one is exactly what this mapping exists to avoid.
+    out: outDir && rootDir ? { outDir, rootDir } : undefined,
+  };
 }
 
 /** xxh64 of the file's on-disk UTF-8 bytes, 16 lowercase hex chars (matches the C# producer). */
@@ -79,12 +92,15 @@ export function indexWorkspace(
   const sourceCache: SourceCache = new Map();
   const stats: EndStats = { files: 0, symbols: 0, edges: 0, errors: 0 };
   const walked: WalkedFile[] = [];
+  const outPairs: OutDirPair[] = [];
 
   // Pass 1: files + definitions (so internal symbols are full before edges).
   for (const cfg of configs) {
     let program: ts.Program;
     try {
-      program = buildProgram(cfg, sourceCache);
+      const built = buildProgram(cfg, sourceCache);
+      program = built.program;
+      if (built.out) outPairs.push(built.out);
     } catch (e) {
       const err: ErrorFrame = {
         type: "error",
@@ -136,8 +152,13 @@ export function indexWorkspace(
   }
 
   // Pass 2: edges (internal targets resolve to full symbols; externals stub).
+  // Built across ALL projects first: a cross-package reference resolves into
+  // the OTHER package's outDir, so the mapping that undoes it belongs to a
+  // project this file's own tsconfig knows nothing about.
+  const outDirs = new OutDirMap(outPairs);
   for (const w of walked) {
     emitFileEdges({
+      outDirs,
       sf: w.sf,
       checker: w.checker,
       moduleRel: w.moduleRel,

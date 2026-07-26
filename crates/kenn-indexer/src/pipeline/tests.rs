@@ -780,8 +780,7 @@ fn html_css_js_indexes_end_to_end() {
             "links_to_file",
             50,
             None,
-            false,
-            true,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .unwrap();
     assert_eq!(links, 1, "index.html → about.html");
@@ -793,13 +792,23 @@ fn html_css_js_indexes_end_to_end() {
         .expect("app.css module");
     let (_r, css_imp) = rt
         .block_on(Reader::list_inbound(
-            &reader, appcss.id, "imports", 50, None, false, true,
+            &reader,
+            appcss.id,
+            "imports",
+            50,
+            None,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .unwrap();
     assert_eq!(css_imp, 1, "index.html imports app.css");
     let (_r, js_imp) = rt
         .block_on(Reader::list_inbound(
-            &reader, js_file, "imports", 50, None, false, true,
+            &reader,
+            js_file,
+            "imports",
+            50,
+            None,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .unwrap();
     assert_eq!(js_imp, 1, "index.html imports app.js");
@@ -812,8 +821,7 @@ fn html_css_js_indexes_end_to_end() {
             "corresponds_to",
             50,
             None,
-            false,
-            true,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .unwrap();
     assert_eq!(corr, 1, "hero html_id corresponds to #hero css_id");
@@ -833,8 +841,7 @@ fn html_css_js_indexes_end_to_end() {
             "uses_css_class",
             50,
             None,
-            false,
-            true,
+            &kenn_store::RowNarrow::visibility(false, true),
         ))
         .unwrap();
     assert_eq!(uses, 1, "btn used once, from the hero html_id");
