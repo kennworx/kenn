@@ -515,4 +515,17 @@ pub struct FindingHit {
     /// has the folded anchors + workspace root); the lexical/semantic finding
     /// search paths leave it `false`.
     pub drifted: bool,
+    /// **Claims only**: the anchored code changed since anyone last read this
+    /// claim against it, so it is being served as fact without current
+    /// evidence.
+    ///
+    /// A separate field from `drifted`, not a reuse of it, because the two mean
+    /// opposite things. A drifted *rule* ("do not do X") almost always still
+    /// holds — the file moving on says nothing about the advice. A drifted
+    /// *claim* ("X is broken", "Y is fixed") may have been made false by that
+    /// very change, and it is still being handed to a consumer as fact. Folding
+    /// them into one flag is what let both motivating incidents through.
+    ///
+    /// Always `false` for rules and for the search paths that do not compute it.
+    pub unverified: bool,
 }

@@ -287,7 +287,9 @@ enum FindingsSub {
     /// Re-confirm / move / drop a finding's anchor (write).
     Touch {
         finding_id: String,
-        /// `attach` (re-confirm), `detach`, or `rename`.
+        /// `attach` (re-confirm), `detach`, `rename`, or a claim verification
+        /// outcome: `verified` (still true), `stale` (no longer true),
+        /// `partial` (true in part). Verification is deliberately NOT `attach`.
         #[arg(long, default_value = "attach")]
         op: String,
         /// The path, for attach/detach.

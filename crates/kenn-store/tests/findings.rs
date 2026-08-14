@@ -420,3 +420,106 @@ async fn a_superseded_finding_is_in_no_health_bucket() {
     assert!(!health.drifted.iter().any(|d| d.finding_id == old));
     assert!(!health.broken.iter().any(|b| b.finding_id == old));
 }
+
+/// Replay of both motivating incidents (claims-decay 6.1).
+///
+/// Each was the same shape: a claim asserting something FIXED, anchored to a
+/// file, and a later change to that file made the claim wrong while it went on
+/// being served as fact. The zero-range-def claim said a placeholder was
+/// leftover debt (it was load-bearing); the get-source claim described a
+/// limitation a rust-analyzer upgrade had removed.
+///
+/// The whole lifecycle, in order, because each step is a place the old design
+/// failed silently.
+#[tokio::test]
+async fn a_fixed_claim_surfaces_when_its_code_changes_and_only_a_read_clears_it() {
+    let dir = TempDir::new().expect("tmp");
+    let ws = dir.path();
+    // `fixed` is the tag both incidents carried.
+    let claim = drifted_finding(ws, &["fixed"], "walk.rs").await;
+
+    let store = FindingsStore::open_default(ws).await.expect("open");
+    let health = store.check_anchors().await.expect("check");
+    assert!(
+        health.unverified.iter().any(|u| u.finding_id == claim),
+        "the moment its code changed, the claim needs re-reading"
+    );
+
+    // The pre-commit ritual attaches to everything the diff touched. This is
+    // the step that used to silently clear the signal — one sweep declaring a
+    // store's worth of claims true without anyone reading one.
+    let abs = ws.join("walk.rs");
+    store
+        .record_anchor_event(
+            &claim,
+            &kenn_store::AnchorEvent::Attach {
+                anchor: "walk.rs".to_owned(),
+                ts: kenn_store::Timestamp::now(),
+                sha: kenn_store::file_content_sha(&abs),
+            },
+        )
+        .await
+        .expect("attach");
+    let health = store.check_anchors().await.expect("check");
+    assert!(
+        health.unverified.iter().any(|u| u.finding_id == claim),
+        "attach records applicability, NOT verification — the mark survives it"
+    );
+
+    // Only reading it clears it.
+    store
+        .record_anchor_event(
+            &claim,
+            &kenn_store::AnchorEvent::Verify {
+                anchor: "walk.rs".to_owned(),
+                ts: kenn_store::Timestamp::now(),
+                sha: kenn_store::file_content_sha(&abs),
+                outcome: kenn_store::Outcome::StillTrue,
+            },
+        )
+        .await
+        .expect("verify");
+    let health = store.check_anchors().await.expect("check");
+    assert!(
+        !health.unverified.iter().any(|u| u.finding_id == claim),
+        "a claim read against the current code is verified"
+    );
+
+    // And the next change to that file puts it back.
+    std::fs::write(&abs, "changed again").expect("edit");
+    let health = store.check_anchors().await.expect("check");
+    assert!(
+        health.unverified.iter().any(|u| u.finding_id == claim),
+        "verification is against a sha, so it expires when the code moves on"
+    );
+}
+
+/// A claim read and found false stays flagged until it is superseded — the
+/// answer "this is wrong" is not a resolved state.
+#[tokio::test]
+async fn a_claim_verified_as_no_longer_true_stays_flagged() {
+    let dir = TempDir::new().expect("tmp");
+    let ws = dir.path();
+    let claim = drifted_finding(ws, &["fixed"], "walk.rs").await;
+    let store = FindingsStore::open_default(ws).await.expect("open");
+    let abs = ws.join("walk.rs");
+
+    store
+        .record_anchor_event(
+            &claim,
+            &kenn_store::AnchorEvent::Verify {
+                anchor: "walk.rs".to_owned(),
+                ts: kenn_store::Timestamp::now(),
+                sha: kenn_store::file_content_sha(&abs),
+                outcome: kenn_store::Outcome::NoLongerTrue,
+            },
+        )
+        .await
+        .expect("verify");
+
+    let health = store.check_anchors().await.expect("check");
+    assert!(
+        health.unverified.iter().any(|u| u.finding_id == claim),
+        "reading it and finding it false does not resolve it — superseding does"
+    );
+}

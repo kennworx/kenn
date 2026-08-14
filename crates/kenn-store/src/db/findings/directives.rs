@@ -189,9 +189,11 @@ pub(super) fn rank_directives(
                 finding,
                 score,
                 stale,
-                // Drift needs file I/O (workspace root + hashing), which this
-                // pure ranking deliberately avoids; the store method fills it in.
+                // Both need file I/O (workspace root + hashing), which this
+                // pure ranking deliberately avoids; the store method fills
+                // them in.
                 drifted: false,
+                unverified: false,
             })
         })
         .collect();
@@ -232,6 +234,9 @@ mod tests {
             recency: ts(recency_secs),
             attach_count: count,
             sha: None,
+            verified_sha: None,
+            verified: None,
+            origin_sha: None,
         }
     }
 

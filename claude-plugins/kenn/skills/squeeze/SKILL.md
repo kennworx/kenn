@@ -13,18 +13,40 @@ retrieves.
 
 Run these steps in order:
 
-**0. Repair moved and drifted anchors.** Run `kenn check findings`. It returns two
+**0. Repair moved and drifted anchors.** Run `kenn check findings`. It returns three
 buckets:
 - **broken** (the anchored path no longer exists): if the diff renamed the file,
   run `kenn findings touch <fnd_id> --op rename --from <old> --to <new>`; if the
   diff deleted it, `kenn findings touch <fnd_id> --op detach --anchor <path>`; if
   unsure, leave it.
-- **drifted** (the file still exists but its content changed since the directive
-  was anchored): re-read the directive against the current file. If it still
-  holds, a confirmed `attach` in step 2 refreshes its sha (clearing the drift);
-  if the change invalidated it, supersede or detach it in step 3. Drift is a
-  signal the directive's ground truth moved — never re-attach blindly to silence
-  it.
+- **drifted** (a *rule* whose anchored file changed): re-read it against the
+  current file. A drifted rule usually still holds — "do not do X" is not made
+  false by the file moving on — so this is normally a quick confirmation, and a
+  confirmed `attach` in step 2 refreshes its sha. If the change genuinely
+  invalidated it, supersede or detach it in step 3. Never re-attach blindly to
+  silence it.
+- **unverified** (a *claim* whose anchored file changed): this is the bucket that
+  needs real work, and it is why the two are separate. A claim asserts something
+  about the code — "X is broken", "Y is fixed", "Z is a gotcha" — and the change
+  that moved the file may be exactly what made it false, while it goes on being
+  served to the next agent as fact. **Re-read the claim against the code and
+  record what you found**, one of:
+  - `kenn findings touch <id> --op verified --anchor <path>` — still true.
+  - `kenn findings touch <id> --op partial --anchor <path>` — true in part. Use
+    this rather than rounding to verified: the motivating incident was a
+    successor asserting a flat FIXED where the fix covered one case, and the
+    residue then read as untouched outstanding work.
+  - `kenn findings touch <id> --op stale --anchor <path>` — no longer true. Then
+    retire it by superseding with a finding describing the current state (step
+    3), never by deleting: the trail is the point.
+
+  **`attach` does not clear an unverified mark**, by construction — it writes a
+  different field. That is deliberate: step 2 attaches in bulk, and if that
+  counted as verification one sweep would declare every claim re-read without
+  anyone reading one.
+
+  Budget your effort accordingly: a drifted rule is usually a glance, an
+  unverified claim is a read.
 
 **1. Pull + guardrail.** Get the staged diff's changed files/dirs
 (`git diff --staged --name-only`). Run `kenn findings directives <paths…>` for

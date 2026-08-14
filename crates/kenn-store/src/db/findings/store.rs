@@ -56,6 +56,34 @@ fn anchor_drifted(source_root: &Path, anchor: &Anchor) -> bool {
     matches!(crate::staleness::file_content_sha(&abs), Some(current) if &current != recorded)
 }
 
+/// Whether a **claim** needs re-reading: has the anchored file changed since
+/// anyone last verified the claim against it?
+///
+/// Compared against the *verification* sha, not the attach sha, and that is
+/// what makes `attach` unable to clear the mark. The pre-commit ritual attaches
+/// in bulk to record "this directive applied to my change"; if that also
+/// refreshed verification, one sweep would declare a store's worth of claims
+/// re-read without anyone having read one — the silent failure this whole
+/// change exists to remove.
+///
+/// A claim never verified is measured against its **origin** sha — the content
+/// it was written about. Not the latest attach: that is what the ritual
+/// refreshes in bulk, and using it would let one sweep clear every claim's mark
+/// without anyone reading one.
+fn claim_unverified(source_root: &Path, anchor: &Anchor) -> bool {
+    let Some(reference) = anchor.verified_sha.as_ref().or(anchor.origin_sha.as_ref()) else {
+        return false;
+    };
+    // A claim read and found no-longer-true stays flagged whatever the sha
+    // says: the answer is known and it is "this is wrong", which is not a
+    // resolved state — it is resolved by superseding.
+    if anchor.verified == Some(super::anchor::Outcome::NoLongerTrue) {
+        return true;
+    }
+    let abs = source_root.join(&anchor.path);
+    matches!(crate::staleness::file_content_sha(&abs), Some(current) if &current != reference)
+}
+
 /// Cosine similarity of two equal-length vectors; `0.0` on a length
 /// mismatch or a zero vector.
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -356,7 +384,17 @@ impl FindingsStore {
             .collect();
         for hit in &mut hits {
             if let Some(anchors) = anchors_by_id.get(hit.finding.id.as_str()) {
-                hit.drifted = anchors.iter().any(|a| anchor_drifted(&self.source_root, a));
+                // A claim answers a different question of the same anchors, so
+                // it gets its own flag rather than sharing `drifted`. A
+                // consumer acting on a claim needs to know whether anyone has
+                // read it against the code as it stands.
+                if super::lifecycle::is_claim(&hit.finding) {
+                    hit.unverified = anchors
+                        .iter()
+                        .any(|a| claim_unverified(&self.source_root, a));
+                } else {
+                    hit.drifted = anchors.iter().any(|a| anchor_drifted(&self.source_root, a));
+                }
             }
         }
         Ok(hits)
@@ -382,11 +420,19 @@ impl FindingsStore {
             if superseded.contains(&finding.id) || tombstoned.contains(&finding.id) {
                 continue;
             }
+            let is_claim = super::lifecycle::is_claim(&finding);
             let mut broken = Vec::new();
             let mut changed = Vec::new();
             for anchor in anchor::fold(&anchor::read_log(&self.records_dir, &finding.id)?) {
                 if self.source_root.join(&anchor.path).exists() {
-                    if anchor_drifted(&self.source_root, &anchor) {
+                    // A claim asks a different question of the same file, so it
+                    // is measured against a different reference point.
+                    let stale = if is_claim {
+                        claim_unverified(&self.source_root, &anchor)
+                    } else {
+                        anchor_drifted(&self.source_root, &anchor)
+                    };
+                    if stale {
                         changed.push(anchor.path);
                     }
                 } else {
@@ -404,7 +450,7 @@ impl FindingsStore {
                 // content means "re-read before relying on it". For a claim it
                 // means the assertion may have stopped being true while still
                 // being served as fact, which is the failure worth a bucket.
-                if super::lifecycle::is_claim(&finding) {
+                if is_claim {
                     health.unverified.push(UnverifiedClaim {
                         finding_id: finding.id,
                         anchors: changed,
@@ -519,6 +565,7 @@ impl FindingsStore {
                 stale,
                 // Lexical finding search has no anchor/workspace context.
                 drifted: false,
+                unverified: false,
             });
         }
         Ok(hits)

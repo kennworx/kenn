@@ -3,11 +3,19 @@
 //! A finding's *anchors* (the files/dirs it applies to) and their liveness are a
 //! per-finding append-only event log, kept separate from the immutable
 //! `<id>.md` record because file/dir paths get moved, renamed, and deleted.
-//! Event kinds are `attach`, `rename`, and `detach`; a repeat `attach` to a path
-//! already in the set is the liveness signal (there is no separate confirm
-//! event). The current anchor set and per-anchor liveness are a fold over the
-//! log. One JSON object per line — appends from two branches union with no
-//! conflict on `git merge`.
+//! Event kinds are `attach`, `rename`, `detach`, and `verify`; a repeat
+//! `attach` to a path already in the set is the liveness signal (there is no
+//! separate confirm event). The current anchor set and per-anchor liveness are
+//! a fold over the log. One JSON object per line — appends from two branches
+//! union with no conflict on `git merge`.
+//!
+//! **`attach` and `verify` are different facts and write different fields.**
+//! `attach` says "this finding applied to my change" and the pre-commit ritual
+//! writes it in bulk; `verify` says "I read this claim against the code at this
+//! sha and here is what I found". Letting the first stand in for the second
+//! would let one sweep declare a store's worth of claims re-read without anyone
+//! having read one — so the fold keeps two shas, and no `attach` can touch the
+//! verification one.
 //!
 //! The fold reports each current anchor's `recency` (latest `attach` ts) and
 //! `attach_count`. The recency-*weighting* (decay by the current clock) is
@@ -50,6 +58,38 @@ pub enum AnchorEvent {
     },
     /// The finding no longer applies to `anchor`.
     Detach { anchor: String, ts: Timestamp },
+    /// Someone read the claim against the code at `sha` and reports what they
+    /// found.
+    ///
+    /// Deliberately NOT `Attach`. `Attach` means "this applied to my change"
+    /// and is written in bulk by the pre-commit ritual; if it doubled as
+    /// verification, one sweep would declare a store's worth of claims true
+    /// without anyone having read one. Carrying its own sha is what makes that
+    /// impossible rather than merely discouraged.
+    Verify {
+        anchor: String,
+        ts: Timestamp,
+        /// The content the claim was judged against.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha: Option<String>,
+        outcome: Outcome,
+    },
+}
+
+/// What reading a claim against the current code found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// Still true as written.
+    StillTrue,
+    /// No longer true. Recorded for the trail; the claim is retired by
+    /// superseding it with one describing the current state, not by deleting.
+    NoLongerTrue,
+    /// True in part. A distinct outcome because the motivating incident was a
+    /// successor asserting a flat FIXED where the fix covered one case and left
+    /// a residue — which then read as untouched outstanding work, and acting on
+    /// that reading removed a load-bearing placeholder.
+    PartlyTrue,
 }
 
 /// A current anchor with its folded liveness facts.
@@ -66,6 +106,24 @@ pub struct Anchor {
     /// `rename`. `None` when unknown (directory anchor, unreadable path, or a
     /// log predating shas) — drift detection treats `None` as live.
     pub sha: Option<String>,
+    /// The content sha the claim was last *verified* against, from a `Verify`
+    /// event. Separate from `sha` on purpose: an `attach` refreshes liveness
+    /// and must not refresh this, or the pre-commit sweep would silently mark
+    /// every claim it touched as re-read.
+    pub verified_sha: Option<String>,
+    /// What that verification found. `None` when the anchor has never been
+    /// verified.
+    pub verified: Option<Outcome>,
+    /// The content sha at the **first** attach — what the finding was written
+    /// against.
+    ///
+    /// First, not latest, and that distinction is load-bearing. A claim that
+    /// has never been verified is measured against the content it was made
+    /// about; if this followed the latest attach instead, the pre-commit
+    /// ritual's bulk attach would move the reference to the current file and
+    /// silently clear the claim's unverified mark — which is the failure the
+    /// separate `Verify` event exists to prevent.
+    pub origin_sha: Option<String>,
 }
 
 /// A finding's anchor-log path: `<dir>/<id>.anchor.jsonl`.
@@ -128,31 +186,52 @@ pub(super) fn read_log(dir: &Path, finding_id: &str) -> Result<Vec<AnchorEvent>,
 #[must_use]
 pub(super) fn fold(events: &[AnchorEvent]) -> Vec<Anchor> {
     use std::collections::BTreeMap;
-    // path -> (recency = max attach ts, attach_count, most-recent-attach sha)
-    let mut set: BTreeMap<String, (Timestamp, u32, Option<String>)> = BTreeMap::new();
+    // path -> (recency = max attach ts, attach_count, most-recent-attach sha,
+    //          last-verify sha, last-verify outcome)
+    type Fold = (
+        Timestamp,
+        u32,
+        Option<String>,
+        Option<String>,
+        Option<Outcome>,
+        Option<String>,
+    );
+    let mut set: BTreeMap<String, Fold> = BTreeMap::new();
     for ev in events {
         match ev {
             AnchorEvent::Attach { anchor, ts, sha } => {
-                let entry = set.entry(anchor.clone()).or_insert((*ts, 0, None));
+                let entry = set
+                    .entry(anchor.clone())
+                    .or_insert((*ts, 0, None, None, None, None));
                 // Recency is a max over ts, so the sha of the latest attach wins.
                 if *ts >= entry.0 {
                     entry.2.clone_from(sha);
                 }
                 entry.0 = entry.0.max(*ts);
                 entry.1 = entry.1.saturating_add(1);
+                // First attach only: the content the finding was written
+                // against. A later attach must not move it.
+                if entry.5.is_none() {
+                    entry.5.clone_from(sha);
+                }
             }
             AnchorEvent::Rename { from, to, .. } => {
-                if let Some((rec, cnt, sha)) = set.remove(from) {
+                if let Some((rec, cnt, sha, vsha, vout, osha)) = set.remove(from) {
                     match set.get_mut(to) {
                         Some(existing) => {
                             if rec >= existing.0 {
                                 existing.2 = sha;
+                                // Verification travels with the content, like
+                                // liveness: a moved file was not re-read.
+                                existing.3 = vsha;
+                                existing.4 = vout;
+                                existing.5 = osha;
                             }
                             existing.0 = existing.0.max(rec);
                             existing.1 = existing.1.saturating_add(cnt);
                         }
                         None => {
-                            set.insert(to.clone(), (rec, cnt, sha));
+                            set.insert(to.clone(), (rec, cnt, sha, vsha, vout, osha));
                         }
                     }
                 }
@@ -160,15 +239,36 @@ pub(super) fn fold(events: &[AnchorEvent]) -> Vec<Anchor> {
             AnchorEvent::Detach { anchor, .. } => {
                 set.remove(anchor);
             }
+            AnchorEvent::Verify {
+                anchor,
+                ts,
+                sha,
+                outcome,
+            } => {
+                // Records the verification WITHOUT touching `sha` (field 2).
+                // That separation is the whole point: an attach refreshes
+                // liveness, a verify refreshes verification, and neither stands
+                // in for the other.
+                let entry = set
+                    .entry(anchor.clone())
+                    .or_insert((*ts, 0, None, None, None, None));
+                entry.3.clone_from(sha);
+                entry.4 = Some(*outcome);
+            }
         }
     }
     set.into_iter()
-        .map(|(path, (recency, attach_count, sha))| Anchor {
-            path,
-            recency,
-            attach_count,
-            sha,
-        })
+        .map(
+            |(path, (recency, attach_count, sha, verified_sha, verified, origin_sha))| Anchor {
+                path,
+                recency,
+                attach_count,
+                sha,
+                verified_sha,
+                verified,
+                origin_sha,
+            },
+        )
         .collect()
 }
 
@@ -205,7 +305,7 @@ mod tests {
     use crate::clock::Timestamp;
 
     /// A `Timestamp` at `secs` Unix seconds (test fixture).
-    fn ts(secs: i64) -> Timestamp {
+    pub(super) fn ts(secs: i64) -> Timestamp {
         time::OffsetDateTime::from_unix_timestamp(secs)
             .unwrap()
             .into()
@@ -243,12 +343,18 @@ mod tests {
                     recency: ts(200),
                     attach_count: 2,
                     sha: None,
+                    verified_sha: None,
+                    verified: None,
+                    origin_sha: None,
                 },
                 Anchor {
                     path: "c/".to_owned(),
                     recency: ts(150),
                     attach_count: 1,
                     sha: None,
+                    verified_sha: None,
+                    verified: None,
+                    origin_sha: None,
                 },
             ]
         );
@@ -277,6 +383,9 @@ mod tests {
                 recency: ts(100),
                 attach_count: 1,
                 sha: None,
+                verified_sha: None,
+                verified: None,
+                origin_sha: None,
             }]
         );
     }
@@ -362,5 +471,105 @@ mod tests {
             .unwrap();
         let events = read_log(dir.path(), "fnd_a").unwrap();
         assert_eq!(events, vec![attach("f.rs", 100)]);
+    }
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::{fold, Anchor, AnchorEvent, Outcome};
+
+    fn attach_sha(path: &str, ts: i64, sha: &str) -> AnchorEvent {
+        AnchorEvent::Attach {
+            anchor: path.to_owned(),
+            ts: super::tests::ts(ts),
+            sha: Some(sha.to_owned()),
+        }
+    }
+
+    fn verify(path: &str, ts: i64, sha: &str, outcome: Outcome) -> AnchorEvent {
+        AnchorEvent::Verify {
+            anchor: path.to_owned(),
+            ts: super::tests::ts(ts),
+            sha: Some(sha.to_owned()),
+            outcome,
+        }
+    }
+
+    fn only(anchors: Vec<Anchor>) -> Anchor {
+        assert_eq!(anchors.len(), 1, "one anchor");
+        anchors.into_iter().next().expect("one")
+    }
+
+    #[test]
+    fn an_attach_does_not_record_a_verification() {
+        // The rule this whole change exists for, made structural: `attach` and
+        // `verify` write different fields, so no amount of attaching can
+        // declare a claim read. The pre-commit ritual attaches in bulk.
+        let a = only(fold(&[attach_sha("f.rs", 100, "aaa")]));
+        assert_eq!(a.sha.as_deref(), Some("aaa"), "liveness recorded");
+        assert_eq!(a.verified_sha, None, "but nothing was verified");
+        assert_eq!(a.verified, None);
+    }
+
+    #[test]
+    fn a_later_attach_does_not_move_the_verification_point() {
+        // The failure mode in full: verify at one sha, the file changes, the
+        // ritual re-attaches. The claim must still count as unverified against
+        // the NEW content, so the verification sha must not follow the attach.
+        let a = only(fold(&[
+            attach_sha("f.rs", 100, "aaa"),
+            verify("f.rs", 110, "aaa", Outcome::StillTrue),
+            attach_sha("f.rs", 200, "bbb"),
+        ]));
+        assert_eq!(a.sha.as_deref(), Some("bbb"), "liveness followed the file");
+        assert_eq!(
+            a.verified_sha.as_deref(),
+            Some("aaa"),
+            "verification stayed where someone actually read it"
+        );
+    }
+
+    #[test]
+    fn the_latest_verification_wins_and_carries_its_outcome() {
+        let a = only(fold(&[
+            attach_sha("f.rs", 100, "aaa"),
+            verify("f.rs", 110, "aaa", Outcome::StillTrue),
+            verify("f.rs", 200, "bbb", Outcome::PartlyTrue),
+        ]));
+        assert_eq!(a.verified_sha.as_deref(), Some("bbb"));
+        assert_eq!(a.verified, Some(Outcome::PartlyTrue));
+    }
+
+    #[test]
+    fn a_rename_carries_verification_with_the_content() {
+        // A moved file was not re-read, so its verification travels with it —
+        // dropping it would report every renamed claim as freshly unverified.
+        let a = only(fold(&[
+            attach_sha("old.rs", 100, "aaa"),
+            verify("old.rs", 110, "aaa", Outcome::StillTrue),
+            AnchorEvent::Rename {
+                from: "old.rs".into(),
+                to: "new.rs".into(),
+                ts: super::tests::ts(120),
+            },
+        ]));
+        assert_eq!(a.path, "new.rs");
+        assert_eq!(a.verified_sha.as_deref(), Some("aaa"));
+        assert_eq!(a.verified, Some(Outcome::StillTrue));
+    }
+
+    #[test]
+    fn every_outcome_round_trips_through_the_log_format() {
+        for o in [
+            Outcome::StillTrue,
+            Outcome::NoLongerTrue,
+            Outcome::PartlyTrue,
+        ] {
+            let ev = verify("f.rs", 1, "aaa", o);
+            let line = serde_json::to_string(&ev).expect("serialize");
+            assert!(line.contains("\"op\":\"verify\""), "{line}");
+            let back: AnchorEvent = serde_json::from_str(&line).expect("round trip");
+            assert_eq!(back, ev);
+        }
     }
 }

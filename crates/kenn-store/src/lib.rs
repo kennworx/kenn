@@ -41,7 +41,7 @@ pub use clock::Timestamp;
 pub use db::{
     embed_pending, finding_is_stale, read_embed_error, reembed, stage_findings_for_publish, Anchor,
     AnchorEvent, AnchorHealth, BrokenAnchors, CodeGraphNodeResolver, CodeNodeResolver, DbConn,
-    DbReader, DbWriter, DriftedAnchors, FindingsStore, ReembedReport, UnverifiedClaim,
+    DbReader, DbWriter, DriftedAnchors, FindingsStore, Outcome, ReembedReport, UnverifiedClaim,
 };
 pub use embed::sidecar::{
     code_generation_dir, current_model_id, findings_generation_dir, gc_vector_cache,

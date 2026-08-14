@@ -2,7 +2,7 @@
 //! `check_anchors` (report unresolved anchors), and `record_anchor`
 //! (append an `attach` / `rename` / `detach` event to a finding's anchor log).
 
-use kenn_store::{AnchorEvent, Timestamp};
+use kenn_store::{AnchorEvent, Outcome, Timestamp};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -220,10 +220,32 @@ pub async fn record_anchor(
             to: need("to", &args.to)?,
             ts,
         },
+        // Verification outcomes. Separate ops from `attach` on purpose: `attach`
+        // says "this applied to my change" and the pre-commit ritual writes it
+        // in bulk, so letting it double as verification would declare a store's
+        // worth of claims re-read without anyone reading one.
+        "verified" | "stale" | "partial" => {
+            let anchor = need("anchor", &args.anchor)?;
+            let sha = kenn_store::file_content_sha(&state.source_root().join(&anchor));
+            let outcome = match args.op.as_str() {
+                "verified" => Outcome::StillTrue,
+                "stale" => Outcome::NoLongerTrue,
+                _ => Outcome::PartlyTrue,
+            };
+            AnchorEvent::Verify {
+                anchor,
+                ts,
+                sha,
+                outcome,
+            }
+        }
         other => {
             return Err(McpError::new(
                 McpErrorCode::InvalidInput,
-                format!("record_anchor: unknown op `{other}` (attach|rename|detach)"),
+                format!(
+                    "record_anchor: unknown op `{other}` \
+                     (attach|rename|detach|verified|stale|partial)"
+                ),
             ))
         }
     };

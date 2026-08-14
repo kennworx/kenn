@@ -29,7 +29,7 @@ mod lifecycle;
 mod record;
 mod store;
 
-pub use anchor::{Anchor, AnchorEvent};
+pub use anchor::{Anchor, AnchorEvent, Outcome};
 pub use build::acquire_findings_publish_lock;
 pub use directives::{AnchorHealth, BrokenAnchors, DriftedAnchors, UnverifiedClaim};
 pub(crate) use embed::embed_findings;
