@@ -549,3 +549,124 @@ fn naming_a_table_returns_its_reference_sites() {
         "naming it returns its sites, with what each does: {named}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Render caps vs. the query
+// ---------------------------------------------------------------------------
+
+/// A workspace wide enough for the producer's render caps to bite: more tables
+/// than `MAX_TABLES` (40), one table named from more files than
+/// `MAX_TABLE_FILES` (12), and one file naming it more times than
+/// `MAX_REFS_PER_FILE` (6).
+///
+/// The width IS the test. A cap can only be shown *not* to bound the query on
+/// input that would trip it — against the single-table fixture above, moving
+/// every cap into the query changes nothing and the check passes for a reason
+/// unrelated to the rule it names.
+///
+/// `t45` is last alphabetically and first by breadth on purpose, so a ranking
+/// that quietly fell back to name order reads as visibly wrong rather than
+/// accidentally right.
+fn wide_table_workspace() -> TempDir {
+    use std::fmt::Write as _;
+
+    let dir = TempDir::new().expect("temp workspace");
+    let at = |name: &str| dir.path().join(name);
+
+    std::fs::write(at("README.md"), "# db\n").expect("write README.md");
+
+    let schema = (1..=45).fold(String::new(), |mut s, i| {
+        writeln!(s, "CREATE TABLE t{i:02} (id INT);").expect("writing to a String is infallible");
+        s
+    });
+    std::fs::write(at("schema.sql"), schema).expect("write schema.sql");
+
+    // One file naming `t45` eight times, past MAX_REFS_PER_FILE. `t44` gets a
+    // single second file so the runner-up has real breadth to be ranked on.
+    let mut queries = "SELECT id FROM t44;\n".to_owned();
+    queries.push_str(&"SELECT id FROM t45;\n".repeat(8));
+    std::fs::write(at("queries.sql"), queries).expect("write queries.sql");
+
+    // Thirteen more files naming `t45`, past MAX_TABLE_FILES.
+    for i in 0..13 {
+        std::fs::write(at(&format!("q{i:02}.sql")), "SELECT id FROM t45;\n")
+            .expect("write a q*.sql fixture file");
+    }
+
+    ci(dir.path(), &["init"]).success();
+    // The template ships `[language.sql]` opt-in and off; appending a second
+    // section is a duplicate-key parse error, so flip the flag in place.
+    let text = std::fs::read_to_string(at("kenn.toml"))
+        .expect("read generated config")
+        .replacen(
+            "[language.sql]\nenabled = false",
+            "[language.sql]\nenabled = true",
+            1,
+        );
+    assert!(
+        text.contains("[language.sql]\nenabled = true"),
+        "SQL flag flipped"
+    );
+    std::fs::write(at("kenn.toml"), text).expect("write kenn.toml");
+    ci(dir.path(), &["index", "--force"]).success();
+    dir
+}
+
+fn axis_items(dir: &Path, args: &[&str]) -> Vec<serde_json::Value> {
+    let out = ci(dir, args).success().get_output().clone();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("axis query prints valid JSON");
+    v.get("items")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// A render cap is presentation policy: the producer truncates so a document
+/// stays readable, and the query must still reach every table and every site.
+/// A capped query would answer "what touches this" with a silent subset, which
+/// reads exactly like a complete answer.
+#[test]
+fn the_render_caps_do_not_bound_the_query() {
+    let dir = wide_table_workspace();
+
+    let all = axis_items(dir.path(), &["tables", "--all", "--json"]);
+    assert_eq!(all.len(), 45, "every table, past MAX_TABLES = 40");
+
+    let named = axis_items(dir.path(), &["tables", "t45", "--json"]);
+    assert_eq!(named.len(), 1, "one table matched: {named:?}");
+    let t = &named[0];
+    assert_eq!(t["file_span"], 15, "past MAX_TABLE_FILES = 12");
+    assert_eq!(t["references"], 22, "one declare + eight + thirteen");
+    assert_eq!(
+        t["sites"].as_array().unwrap().len(),
+        22,
+        "every site, past MAX_REFS_PER_FILE = 6 in queries.sql"
+    );
+}
+
+/// One selection serves the atlas and the query: the query projects store rows
+/// and hands them to `atlas::tables::select_tables`. It must not re-rank
+/// afterwards, or the document and the prompt disagree about which table is
+/// central.
+#[test]
+fn the_query_ranks_by_reference_breadth_not_by_name() {
+    let dir = wide_table_workspace();
+    let names: Vec<String> = axis_items(dir.path(), &["tables", "--all", "--json"])
+        .iter()
+        .map(|t| t["name"].as_str().expect("table name").to_owned())
+        .collect();
+
+    assert_eq!(
+        names[0], "t45",
+        "15 files — widest, and last alphabetically"
+    );
+    assert_eq!(names[1], "t44", "2 files — the runner-up");
+
+    let mut alphabetical = names.clone();
+    alphabetical.sort();
+    assert_ne!(
+        names, alphabetical,
+        "breadth order, not name order — the fixture is built so the two differ"
+    );
+}

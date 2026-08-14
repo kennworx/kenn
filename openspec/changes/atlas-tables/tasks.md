@@ -60,7 +60,13 @@
   query agree on identities, ownership, and ordering for one snapshot (spec scenario);
   a workspace with more tables than the render cap still reaches every table by query.
 - [ ] 3.5 Expose the axis through the MCP surface alongside the other axes. → verify:
-  the tool returns the same rows as the CLI for one snapshot.
+  the tool returns the same rows as the CLI for one snapshot. **Deferred to
+  `split-query-from-mcp` §6.1, with the reason corrected.** The blocker was never this
+  axis: NO atlas axis is registered as an MCP tool, though `list_packages`,
+  `list_domains`, `list_contracts`, and `list_tables` all exist in `kenn-mcp/src/tools/`
+  and are proven by their CLI verbs. Registering tables alone would put it where no
+  sibling lives; registering all four is a decision about the MCP surface, which that
+  change makes cheap by turning a query into a pure function over a snapshot.
 
 ## 4. Verification
 
@@ -69,14 +75,28 @@
   referenced from more than one file lists all of them.
 - [x] 4.2 Mutation-check the no-floor rule (§9): impose a two-file minimum, confirm the
   single-reference test goes red, restore. → verify: red on mutation, green after.
-- [ ] 4.3 Mutation-check the cap/query separation: let the render cap bound the query,
+- [x] 4.3 Mutation-check the cap/query separation: let the render cap bound the query,
   confirm the reachability test goes red, restore. → verify: red on mutation, green
-  after.
-- [ ] 4.4 Mutation-check the single-implementation rule: give the query its own ranking
+  after. **The fixture was the work.** Against the single-table workspace next door
+  every cap mutation passes, because one table and two references never reach a cap —
+  the check would have guarded nothing while reading as a pass (§9: suspect the fixture
+  before the test). `wide_table_workspace` is built past all three: 45 tables >
+  `MAX_TABLES` 40, `t45` named from 15 files > `MAX_TABLE_FILES` 12, and 8 of those
+  references in one file > `MAX_REFS_PER_FILE` 6. `take(40)` in the query → 40 against
+  45, red. `take(12)`/`take(6)` on the sites → 17 against 22, red. Pre-cap `file_span`
+  and `references` stayed correct under both, which is the point: a truncated list with
+  honest totals is what reads as complete.
+- [x] 4.4 Mutation-check the single-implementation rule: give the query its own ranking
   copy, confirm the producer/query agreement test goes red, restore. → verify: red on
-  mutation, green after.
-- [ ] 4.5 `cargo clippy --workspace --all-targets` clean, `just crap-ci` green, then
-  `cargo fmt --all`, then clippy once more (§7 ordering).
+  mutation, green after. Sorting the query's items by name → `t01` where breadth ranks
+  `t45`, red. This one is only a guard because `t45` is LAST alphabetically and FIRST by
+  breadth: had the widest table been `t01`, the mutation would have produced the right
+  answer for the wrong reason and survived.
+- [x] 4.5 `cargo clippy --workspace --all-targets` clean, `just crap-ci` green, then
+  `cargo fmt --all`, then clippy once more (§7 ordering). All four green; `just test` 60
+  suites, 0 failures. The new fixture helpers are not `#[test]` fns, so
+  `allow-unwrap-in-tests` does not cover them — `unwrap`/`panic`/`format_collect` all
+  fired and were fixed rather than allowed.
 
 ## What landed, and what did not
 
@@ -139,10 +159,18 @@ already collapsed the referencing file, which is the axis's answer.
 
 **NOT done — 3.5, MCP exposure, and its premise is wrong.** The task says
 "alongside the other axes", but **no atlas axis is on the MCP surface**: not
-packages, domains, contracts, or documents. They are all CLI-only, and the MCP
-tools are symbol-level. Registering tables alone would put it somewhere no
-sibling axis lives. Either every axis goes onto MCP or none does, and that is a
-decision about the MCP surface rather than about this axis.
+packages, domains, contracts, or documents. They are all CLI-only, and the 35
+registered tools are symbol-level. Registering tables alone would put it
+somewhere no sibling axis lives. Either every axis goes onto MCP or none does,
+and that is a decision about the MCP surface rather than about this axis.
+
+Revisited: the four axis *tools* already exist — `list_packages`,
+`list_domains`, `list_contracts`, `list_tables` all live in
+`kenn-mcp/src/tools/`, return `ListResponse<T>` over `JsonSchema` args, and are
+exercised daily by their CLI verbs. Only the `#[tool]` wrapper is missing. What
+made that feel like a layering question is that the crate holding them is 87%
+not MCP, which is what `split-query-from-mcp` addresses; 3.5 moves there as
+§6.1.
 
 **Gate.** The new arm pushed the CLI router over threshold, and splitting it by
 category made things *worse*: the extracted `dispatch_axis` came out at 0%
@@ -154,7 +182,29 @@ arms — no test had ever run an axis command. Fixed by covering them:
 That test also caught a self-inflicted break: the `kenn init` template now ships
 a `[language.sql]` section, so appending one is a duplicate-key parse error.
 
-**NOT done — 4.3, 4.4.** The cap/query separation and single-implementation rules
-hold by construction (the query never applies a cap, and it calls
-`atlas::tables::select_tables`), but neither is pinned by a test that would go
-red, so neither is claimed.
+**Done — 4.3, 4.4, and the fixture was the whole difficulty.** Both rules held by
+construction, but "holds by construction" is what every surviving mutation says
+about itself. Pinning them needed a workspace wide enough for a cap to bite: the
+single-table fixture the axis shipped with cannot fail a cap check, because one
+table and two references never reach `MAX_TABLES` 40, `MAX_TABLE_FILES` 12, or
+`MAX_REFS_PER_FILE` 6. Every mutation would have passed, and the pass would have
+been meaningless.
+
+`wide_table_workspace` is built past all three — 45 tables, one named from 15
+files, 8 of those references in a single file — and one detail in it is
+load-bearing: `t45` is last alphabetically and first by breadth. Rank the query
+by name instead of by the shared selection and it answers `t01`; had the widest
+table been `t01`, the same mutation would have produced the right answer for the
+wrong reason and survived silently.
+
+Three mutations, three reds, each for its stated reason:
+
+| mutation | got | wanted |
+|---|---|---|
+| `take(40)` on the query's table list | 40 | 45 |
+| `take(12)` files / `take(6)` sites | 17 | 22 |
+| query re-sorts by name | `t01` | `t45` |
+
+Under the cap mutations `file_span` and `references` stayed correct at 15 and 22
+— the totals are pre-cap by construction. That is exactly the failure worth
+guarding: a truncated list under an honest total is what reads as complete.
