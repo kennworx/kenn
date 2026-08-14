@@ -48,12 +48,41 @@ pub struct DriftedAnchors {
     pub anchors: Vec<String>,
 }
 
-/// The two read-time anchor-health buckets `check_anchors` reports: paths that
-/// no longer resolve (`broken`) and files whose content changed (`drifted`).
+/// A **claim** — a finding asserting something about the current state of the
+/// code — whose anchored content has changed since the claim was recorded, so
+/// the assertion may no longer be true.
+///
+/// Reported separately from [`DriftedAnchors`] because the two ask different
+/// questions. Drift asks whether bytes moved, which for a rule is incidental.
+/// This asks whether an assertion still holds, which is the only question a
+/// claim raises — and merging them is what leaves the signal unread: on this
+/// repository the drift list ran to 127 entries, where a claim that had stopped
+/// being true was indistinguishable from a rule whose file was merely touched.
+///
+/// This says nothing about whether the claim still holds. The store cannot know
+/// whether the change fixed it, worsened it, or missed it — asserting any of
+/// those would replace one stale fact with another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnverifiedClaim {
+    /// The claim whose anchored content changed.
+    pub finding_id: String,
+    /// The anchor file paths whose content changed since the claim was recorded.
+    pub anchors: Vec<String>,
+}
+
+/// The read-time anchor-health buckets `check_anchors` reports: paths that no
+/// longer resolve (`broken`), rule files whose content changed (`drifted`), and
+/// claims whose content changed and therefore need re-verifying (`unverified`).
+///
+/// Superseded and tombstoned findings appear in none of them. They are already
+/// excluded from retrieval, so they can never surface as guidance and repairing
+/// their anchors is busywork — measured here, 26 of 127 drifted entries were
+/// superseded ancestors, a fifth of the list that trains a reader to skim it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AnchorHealth {
     pub broken: Vec<BrokenAnchors>,
     pub drifted: Vec<DriftedAnchors>,
+    pub unverified: Vec<UnverifiedClaim>,
 }
 
 /// One candidate directive/guide finding plus the inputs the ranking needs.

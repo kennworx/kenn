@@ -16,14 +16,15 @@ mod resolve;
 mod walk;
 
 pub use code_resolve::{
-    resolve_code_link, resolve_file_ref, CodeCandidate, CodeLookup, CodeTarget, StoreCodeLookup,
+    is_code_path, resolve_code_link, resolve_file_ref, CodeCandidate, CodeLookup, CodeTarget,
+    StoreCodeLookup,
 };
 pub use collect::{collect, CollectedFile, Frontmatter, HeadingSlug, RelatedLink};
 pub use discover::{discover_markdown, DiscoveredMarkdown, MarkdownDiscoverError};
 pub use index::{NodeRef, ResolutionIndex};
 pub use ingest::{
-    ingest_markdown_phase1, resolve_markdown_code, MarkdownCounts, MarkdownIngestError,
-    MarkdownPending,
+    existing_target_kind, ingest_markdown_phase1, resolve_markdown_code, FsPaths, MarkdownCounts,
+    MarkdownIngestError, MarkdownPending,
 };
 pub use links::{extract_links, LinkKind, RawLink};
 pub use resolve::{resolve_link, LinkTarget};

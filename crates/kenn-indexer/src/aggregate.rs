@@ -1223,3 +1223,60 @@ mod tests {
         assert!(a1[&2].0 < a1[&3].0);
     }
 }
+
+#[cfg(test)]
+mod xml_rollup_tests {
+    use super::compute_aggregate_ids;
+    use kenn_model::{Kind, Language, ShortId, SymbolRecord};
+    use std::collections::HashMap;
+
+    fn el(id: ShortId, kind: Kind, enclosing: ShortId) -> SymbolRecord {
+        SymbolRecord {
+            id,
+            pub_id: format!("xml:doc#e{id}"),
+            language: Language::Xml,
+            pkg_id: 0,
+            kind,
+            name: format!("e{id}"),
+            enclosing_sym_id: enclosing,
+            partial: false,
+            nargs: 0,
+            targs: 0,
+            external: false,
+            test: false,
+        }
+    }
+
+    #[test]
+    fn nested_elements_all_roll_up_to_their_document() {
+        // The collapse that keeps a numerically dominant document language from
+        // distorting the atlas: measured on a real repository, 30410 elements
+        // across 485 files become 483 aggregates, 63:1.
+        //
+        // It works because `XmlElement` is not an aggregate leaf, so an element
+        // walks its enclosing chain until it reaches one — and the chain is
+        // rooted at the `Document`. If an element ever became a leaf, or the
+        // chain stopped terminating there, every element would become its own
+        // aggregate and the atlas would be all XML.
+        let doc: ShortId = 1;
+        let symbols: HashMap<ShortId, SymbolRecord> = [
+            el(doc, Kind::Document, 0),
+            el(2, Kind::XmlElement, doc), // root
+            el(3, Kind::XmlElement, 2),   // child
+            el(4, Kind::XmlElement, 3),   // grandchild
+        ]
+        .into_iter()
+        .map(|s| (s.id, s))
+        .collect();
+
+        let agg = compute_aggregate_ids(&symbols);
+        for id in [2, 3, 4] {
+            assert_eq!(
+                agg.get(&id),
+                Some(&doc),
+                "element {id} must aggregate to its document, not to itself"
+            );
+        }
+        assert_eq!(agg.get(&doc), Some(&doc), "the document is its own leaf");
+    }
+}

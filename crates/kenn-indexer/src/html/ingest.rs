@@ -30,11 +30,12 @@ use super::classes::{class_usage_edges, ClassRegistry};
 use super::discover::{discover_html, HtmlDiscoverError};
 use super::ids::{correspondence_edges, html_id_nodes, CssIdLookup, HtmlIdIndex};
 use super::links::{
-    anchor_link_edges, asset_link_edges, import_edges, AssetIndex, FragmentIndex, HtmlIds, StubSink,
+    anchor_link_edges, asset_link_edges, import_edges, FragmentIndex, HtmlIds, StubSink,
 };
 use super::parse::{parse_elements, style_blocks, Element};
 use super::styles::inline_style_nodes;
 use crate::markdown::StoreCodeLookup;
+use crate::relpath::FsPaths;
 use crate::sink::BatchSink;
 
 #[derive(Debug, thiserror::Error)]
@@ -212,7 +213,7 @@ pub fn resolve_html(
     let files = StoreCodeLookup { reader, handle };
     let css_ids = StoreCssIdLookup { reader, handle };
     let registry = StoreClassRegistry { reader, handle };
-    let assets = FsAssets { workspace_root };
+    let assets = FsPaths { workspace_root };
     // The corpus-wide fragment-anchor set (`href="#frag"` resolves against it).
     let frags = FragmentIndex::new(
         pending
@@ -328,20 +329,6 @@ impl ClassRegistry for StoreClassRegistry<'_> {
             .filter(|h| h.qualified.contains("#class:"))
             .map(|h| h.id)
             .collect()
-    }
-}
-
-/// [`AssetIndex`] over the filesystem: an asset exists when its canonical
-/// workspace-relative path is a file on disk (design: back the asset check with a
-/// real `exists`, so existing assets key by canonical path and missing ones
-/// dangle).
-struct FsAssets<'a> {
-    workspace_root: &'a std::path::Path,
-}
-
-impl AssetIndex for FsAssets<'_> {
-    fn exists(&self, canonical_path: &str) -> bool {
-        !canonical_path.is_empty() && self.workspace_root.join(canonical_path).is_file()
     }
 }
 

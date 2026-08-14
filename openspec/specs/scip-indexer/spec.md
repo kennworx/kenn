@@ -272,16 +272,15 @@ For C# (`scip-dotnet`), the indexer driver SHALL document and (optionally) provi
 
 ### Requirement: Run report
 
-Each indexer run SHALL produce a structured run report containing:
-indexer name and version, indexable unit identifier, start/end
-timestamps, total documents/symbols/occurrences/edges produced,
+The system MUST persist a per-run report containing counts of
+documents, symbols, occurrences, and relationships processed, a
 list of failed projects with diagnostics, and a status field of
 `success | partial | failed`. The report MUST be persisted
 alongside the produced data-model records.
 
 The `documents` count SHALL equal the number of distinct source
 file paths the indexer visited in this run — not zero, not the
-number of `FileRecord` rows emitted to the `files` Lance dataset.
+number of `FileRecord` rows emitted to the `files` table.
 A path that appears in multiple SCIP `Document` messages (e.g. one
 per project in a multi-csproj solution) MUST be counted exactly
 once.
@@ -306,7 +305,7 @@ once.
 - **WHEN** the SCIP stream contains two `Document` messages with
   the same `relative_path` (e.g. the same file emitted from two
   csproj projects)
-- **THEN** the `files` Lance dataset MUST contain exactly one
+- **THEN** the `files` table MUST contain exactly one
   `FileRecord` for that path (existing intern-dedup behaviour
   preserved)
 - **AND** `meta.json["documents"]` MUST count that path once,

@@ -161,6 +161,14 @@ pub async fn list_usages(
             EdgeKind::TypeUse,
             EdgeKind::FieldAccess,
             EdgeKind::Instantiates,
+            // Table references. Inbound-only by nature — nothing points AT a
+            // function with one — so for a code symbol these contribute
+            // nothing, and for a table node they are the entire answer. Left
+            // out, `list usages` on a table returns empty while the graph holds
+            // the edges, which reads as "no code touches this".
+            EdgeKind::DefinesTable,
+            EdgeKind::AltersTable,
+            EdgeKind::AccessesTable,
         ]
     });
     let mut all_items: Vec<SymbolRef> = Vec::new();

@@ -24,8 +24,8 @@ use kenn_model::{
 use crate::api::types::{
     AggregateEdgeRow, AggregateNodeRow, AnalysisAnchoredCommunityRow, AnalysisFlatCommunityRow,
     AnalysisGodNodeRow, AnalysisNodeMembershipRow, BlendedHit, BlendedSymbolRow, DbError,
-    DefLineRow, DefRow, FileRow, FoundSymbolRow, PackageRow, RankedSymbolRow, SymbolDocsRow,
-    SymbolRow, WriterOptions,
+    DefLineRow, DefRow, FileRow, FoundSymbolRow, PackageRow, RankedSymbolRow, SymbolBodyRow,
+    SymbolDocsRow, SymbolRow, SymbolSurfaceRow, WriterOptions,
 };
 use crate::api::{Reader, RowNarrow, WriteBatch};
 use kenn_model::ShortId;
@@ -288,6 +288,12 @@ impl Reader for DbReader {
     }
     async fn scan_def_files(&self) -> Result<Vec<(ShortId, ShortId)>, DbError> {
         Reader::scan_def_files(&self.0).await
+    }
+    async fn scan_symbol_bodies(&self) -> Result<Vec<SymbolBodyRow>, DbError> {
+        Reader::scan_symbol_bodies(&self.0).await
+    }
+    async fn scan_symbol_surfaces(&self, language: &str) -> Result<Vec<SymbolSurfaceRow>, DbError> {
+        Reader::scan_symbol_surfaces(&self.0, language).await
     }
     async fn scan_file_docs(&self) -> Result<Vec<(ShortId, String)>, DbError> {
         Reader::scan_file_docs(&self.0).await

@@ -1,2 +1,3 @@
 {"op":"attach","anchor":"crates/kenn-indexer/src/pubid.rs","ts":"2026-07-16T13:34:53.792414Z","sha":"62c4edb1cd4527d8"}
 {"op":"attach","anchor":"indexers/kenn-dotnet/src/Indexing/IndexerCore.cs","ts":"2026-07-16T13:34:53.792414Z","sha":"b4f7938683c62b97"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/xml/ingest.rs","ts":"2026-08-13T13:03:52.094561Z","sha":"ab9413aec0f219d9"}

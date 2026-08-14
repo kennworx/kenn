@@ -6,7 +6,8 @@ use super::projection::{
 };
 use crate::api::types::{
     AggregateEdgeRow, AggregateNodeRow, AnalysisAnchoredCommunityRow, AnalysisFlatCommunityRow,
-    AnalysisGodNodeRow, AnalysisNodeMembershipRow, DbError, FileRow, SymbolRow,
+    AnalysisGodNodeRow, AnalysisNodeMembershipRow, DbError, FileRow, SymbolBodyRow, SymbolRow,
+    SymbolSurfaceRow,
 };
 
 impl SqliteConnRef<'_> {
@@ -40,6 +41,72 @@ impl SqliteConnRef<'_> {
             .map_err(be)?;
         let rows = q
             .query_map([], |r| Ok((col_u32(r, 0)?, col_u32(r, 1)?)))
+            .map_err(be)?;
+        rows.collect::<Result<_, _>>().map_err(be)
+    }
+
+    /// Every symbol carrying a usable enclosing-item extent, with its file.
+    ///
+    /// Only rows with a real span are returned: `body_start_line >= 1` and an
+    /// end at or after it. A zero extent means the producer captured none —
+    /// there is nothing to read back — and returning it would make every
+    /// consumer re-filter.
+    pub(crate) fn scan_symbol_bodies(&self) -> Result<Vec<SymbolBodyRow>, DbError> {
+        let mut q = self
+            .conn
+            .prepare(
+                "SELECT d.sym_id, f.path, f.language, d.body_start_line, d.body_end_line, s.test \
+                 FROM defs d \
+                 JOIN files f ON f.id = d.file_id \
+                 JOIN symbols s ON s.id = d.sym_id \
+                 WHERE d.body_start_line >= 1 AND d.body_end_line >= d.body_start_line",
+            )
+            .map_err(be)?;
+        let rows = q
+            .query_map([], |r| {
+                Ok(SymbolBodyRow {
+                    sym_id: col_u32(r, 0)?,
+                    path: r.get::<_, String>(1)?,
+                    language: r.get::<_, String>(2)?,
+                    body_start_line: col_u32(r, 3)?,
+                    body_end_line: col_u32(r, 4)?,
+                    test: r.get::<_, i64>(5)? != 0,
+                })
+            })
+            .map_err(be)?;
+        rows.collect::<Result<_, _>>().map_err(be)
+    }
+
+    /// Every symbol of one language with its stored signature and content.
+    ///
+    /// The path rides along so a caller can confine itself to configured roots
+    /// without a second query per symbol.
+    pub(crate) fn scan_symbol_surfaces(
+        &self,
+        language: &str,
+    ) -> Result<Vec<SymbolSurfaceRow>, DbError> {
+        let mut q = self
+            .conn
+            .prepare(
+                "SELECT s.id, s.pub_id, COALESCE(f.path, ''), \
+                 COALESCE(sd.sig, ''), COALESCE(sd.doc, '') \
+                 FROM symbols s \
+                 LEFT JOIN symbol_docs sd ON sd.sym_id = s.id \
+                 LEFT JOIN defs d ON d.sym_id = s.id \
+                 LEFT JOIN files f ON f.id = d.file_id \
+                 WHERE s.language = ?1",
+            )
+            .map_err(be)?;
+        let rows = q
+            .query_map([language], |r| {
+                Ok(SymbolSurfaceRow {
+                    sym_id: col_u32(r, 0)?,
+                    pub_id: r.get::<_, String>(1)?,
+                    path: r.get::<_, String>(2)?,
+                    sig: r.get::<_, String>(3)?,
+                    doc: r.get::<_, String>(4)?,
+                })
+            })
             .map_err(be)?;
         rows.collect::<Result<_, _>>().map_err(be)
     }

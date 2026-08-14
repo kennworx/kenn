@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 
 /// Closed kind enum (design D7). Mapped from indexer-emitted kinds or
 /// derived from SCIP descriptor suffixes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::IntoStaticStr)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Kind {
     Package,
     Module,
@@ -54,13 +55,25 @@ pub enum Kind {
     /// [`Self::Document`]. It has no heading (unlike [`Self::Section`]); its
     /// chunk text is the embeddable/FTS prose.
     Chunk,
+    /// A database table as a node. Workspace-global rather than file-scoped: a
+    /// table has no enclosing symbol, so it is its own aggregate. Prefixed
+    /// because markdown and HTML tables are plausible future kinds.
+    SqlTable,
+    /// One top-level SQL statement, owned by its file. A single kind covers
+    /// every statement shape — a create-as-select both defines and accesses, so
+    /// the role belongs on the edge, where it can be plural.
+    SqlStatement,
+    /// One element of an XML document, owned by its enclosing element and
+    /// ultimately its [`Self::Document`]. Attributes and text ride on it rather
+    /// than becoming nodes, which is what bounds the graph to the element count.
+    XmlElement,
 }
 
 impl Kind {
     /// Every variant, in declaration order — the single enumeration that
     /// [`Self::from_db_name`] and the round-trip / uniqueness tests iterate, so
     /// a new kind is covered by adding it here once.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 33] = [
         Self::Package,
         Self::Module,
         Self::Namespace,
@@ -91,43 +104,25 @@ impl Kind {
         Self::CssVar,
         Self::HtmlId,
         Self::Chunk,
+        Self::SqlTable,
+        Self::SqlStatement,
+        Self::XmlElement,
     ];
 
     /// Lowercase `snake_case` name persisted in `symbols.kind`.
+    ///
+    /// Derived rather than hand-written. A 33-arm `match` is exhaustive — the
+    /// compiler rejects a variant with no name — but it is also 33 branches of
+    /// measured complexity for a table with no logic in it, and CRAP collapses
+    /// to the branch count once a function is fully covered. The derive expands
+    /// over every variant, so a new kind still cannot silently miss its name,
+    /// and the mapping stops being something to maintain.
+    ///
+    /// Not `const fn`: the derive produces a `From` impl, which cannot be const.
+    /// No caller needs it in a const context.
     #[must_use]
-    pub const fn db_name(self) -> &'static str {
-        match self {
-            Self::Package => "package",
-            Self::Module => "module",
-            Self::Namespace => "namespace",
-            Self::Class => "class",
-            Self::Struct => "struct",
-            Self::Interface => "interface",
-            Self::Trait => "trait",
-            Self::Enum => "enum",
-            Self::EnumMember => "enum_member",
-            Self::TypeAlias => "type_alias",
-            Self::Method => "method",
-            Self::Function => "function",
-            Self::Constructor => "constructor",
-            Self::Destructor => "destructor",
-            Self::Operator => "operator",
-            Self::Field => "field",
-            Self::Property => "property",
-            Self::Constant => "constant",
-            Self::Variable => "variable",
-            Self::Parameter => "parameter",
-            Self::TypeParameter => "type_parameter",
-            Self::Macro => "macro",
-            Self::Document => "document",
-            Self::Section => "section",
-            Self::Attachment => "attachment",
-            Self::CssClass => "css_class",
-            Self::CssId => "css_id",
-            Self::CssVar => "css_var",
-            Self::HtmlId => "html_id",
-            Self::Chunk => "chunk",
-        }
+    pub fn db_name(self) -> &'static str {
+        self.into()
     }
 
     /// Parse the lowercase `snake_case` form produced by [`Self::db_name`]
@@ -201,6 +196,65 @@ mod tests {
                 Kind::from_db_name(unknown).is_none(),
                 "{unknown:?} must not parse"
             );
+        }
+    }
+
+    /// The literal on-disk vocabulary, pinned.
+    ///
+    /// Neither test above can catch a wrong name. `from_db_name` is
+    /// `ALL.find(|k| k.db_name() == s)`, so the round-trip compares `db_name`
+    /// against itself and passes for ANY naming — and uniqueness only asks that
+    /// the names differ. If the derive rendered `TypeAlias` as `type-alias`,
+    /// both would stay green while every persisted `symbols.kind` value silently
+    /// changed meaning and every existing snapshot became unreadable.
+    ///
+    /// These strings are a storage format. They are pinned here so a rename is
+    /// a deliberate, visible edit rather than a side effect of a derive
+    /// attribute.
+    #[test]
+    fn db_names_are_the_pinned_on_disk_vocabulary() {
+        const PINNED: [(Kind, &str); 33] = [
+            (Kind::Package, "package"),
+            (Kind::Module, "module"),
+            (Kind::Namespace, "namespace"),
+            (Kind::Class, "class"),
+            (Kind::Struct, "struct"),
+            (Kind::Interface, "interface"),
+            (Kind::Trait, "trait"),
+            (Kind::Enum, "enum"),
+            (Kind::EnumMember, "enum_member"),
+            (Kind::TypeAlias, "type_alias"),
+            (Kind::Method, "method"),
+            (Kind::Function, "function"),
+            (Kind::Constructor, "constructor"),
+            (Kind::Destructor, "destructor"),
+            (Kind::Operator, "operator"),
+            (Kind::Field, "field"),
+            (Kind::Property, "property"),
+            (Kind::Constant, "constant"),
+            (Kind::Variable, "variable"),
+            (Kind::Parameter, "parameter"),
+            (Kind::TypeParameter, "type_parameter"),
+            (Kind::Macro, "macro"),
+            (Kind::Document, "document"),
+            (Kind::Section, "section"),
+            (Kind::Attachment, "attachment"),
+            (Kind::CssClass, "css_class"),
+            (Kind::CssId, "css_id"),
+            (Kind::CssVar, "css_var"),
+            (Kind::HtmlId, "html_id"),
+            (Kind::Chunk, "chunk"),
+            (Kind::SqlTable, "sql_table"),
+            (Kind::SqlStatement, "sql_statement"),
+            (Kind::XmlElement, "xml_element"),
+        ];
+        assert_eq!(
+            PINNED.len(),
+            Kind::ALL.len(),
+            "a new kind was added without pinning its on-disk name"
+        );
+        for (kind, expected) in PINNED {
+            assert_eq!(kind.db_name(), expected, "on-disk name for {kind:?}");
         }
     }
 }

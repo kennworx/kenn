@@ -277,41 +277,75 @@ async fn run_embed_pass(
     // embed *before* touching `vec0`, so a disabled embedder or an embed
     // error never wipes existing vectors (the `Full` clear happens in the
     // same transaction as the re-insert, below).
-    let pending = scan_rows(&conn, mode)?;
-    if pending.is_empty() {
-        return Ok(ReembedReport::empty());
-    }
-
-    let texts: Vec<&str> = pending.iter().map(|r| r.text.as_str()).collect();
-    let started = Instant::now();
-    let Some(vectors) = embedder.embed_block_until_ready(&texts).await? else {
-        // Embedding is disabled (no model) — degrade to lexical-only. Signal it
-        // distinctly so the caller can report "disabled" vs "ready".
-        return Ok(ReembedReport::disabled());
-    };
-    let embed_seconds = started.elapsed().as_secs_f64();
-    if vectors.len() != pending.len() {
-        return Err(DbError::Backend(format!(
-            "embedder returned {} vectors for {} inputs",
-            vectors.len(),
-            pending.len()
-        )));
-    }
-
-    let new_entries = insert_vectors(&conn, &pending, vectors, mode)?;
-
+    // Chunked scan → embed → apply → append. Nothing corpus-sized outlives one
+    // iteration: holding the whole pending set cost ~3 KB/row (768 f32 plus its
+    // text), which is ~93 MB on this repo and multiplies with the corpus. The
+    // chunk size is the embedding config's `batch_size` — the same value the
+    // producer backends batch their own requests by, so the two layers cannot
+    // drift apart again.
+    // The producer's own configured batch size — the value `remote.rs` splits
+    // its HTTP requests by. Read from the same `GlobalConfig` the embedder is
+    // built from (as `sidecar::generation` already does) rather than declared
+    // again here: two independent constants are free to drift, and that drift
+    // is exactly how the pass came to hand the producer a whole corpus while
+    // the producer batched its own requests by 256. `.max(1)` because a zero
+    // chunk would not advance the cursor.
+    let chunk_size = kenn_config::GlobalConfig::load()
+        .unwrap_or_default()
+        .embeddings
+        .batch_size
+        .max(1);
     // KVS2 write protocol: tmp + atomic rename, content-addressed filename.
     // Dev-local `seg-` prefix; CI's `--repack` promotes segs to packs later.
     let tmp_dir = layout.writer_tmp_dir(&snapshot_id);
-    sidecar::append_vectors(
-        &vectors_dir,
-        &tmp_dir,
-        sidecar::WriterPrefix::Seg,
-        EMBED_DIM,
-        &new_entries,
-    )?;
+    let mut cursor: i64 = 0;
+    let mut total_vectors = 0usize;
+    let mut embed_seconds = 0.0;
+    // `Full` clears `vec_knowledge`, and it must happen in the FIRST chunk's
+    // insert transaction rather than before the loop: an unavailable embedder
+    // is detected on the first submission, and clearing up front would wipe
+    // vectors this pass cannot replace.
+    let mut clear_first = matches!(mode, EmbedMode::Full);
+
+    loop {
+        let chunk = scan_rows(&conn, mode, cursor, chunk_size)?;
+        let Some(last) = chunk.last() else { break };
+        cursor = last.rowid;
+
+        let texts: Vec<&str> = chunk.iter().map(|r| r.text.as_str()).collect();
+        let started = Instant::now();
+        let Some(vectors) = embedder.embed_block_until_ready(&texts).await? else {
+            // Embedding is disabled (no model) — degrade to lexical-only.
+            // Signal it distinctly so the caller can report "disabled" vs
+            // "ready". Nothing has been cleared or written yet.
+            return Ok(ReembedReport::disabled());
+        };
+        embed_seconds += started.elapsed().as_secs_f64();
+        if vectors.len() != chunk.len() {
+            return Err(DbError::Backend(format!(
+                "embedder returned {} vectors for {} inputs",
+                vectors.len(),
+                chunk.len()
+            )));
+        }
+
+        let new_entries = insert_vectors(&conn, &chunk, vectors, clear_first)?;
+        clear_first = false;
+        total_vectors += new_entries.len();
+        sidecar::append_vectors(
+            &vectors_dir,
+            &tmp_dir,
+            sidecar::WriterPrefix::Seg,
+            EMBED_DIM,
+            &new_entries,
+        )?;
+    }
+
+    if total_vectors == 0 {
+        return Ok(ReembedReport::empty());
+    }
     Ok(ReembedReport {
-        vectors: new_entries.len(),
+        vectors: total_vectors,
         embed_seconds,
         embedder_available: true,
     })
@@ -332,7 +366,12 @@ struct Unembedded {
 /// `doc` recipe), reconstructed from the joined `doc` row; it matches the text
 /// `finalize` fingerprinted. Undocumented symbols have empty text and are
 /// skipped — they get no vector and stay findable via the lexical arms.
-fn scan_rows(conn: &Connection, mode: EmbedMode) -> Result<Vec<Unembedded>, DbError> {
+fn scan_rows(
+    conn: &Connection,
+    mode: EmbedMode,
+    after_rowid: i64,
+    limit: usize,
+) -> Result<Vec<Unembedded>, DbError> {
     let filter = match mode {
         EmbedMode::Full => "",
         EmbedMode::Pending => "AND n.rowid NOT IN (SELECT rowid FROM vec_knowledge)",
@@ -343,17 +382,44 @@ fn scan_rows(conn: &Connection, mode: EmbedMode) -> Result<Vec<Unembedded>, DbEr
     // multiple files); a plain `d.id = n.id` join would then fan the name row
     // out into duplicate pending units and `insert_vectors` would hit the
     // `vec_knowledge` rowid UNIQUE constraint.
+    // The cursor (`n.rowid > ?1 ORDER BY n.rowid LIMIT ?2`) is what makes the
+    // pass chunkable: `Full` has no "already embedded" filter to advance it,
+    // and an OFFSET would re-walk the skipped prefix on every chunk. The
+    // empty-doc skip is in SQL rather than applied to the results so that every
+    // returned row advances the cursor — a chunk of entirely-skipped rows would
+    // otherwise be indistinguishable from an exhausted scan.
+    // XML and SQL never embed. Their content is configuration values and
+    // statements, not prose — a vector over `<dep groupId="…">` or `ALTER TABLE
+    // users` carries no conceptual signal, and enrolling them would pay for a
+    // pass over every text-bearing element on every run. They stay fully
+    // searchable through the verbatim lexical projection instead.
+    //
+    // This is a filter rather than the older "leave the content surface unfed"
+    // arrangement, which stopped working the moment element text moved onto
+    // that surface: without it, every one of those elements silently joins the
+    // embedding pass.
+    let verbatim = [kenn_model::Language::Xml, kenn_model::Language::Sql]
+        .map(|l| format!("'{}'", l.db_name()))
+        .join(",");
     let sql = format!(
         "SELECT n.rowid, COALESCE(d.doc_text, ''), n.fingerprint \
          FROM knowledge n \
          LEFT JOIN knowledge d ON d.rowid = ( \
              SELECT MIN(dd.rowid) FROM knowledge dd \
              WHERE dd.id = n.id AND dd.row_kind = 'doc') \
-         WHERE n.row_kind = 'name' {filter}"
+         WHERE n.row_kind = 'name' {filter} \
+           AND n.language NOT IN ({verbatim}) \
+           AND COALESCE(d.doc_text, '') <> '' \
+           AND n.rowid > ?1 \
+         ORDER BY n.rowid LIMIT ?2"
     );
     let mut stmt = conn.prepare(&sql).map_err(be)?;
     let rows = stmt
-        .query_map([], |r| {
+        .query_map(
+            // `limit` is the configured batch size (256 by default); the
+            // saturating conversion is a formality that cannot trigger.
+            rusqlite::params![after_rowid, i64::try_from(limit).unwrap_or(i64::MAX)],
+            |r| {
             // Doc-only recipe: the vector text is the doc prose alone.
             let text: String = r.get(1)?;
             #[expect(
@@ -368,14 +434,7 @@ fn scan_rows(conn: &Connection, mode: EmbedMode) -> Result<Vec<Unembedded>, DbEr
             })
         })
         .map_err(be)?;
-    let mut out = Vec::new();
-    for row in rows {
-        let row = row.map_err(be)?;
-        if !row.text.is_empty() {
-            out.push(row);
-        }
-    }
-    Ok(out)
+    rows.collect::<Result<Vec<_>, _>>().map_err(be)
 }
 
 /// Insert `vectors` into `vec0` (keyed by each row's `vec0` rowid) inside a
@@ -387,10 +446,10 @@ fn insert_vectors(
     conn: &Connection,
     pending: &[Unembedded],
     vectors: Vec<Vec<f32>>,
-    mode: EmbedMode,
+    clear_existing: bool,
 ) -> Result<Vec<(u64, Vec<f32>)>, DbError> {
     let tx = conn.unchecked_transaction().map_err(be)?;
-    if matches!(mode, EmbedMode::Full) {
+    if clear_existing {
         tx.execute("DELETE FROM vec_knowledge", []).map_err(be)?;
     }
     let mut new_entries = Vec::with_capacity(pending.len());
@@ -509,7 +568,7 @@ mod tests {
         )
         .unwrap();
 
-        let rows = scan_rows(&c, EmbedMode::Full).expect("scan");
+        let rows = scan_rows(&c, EmbedMode::Full, 0, 1000).expect("scan");
         assert_eq!(
             rows.len(),
             1,
@@ -521,5 +580,122 @@ mod tests {
         // Doc-only recipe: the embed text is the first (min-rowid) doc alone,
         // matching finalize's choice — not the signature.
         assert_eq!(unit.text, "first doc");
+    }
+
+    /// Insert a documented name row in a given language, at the given rowids.
+    fn documented_in(c: &Connection, lang: &str, name_rowid: i64, doc_rowid: i64, doc: &str) {
+        c.execute(
+            "INSERT INTO knowledge(rowid,embed_key,id,row_kind,language,pub_id,name_text,fingerprint) \
+             VALUES(?1,'k',?1,'name',?2,'p','sig',0)",
+            rusqlite::params![name_rowid, lang],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO knowledge(rowid,embed_key,id,row_kind,language,pub_id,doc_text,fingerprint) \
+             VALUES(?1,'k',?2,'doc',?3,'p',?4,0)",
+            rusqlite::params![doc_rowid, name_rowid, lang, doc],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn xml_and_sql_never_enrol_in_the_embedding_pass() {
+        // Their content is configuration values and statements, not prose, so a
+        // vector over it carries no conceptual signal and costs a pass on every
+        // run. They stay searchable through the verbatim lexical projection.
+        //
+        // This became load-bearing when element text moved onto the content
+        // surface: the previous arrangement relied on that surface being empty
+        // for XML, so without the filter every text-bearing element would
+        // silently join the pass.
+        let c = knowledge_conn();
+        documented_in(&c, "xml", 1, 2, "<dep groupId=\"acme\">");
+        documented_in(&c, "sql", 3, 4, "ALTER TABLE users ADD COLUMN x INT");
+        documented_in(&c, "rust", 5, 6, "Returns the active session.");
+
+        let rows = scan_rows(&c, EmbedMode::Full, 0, 1000).expect("scan");
+        let langs: Vec<i64> = rows.iter().map(|r| r.rowid).collect();
+        assert_eq!(langs, vec![5], "only the code row embeds, got {langs:?}");
+    }
+
+    #[test]
+    fn an_xml_only_workspace_embeds_nothing_at_all() {
+        // The end state a caller sees: not "fewer vectors", zero.
+        let c = knowledge_conn();
+        documented_in(&c, "xml", 1, 2, "<dep groupId=\"acme\">");
+        documented_in(&c, "xml", 3, 4, "some element text");
+        assert!(scan_rows(&c, EmbedMode::Full, 0, 1000)
+            .expect("scan")
+            .is_empty());
+    }
+
+    /// Insert one documented name row (`name` + its `doc`) at the given rowids.
+    fn documented(c: &Connection, name_rowid: i64, doc_rowid: i64, id: i64, doc: &str) {
+        c.execute(
+            "INSERT INTO knowledge(rowid,embed_key,id,row_kind,language,pub_id,name_text,fingerprint) \
+             VALUES(?1,'k',?2,'name','cs','p','sig',0)",
+            rusqlite::params![name_rowid, id],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO knowledge(rowid,embed_key,id,row_kind,language,pub_id,doc_text,fingerprint) \
+             VALUES(?1,'k',?2,'doc','cs','p',?3,0)",
+            rusqlite::params![doc_rowid, id, doc],
+        )
+        .unwrap();
+    }
+
+    /// A name row with no doc row — not embeddable.
+    fn undocumented(c: &Connection, rowid: i64, id: i64) {
+        c.execute(
+            "INSERT INTO knowledge(rowid,embed_key,id,row_kind,language,pub_id,name_text,fingerprint) \
+             VALUES(?1,'k',?2,'name','cs','p','sig',0)",
+            rusqlite::params![rowid, id],
+        )
+        .unwrap();
+    }
+
+    /// The cursor must advance past undocumented rows rather than stalling on
+    /// them. The skip lives in SQL precisely so that a chunk of entirely
+    /// unembeddable rows cannot be mistaken for an exhausted scan — the shape
+    /// that would either loop forever or silently drop the tail.
+    #[test]
+    fn the_cursor_walks_past_undocumented_rows() {
+        let c = knowledge_conn();
+        documented(&c, 1, 2, 1, "alpha");
+        undocumented(&c, 3, 2);
+        undocumented(&c, 4, 3);
+        documented(&c, 5, 6, 4, "beta");
+
+        // One row at a time, driven exactly as `run_embed_pass` drives it.
+        let mut cursor = 0i64;
+        let mut seen = Vec::new();
+        loop {
+            let chunk = scan_rows(&c, EmbedMode::Full, cursor, 1).expect("scan");
+            let Some(last) = chunk.last() else { break };
+            cursor = last.rowid;
+            seen.extend(chunk.iter().map(|r| r.text.clone()));
+        }
+        assert_eq!(seen, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    /// Chunking must partition the scan, not re-serve or drop rows.
+    #[test]
+    fn chunked_scan_yields_every_row_exactly_once() {
+        let c = knowledge_conn();
+        for i in 0..10i64 {
+            documented(&c, i * 2 + 1, i * 2 + 2, i, &format!("doc{i}"));
+        }
+        let mut cursor = 0i64;
+        let mut seen = Vec::new();
+        loop {
+            let chunk = scan_rows(&c, EmbedMode::Full, cursor, 3).expect("scan");
+            let Some(last) = chunk.last() else { break };
+            assert!(chunk.len() <= 3, "chunk exceeded the requested limit");
+            cursor = last.rowid;
+            seen.extend(chunk.iter().map(|r| r.text.clone()));
+        }
+        let expected: Vec<String> = (0..10).map(|i| format!("doc{i}")).collect();
+        assert_eq!(seen, expected);
     }
 }

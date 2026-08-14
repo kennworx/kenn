@@ -194,6 +194,20 @@ where
                 let root = workspace.root();
                 scope.spawn(move || html_phase1_unit(html_cfg, root, sink))
             });
+            // SQL producer — a barrier-free sibling unit: it resolves table
+            // identity inside its own pass over the `.sql` files it walks, so
+            // there is no pending state for the post-code barrier.
+            let sql_join = runner.sql.as_ref().map(|sql_cfg| {
+                let sink = BatchSink::new(writer.clone(), handle.clone(), batch_size);
+                let root = workspace.root();
+                scope.spawn(move || sql_unit(sql_cfg, root, sink))
+            });
+            // XML producer — another barrier-free sibling unit.
+            let xml_join = runner.xml.as_ref().map(|xml_cfg| {
+                let sink = BatchSink::new(writer.clone(), handle.clone(), batch_size);
+                let root = workspace.root();
+                scope.spawn(move || xml_unit(xml_cfg, root, sink))
+            });
             // Text-fallback producer — a barrier-free sibling unit (no link
             // graph, no post-code phase); its records are complete on join.
             let text_join = runner.text.as_ref().map(|corpus| {
@@ -241,7 +255,19 @@ where
                     None
                 }
             });
-            // Text has no post-code phase: join it here and fold in its report.
+            // Neither SQL nor text has a post-code phase: join both here.
+            if let Some(h) = sql_join {
+                match h.join() {
+                    Ok(r) => reports.push(r),
+                    Err(_) => reports.push(panicked_report()),
+                }
+            }
+            if let Some(h) = xml_join {
+                match h.join() {
+                    Ok(r) => reports.push(r),
+                    Err(_) => reports.push(panicked_report()),
+                }
+            }
             if let Some(h) = text_join {
                 match h.join() {
                     Ok(r) => reports.extend(r),
@@ -259,7 +285,12 @@ where
     if let Some(pending) = md_pending {
         let sink = BatchSink::new(writer.clone(), handle.clone(), batch_size);
         reports.push(resolve_markdown_code_unit(
-            pending, &writer, &handle, has_code, sink,
+            pending,
+            &writer,
+            &handle,
+            has_code,
+            workspace.root(),
+            sink,
         ));
     }
 
@@ -283,6 +314,28 @@ where
         let sink = BatchSink::new(writer.clone(), handle.clone(), batch_size);
         let root = runner.workspace.root().to_path_buf();
         reports.push(resolve_html_unit(pending, &writer, &handle, &root, sink));
+    }
+
+    // ── Phase 2e: code→table barrier ─────────────────────────────────
+    // Code symbols and their body extents exist, and so do the table nodes the
+    // `.sql` producer wrote — so the tables a function's own source names can
+    // be resolved against the same identities a migration declares. Without
+    // this a table is reachable from `.sql` and nothing else, and "what code
+    // reads this table" has no answer.
+    // Reports only when it had something to scan. `has_code` is not the gate:
+    // it says a code driver was configured, not that it produced symbols — an
+    // unavailable driver leaves the flag set and the graph empty, and a step
+    // that filed a report there would claim work it did not do.
+    // Phase 2f rides along: the XML↔SQL bridge needs the same reader and the
+    // same table-id allocator, and neither input depends on code.
+    let bridge = runner.xml_sql.as_ref();
+    if has_code || bridge.is_some() {
+        let code_sink = BatchSink::new(writer.clone(), handle.clone(), batch_size);
+        let xml_sink = BatchSink::new(writer.clone(), handle.clone(), batch_size);
+        let root = runner.workspace.root().to_path_buf();
+        reports.extend(resolve_table_units(
+            &writer, &handle, &root, has_code, bridge, code_sink, xml_sink,
+        ));
     }
 
     // ── Phase 3 + 4: aggregate + finalize ───────────────────────────
@@ -484,6 +537,56 @@ fn html_phase1_unit(
     (vec![report], pending)
 }
 
+/// Run the `.sql` producer as one barrier-free ingest unit: discover, parse,
+/// resolve, and write in a single pass, leaving no pending state behind. A
+/// failure degrades this unit's report and never aborts the run.
+fn sql_unit(config: &kenn_config::SqlConfig, root: &Path, sink: BatchSink) -> RunReport {
+    let mut report = RunReport::started("sql", IN_PROCESS_PRODUCER_VERSION, "<corpus>");
+    match crate::sql::ingest::ingest_sql(config, root, sink) {
+        Ok(counts) => {
+            report.status = RunStatus::Success;
+            report.files_seen = counts.files;
+            report.symbols_seen = counts.tables + counts.statements + counts.files;
+            report.edges_seen = counts.edges;
+            if counts.unreadable > 0 || counts.unparsed > 0 {
+                report.warnings.push(format!(
+                    "sql: {} unreadable file(s), {} unparsed statement(s)",
+                    counts.unreadable, counts.unparsed
+                ));
+            }
+        }
+        Err(e) => {
+            report.status = RunStatus::Failed;
+            report.failed_projects.push(e.to_string());
+        }
+    }
+    report
+}
+
+/// Run the `.xml` producer as one barrier-free ingest unit. A malformed or
+/// unreadable document degrades this unit's report and never aborts the run.
+fn xml_unit(config: &kenn_config::XmlConfig, root: &Path, sink: BatchSink) -> RunReport {
+    let mut report = RunReport::started("xml", IN_PROCESS_PRODUCER_VERSION, "<corpus>");
+    match crate::xml::ingest::ingest_xml(config, root, sink) {
+        Ok(counts) => {
+            report.status = RunStatus::Success;
+            report.files_seen = counts.files;
+            report.symbols_seen = counts.elements + counts.files;
+            report.edges_seen = counts.edges;
+            if counts.failed > 0 {
+                report
+                    .warnings
+                    .push(format!("xml: {} unusable document(s)", counts.failed));
+            }
+        }
+        Err(e) => {
+            report.status = RunStatus::Failed;
+            report.failed_projects.push(e.to_string());
+        }
+    }
+    report
+}
+
 /// Run the text-fallback producer as one barrier-free ingest unit (design D1):
 /// discover + split + walk + write happen in a single pass, so there is no
 /// pending state to resolve after the code join.
@@ -602,6 +705,7 @@ fn resolve_markdown_code_unit(
     writer: &DbWriter,
     handle: &tokio::runtime::Handle,
     has_code: bool,
+    workspace_root: &std::path::Path,
     sink: BatchSink,
 ) -> RunReport {
     let mut report = RunReport::started("markdown-code", "0", "<corpus>");
@@ -618,7 +722,8 @@ fn resolve_markdown_code_unit(
                     None
                 };
                 let code = reader.as_ref().map(|r| (r, handle));
-                crate::markdown::resolve_markdown_code(pending, code, sink)
+                let exists = crate::markdown::FsPaths { workspace_root };
+                crate::markdown::resolve_markdown_code(pending, code, &exists, sink)
                     .map_err(|e| e.to_string())
             })
             .join()
@@ -637,6 +742,175 @@ fn resolve_markdown_code_unit(
     }
     report.finalize();
     report
+}
+
+/// Resolve the tables the workspace's own source names, against the identities
+/// the `.sql` producer wrote. Runs on a plain (runtime-free) thread so the
+/// sink's and reader's `block_on` calls never run on a runtime worker.
+///
+/// The minter is built here and would be passed to any other minting barrier
+/// step: two steps allocating `Sql` short ids independently from the same
+/// high-water mark hand two tables one id.
+/// Both table-resolution barrier steps, sharing one reader and one allocator.
+///
+/// They are one function because the allocator must be one object. Both mint
+/// external tables into the `Sql` `ShortId` partition past the `.sql` pass's
+/// high-water mark, and two allocators built independently from that mark both
+/// compute the same next id — handing two different tables one id, with the
+/// loser's edges silently retargeted and nothing downstream reporting it.
+///
+/// Each step still reports separately, so a failure in one leaves the other's
+/// numbers intact.
+fn resolve_table_units(
+    writer: &DbWriter,
+    handle: &tokio::runtime::Handle,
+    workspace_root: &Path,
+    run_code: bool,
+    xml_config: Option<&kenn_config::XmlSqlConfig>,
+    code_sink: BatchSink,
+    xml_sink: BatchSink,
+) -> Vec<RunReport> {
+    type Outcome = (
+        Option<Result<crate::code_sql::resolve::CodeSqlCounts, String>>,
+        Option<Result<crate::xml_sql::resolve::XmlSqlCounts, String>>,
+    );
+    let outcome: Outcome = std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let reader = match handle.block_on(kenn_store::reader_from_writer(writer)) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        return (
+                            run_code.then(|| Err(msg.clone())),
+                            xml_config.map(|_| Err(msg)),
+                        );
+                    }
+                };
+                let existing = match handle.block_on(kenn_store::api::Reader::scan_symbols(&reader))
+                {
+                    Ok(rows) => rows.into_iter().map(|s| s.id).collect::<Vec<_>>(),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        return (
+                            run_code.then(|| Err(msg.clone())),
+                            xml_config.map(|_| Err(msg)),
+                        );
+                    }
+                };
+                let mut minter = crate::sql::mint::TableMinter::after_existing(existing);
+                let code = run_code.then(|| {
+                    crate::code_sql::ingest::ingest_code_tables(
+                        &reader,
+                        handle,
+                        workspace_root,
+                        &mut minter,
+                        code_sink,
+                    )
+                    .map_err(|e| e.to_string())
+                });
+                let xml = xml_config.map(|cfg| {
+                    crate::xml_sql::ingest::ingest_xml_tables(
+                        &reader,
+                        handle,
+                        cfg,
+                        &mut minter,
+                        xml_sink,
+                    )
+                    .map_err(|e| e.to_string())
+                });
+                (code, xml)
+            })
+            .join()
+            .unwrap_or_else(|_| {
+                let msg = "table resolver thread panicked".to_owned();
+                (
+                    run_code.then(|| Err(msg.clone())),
+                    xml_config.map(|_| Err(msg)),
+                )
+            })
+    });
+
+    let mut reports = Vec::new();
+    if let Some(code) = outcome.0 {
+        // Reports only when it had something to scan. `has_code` is not the
+        // gate: it says a code driver was configured, not that it produced
+        // symbols — an unavailable driver leaves the flag set and the graph
+        // empty, and a step that filed a report there would claim work it did
+        // not do.
+        let skip = matches!(&code, Ok(c) if c.bodies_scanned == 0);
+        if !skip {
+            let mut report = RunReport::started("code-tables", "0", "<corpus>");
+            match code {
+                Ok(counts) => {
+                    report.status = RunStatus::Success;
+                    record_code_table_counts(&mut report, &counts);
+                }
+                Err(e) => {
+                    report.status = RunStatus::Failed;
+                    report.failed_projects.push(e);
+                }
+            }
+            report.finalize();
+            reports.push(report);
+        }
+    }
+    if let Some(xml) = outcome.1 {
+        let skip = matches!(&xml, Ok(c) if c.elements_scanned == 0);
+        if !skip {
+            let mut report = RunReport::started("xml-tables", "0", "<corpus>");
+            match xml {
+                Ok(counts) => {
+                    report.status = RunStatus::Success;
+                    record_xml_table_counts(&mut report, &counts);
+                }
+                Err(e) => {
+                    report.status = RunStatus::Failed;
+                    report.failed_projects.push(e);
+                }
+            }
+            report.finalize();
+            reports.push(report);
+        }
+    }
+    reports
+}
+
+/// Put the XML→table pass's counts on its report.
+///
+/// The two arms are reported separately because they answer different
+/// questions: a zero text count means the workspace writes no SQL in element
+/// bodies, while a zero attribute count with rules configured means the rules
+/// match nothing — a misconfiguration, not an absence.
+pub(super) fn record_xml_table_counts(
+    report: &mut RunReport,
+    counts: &crate::xml_sql::resolve::XmlSqlCounts,
+) {
+    report.symbols_seen = counts.tables_minted;
+    report.edges_seen = counts.refs_emitted;
+    report.def_bodies_seen = counts.elements_scanned;
+    report.bodies_with_literals = counts.elements_with_sql + counts.elements_with_attribute;
+}
+
+/// Put the code→table pass's counts on its report.
+///
+/// Three numbers, not one, because an ORM-mapped codebase is fully
+/// instrumented against its database and yields no edges here. A bare zero
+/// would read as "no code touches this"; alongside bodies scanned and bodies
+/// carrying literals it reads as "the SQL is not written as a literal", which
+/// is the true answer.
+///
+/// `files_seen` deliberately stays zero: it rolls up into the per-language file
+/// total `kenn index` prints, and this step re-reads files another unit already
+/// counted, so borrowing it would double them.
+pub(super) fn record_code_table_counts(
+    report: &mut RunReport,
+    counts: &crate::code_sql::resolve::CodeSqlCounts,
+) {
+    report.symbols_seen = counts.tables_minted;
+    report.edges_seen = counts.refs_emitted;
+    report.def_bodies_seen = counts.bodies_scanned;
+    report.bodies_with_literals = counts.bodies_with_literals;
 }
 
 /// A report standing in for an ingester thread that panicked.

@@ -19,7 +19,7 @@ mod sqlite;
 
 pub use findings::{
     finding_is_stale, Anchor, AnchorEvent, AnchorHealth, BrokenAnchors, CodeGraphNodeResolver,
-    CodeNodeResolver, DriftedAnchors, FindingsStore,
+    CodeNodeResolver, DriftedAnchors, FindingsStore, UnverifiedClaim,
 };
 pub use jobs::{
     embed_pending, read_embed_error, reembed, stage_findings_for_publish, ReembedReport,

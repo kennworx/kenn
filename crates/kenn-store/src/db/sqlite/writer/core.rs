@@ -112,7 +112,8 @@ fn flatten_edge_properties(props: &EdgeProperties) -> EdgeFlatCols {
         EdgeProperties::Embeds { grade }
         | EdgeProperties::LinksToFile { grade }
         | EdgeProperties::UsesCssClass { grade }
-        | EdgeProperties::ExtendsRule { grade } => (
+        | EdgeProperties::ExtendsRule { grade }
+        | EdgeProperties::Table { grade, .. } => (
             None,
             None,
             None,

@@ -80,7 +80,7 @@ pub(crate) fn edge_kind_from_code(code: u32) -> EdgeKind {
 }
 
 /// Every [`EdgeKind`] variant, in discriminant order.
-pub(crate) const ALL_EDGE_KINDS: [EdgeKind; 17] = [
+pub(crate) const ALL_EDGE_KINDS: [EdgeKind; 20] = [
     EdgeKind::DefinedIn,
     EdgeKind::Contains,
     EdgeKind::Calls,
@@ -98,6 +98,9 @@ pub(crate) const ALL_EDGE_KINDS: [EdgeKind; 17] = [
     EdgeKind::UsesCssClass,
     EdgeKind::ExtendsRule,
     EdgeKind::ExtendsType,
+    EdgeKind::DefinesTable,
+    EdgeKind::AltersTable,
+    EdgeKind::AccessesTable,
 ];
 
 /// Split an identifier into space-separated lowercase words at `camelCase` /
@@ -138,6 +141,78 @@ pub(crate) fn split_identifier(text: &str) -> String {
     words.join(" ")
 }
 
+/// True for languages whose content is structured **values** rather than
+/// identifiers — XML and SQL.
+///
+/// [`split_identifier`] is right for code: breaking `getUserId` into words is
+/// what makes it reachable by "user". It is wrong here, because the punctuation
+/// *is* the value. Split, `org.springframework:boot` becomes three words and
+/// the exact string someone would search for stops matching. The trigram index
+/// handles raw text directly, so these languages are indexed as written.
+pub(crate) fn is_verbatim_language(lang: &str) -> bool {
+    lang == kenn_model::Language::Xml.db_name() || lang == kenn_model::Language::Sql.db_name()
+}
+
+/// The lexical projection for a verbatim language: both surfaces, values intact.
+///
+/// Signature and content are stored separately so each stays usable on its own
+/// — a consumer can re-parse an attribute out of one, or hand the other to a SQL
+/// parser untouched. Search wants them together, though: "which document pins
+/// this version" is answered by an attribute, and "which migration drops this
+/// column" by element text, and a caller should not have to know which.
+///
+/// Markup is flattened to words rather than kept as tags. `<dep groupId="x">`
+/// searched as written would need the query to include the angle brackets and
+/// the `=`; flattened, `groupId x` matches, and so does a bare `x`. The
+/// delimiters produce only boundary-spanning trigrams (`Id=`, `="x`) that no
+/// query contains.
+pub(crate) fn verbatim_projection(sig: &str, doc: &str) -> String {
+    let mut out = String::with_capacity(sig.len() + doc.len() + 1);
+    flatten_markup(sig, &mut out);
+    if !doc.is_empty() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(doc);
+    }
+    out
+}
+
+/// Strip markup delimiters to spaces and resolve the entities the renderer
+/// introduced, so a value is searchable exactly as its source spelled it.
+///
+/// Only the five XML predefined entities, and only the three the signature
+/// renderer emits plus the two a source may already contain. Anything else is
+/// left alone: this is a search projection, not a parser, and an unrecognized
+/// `&…;` is likelier to be literal text than an entity.
+fn flatten_markup(sig: &str, out: &mut String) {
+    // Delimiters first, entities second, and the order is load-bearing: an
+    // escaped `&quot;` stands for a quote that is *data*, so resolving it first
+    // would hand the delimiter pass a quote to eat. Flattening first leaves the
+    // entity untouched, since none of its characters are delimiters.
+    let flattened: String = sig
+        .chars()
+        .map(|c| {
+            if matches!(c, '<' | '>' | '=' | '"' | '/') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    // `&amp;` resolves LAST, or `&amp;lt;` — a literal "&lt;" in the source —
+    // would decode twice and come out as `<`.
+    let resolved = flattened
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&");
+    // The delimiters became spaces, so runs of them collapse; a leading or
+    // trailing space would otherwise ride into the indexed text.
+    out.push_str(&resolved.split_whitespace().collect::<Vec<_>>().join(" "));
+}
+
 /// `xxh3-64` fingerprint of a row's `embeddable_text` — drives
 /// embedding reconciliation (an unchanged fingerprint reuses the vector).
 pub(crate) fn text_fingerprint(text: &str) -> u64 {
@@ -175,5 +250,116 @@ mod tests {
         assert_eq!(edge_kind_name(17), "extends_type");
         // 0 maps to no edge kind (reserved null sentinel).
         kenn_model::EdgeKind::try_from(0).unwrap_err();
+    }
+
+    /// `ALL_EDGE_KINDS` is the only list `parse_edge_relation` searches, so a
+    /// kind missing from it is unreachable by name — `scan_edges` answers
+    /// `unknown relation` for an edge the graph actually holds. Uniqueness
+    /// above cannot catch that: it only walks whatever the list already
+    /// contains. Codes are dense from 1, so the code space is the completeness
+    /// oracle.
+    #[test]
+    fn every_edge_kind_code_is_listed() {
+        let listed: HashSet<u32> = ALL_EDGE_KINDS.into_iter().map(edge_kind_code).collect();
+        let mut code = 1;
+        while let Ok(kind) = EdgeKind::try_from(code) {
+            assert!(
+                listed.contains(&code),
+                "{kind:?} (code {code}) is missing from ALL_EDGE_KINDS"
+            );
+            code += 1;
+        }
+        assert_eq!(
+            listed.len(),
+            (code - 1) as usize,
+            "ALL_EDGE_KINDS holds an entry outside the dense code space"
+        );
+    }
+}
+
+#[cfg(test)]
+mod verbatim_tests {
+    use super::{is_verbatim_language, split_identifier, verbatim_projection};
+
+    #[test]
+    fn an_attribute_and_element_text_are_both_reachable() {
+        // The point of deriving from both surfaces. Storing them separately is
+        // what makes each usable alone; search should not have to know which
+        // one an answer lives on.
+        let text = verbatim_projection(r#"<dep groupId="org.springframework">"#, "1.2.3");
+        assert!(text.contains("org.springframework"), "attribute: {text}");
+        assert!(text.contains("1.2.3"), "element text: {text}");
+    }
+
+    #[test]
+    fn a_structured_value_is_not_broken_into_words() {
+        // The reason these languages skip `split_identifier`: the punctuation
+        // IS the value, and splitting makes the exact string someone would
+        // search for unfindable.
+        let v = "org.springframework:boot";
+        let text = verbatim_projection(&format!(r#"<dep id="{v}">"#), "");
+        assert!(text.contains(v), "intact: {text}");
+        assert_ne!(
+            split_identifier(v),
+            v,
+            "the code projection really would have broken it — otherwise this \
+             test passes for the wrong reason"
+        );
+    }
+
+    #[test]
+    fn markup_delimiters_become_word_boundaries() {
+        // Kept as written, a query would have to include the angle brackets and
+        // the `=`. Flattened, both the pair and the bare value match.
+        let text = verbatim_projection(r#"<dep groupId="acme" version="1.0">"#, "");
+        assert_eq!(text, "dep groupId acme version 1.0");
+    }
+
+    #[test]
+    fn the_renderers_escapes_are_resolved_back_to_the_source_spelling() {
+        // The signature escapes `"` and `&` so it stays re-parseable. Searching
+        // is a different job: someone looking for `a & b` types an ampersand,
+        // not `&amp;`, so the projection restores what the source said.
+        let text = verbatim_projection(r#"<e cmd="a &amp; b" q="say &quot;hi&quot;">"#, "");
+        assert!(text.contains("a & b"), "ampersand resolved: {text}");
+        assert!(text.contains(r#"say "hi""#), "quote resolved: {text}");
+        assert!(!text.contains("&amp;"), "no entity left behind: {text}");
+    }
+
+    #[test]
+    fn an_escaped_quote_is_data_and_not_a_delimiter() {
+        // The ordering constraint inside `flatten_markup`. Resolving entities
+        // before flattening delimiters would turn `&quot;` into a quote and
+        // then eat it as a delimiter, silently losing a character the source
+        // wrote. Flattening first leaves the entity intact to be resolved.
+        let text = verbatim_projection(r#"<e q="say &quot;hi&quot; twice">"#, "");
+        assert_eq!(text, r#"e q say "hi" twice"#);
+    }
+
+    #[test]
+    fn a_literally_written_entity_is_not_decoded_twice() {
+        // `&amp;lt;` is how a source spells the literal text "&lt;". Resolving
+        // `&amp;` before the others would yield `&lt;` and then `<` — a
+        // character the source never wrote. `&amp;` resolves last for this.
+        let text = verbatim_projection(r#"<e v="&amp;lt;">"#, "");
+        assert_eq!(text, "e v &lt;", "one decode, not two");
+    }
+
+    #[test]
+    fn a_sql_statement_reaches_the_index_through_its_content_surface() {
+        // SQL statements carry no signature yet, so the whole projection is the
+        // content — and it must arrive intact, not word-split.
+        let stmt = "ALTER TABLE users ADD COLUMN last_login timestamptz";
+        assert_eq!(verbatim_projection("", stmt), stmt);
+    }
+
+    #[test]
+    fn both_languages_take_the_verbatim_arm_and_code_does_not() {
+        // One arm covering both, which is the point — two arms would drift.
+        assert!(is_verbatim_language("xml"));
+        assert!(is_verbatim_language("sql"));
+        for code in ["rust", "csharp", "typescript", "python", "go", "swift"] {
+            assert!(!is_verbatim_language(code), "{code} is code");
+        }
     }
 }

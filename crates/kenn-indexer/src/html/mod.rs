@@ -21,8 +21,8 @@ pub use ingest::{
     ingest_html, resolve_html, HtmlCounts, HtmlIngestError, HtmlPending, HtmlResolveCounts,
 };
 pub use links::{
-    anchor_link_edges, asset_link_edges, import_edges, AssetIndex, FragmentIndex, HtmlIds,
-    StubSink, WorkspaceFiles,
+    anchor_link_edges, asset_link_edges, import_edges, FragmentIndex, HtmlIds, StubSink,
+    WorkspaceFiles,
 };
 pub use parse::{parse_elements, style_blocks, Attr, Element, StyleBlock};
 pub use styles::{inline_style_nodes, InlineStyleNodes};

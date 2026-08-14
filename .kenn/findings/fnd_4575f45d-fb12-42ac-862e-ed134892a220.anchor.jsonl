@@ -1,0 +1,3 @@
+{"op":"attach","anchor":"justfile","ts":"2026-08-14T09:14:36.234674Z","sha":"c347a9166a355f34"}
+{"op":"attach","anchor":"crates/kenn-store/tests/hybrid_search.rs","ts":"2026-08-14T09:14:36.234674Z","sha":"dc5d3d4a929e4a34"}
+{"op":"attach","anchor":"crates/kenn-embed/src/selector.rs","ts":"2026-08-14T09:14:36.234674Z","sha":"8fe65dbad464ad8e"}

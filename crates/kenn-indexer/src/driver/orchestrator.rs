@@ -45,6 +45,17 @@ pub struct IndexerDriver {
     /// HTML unindexed. A sibling producer whose connective edges resolve on the
     /// post-code/CSS barrier (design D4), so it shares css's slot shape.
     pub html: Option<kenn_config::HtmlConfig>,
+    /// SQL corpus producer when `[language.sql] enabled = true`. `None` leaves
+    /// `.sql` unindexed. Barrier-free: every input it needs is a file it walks
+    /// itself, so it resolves table identity within its own pass.
+    pub sql: Option<kenn_config::SqlConfig>,
+    /// XML corpus producer when `[language.xml] enabled = true`. `None` leaves
+    /// XML unindexed. Barrier-free: a later bridge reads its element nodes back
+    /// from the building store rather than being handed deferred state.
+    pub xml: Option<kenn_config::XmlConfig>,
+    /// The XML↔SQL bridge, when the workspace indexes XML. `None` leaves the
+    /// barrier step out entirely.
+    pub xml_sql: Option<kenn_config::XmlSqlConfig>,
     /// Text-fallback producer when `[language.text] enabled = true`. `None`
     /// leaves non-semantic text files unindexed. A barrier-free sibling
     /// producer (no link graph), carrying the claimed-extension skip set.
@@ -70,6 +81,9 @@ impl IndexerDriver {
             markdown: None,
             css: None,
             html: None,
+            sql: None,
+            xml: None,
+            xml_sql: None,
             text: None,
             docker_cache_volumes: Vec::new(),
             swift_toolchain: None,
@@ -94,6 +108,26 @@ impl IndexerDriver {
     #[must_use]
     pub fn with_html(mut self, config: kenn_config::HtmlConfig) -> Self {
         self.html = Some(config);
+        self
+    }
+
+    /// Enable the `.sql` corpus producer with `config`.
+    #[must_use]
+    pub fn with_sql(mut self, config: kenn_config::SqlConfig) -> Self {
+        self.sql = Some(config);
+        self
+    }
+
+    /// Enable the `.xml` corpus producer with `config`.
+    #[must_use]
+    pub fn with_xml(mut self, config: kenn_config::XmlConfig) -> Self {
+        self.xml = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_xml_sql(mut self, config: kenn_config::XmlSqlConfig) -> Self {
+        self.xml_sql = Some(config);
         self
     }
 

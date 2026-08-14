@@ -39,6 +39,13 @@ scip = "0.7.1"
 serde = { version = "1.0.228", default-features = false, features = ["derive", "alloc"] }
 serde_json = "1.0.150"
 serde_yaml_ng = "0.10"
+# Derives `Kind`'s variant→string mapping (`kenn-model`). Chosen over a
+# hand-written `match` because the macro expands over every variant, so a new
+# variant cannot silently miss its name — the same completeness the compiler
+# gives an exhaustive match, without a 33-arm function to maintain. Other
+# variant→string enums keep their matches; only `Kind` was large enough to
+# matter.
+strum = { version = "0.28.0", features = ["derive"] }
 thiserror = "2"
 toml = "1.1.2"
 # SQLite backend, shared across kenn-store and kenn-collect. `bundled` ships

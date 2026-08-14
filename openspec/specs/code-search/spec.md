@@ -1,4 +1,4 @@
-# lance-search
+# code-search
 
 ## Purpose
 
@@ -9,8 +9,8 @@ full-text indexes (trigram for identifiers, stemming for prose) and a
 reconciled from the committed sidecar, and `xxh3-64` fingerprint
 reconciliation on rebuild. It turns expensive embeddings into a shared,
 durable asset and serves hybrid lexical + semantic search from a single
-store. (The capability is still named `lance-search` for continuity;
-renaming it to `code-search` is a separate deferred follow-up.)
+store.
+
 ## Requirements
 ### Requirement: search store holds text, embeddings, and search indexes
 

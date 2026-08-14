@@ -17,6 +17,8 @@
 
 use kenn_model::{Language, LinkGrade, ShortId};
 
+use crate::relpath::join_relative;
+
 /// A code-graph node the md→code resolver may target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeCandidate {
@@ -80,9 +82,21 @@ pub fn resolve_file_ref(
     code: &dyn CodeLookup,
 ) -> Vec<CodeTarget> {
     let candidates = code.files_by_basename(basename(target));
-    let want = normalize(target);
+    // Same two-step as md↔md `resolve_inline`: the path **as written** (already
+    // workspace-relative), then the path **joined** onto the linking file's
+    // directory. Both are Exact — a doc may spell a target either way, and
+    // accepting only one is what made a correct `../frames.ts` degrade to
+    // Drifted. Joining is what `..` requires: popping a segment, not deleting
+    // the token, so `../../x/mod.rs` can no longer match a root-level
+    // `x/mod.rs` it does not name. `None` from the join = the target walks
+    // above the workspace root, so only the as-written form can match. The
+    // anchor is dropped first, matching [`basename`], so a `path#L10` target
+    // still compares as a path.
+    let written = target.split('#').next().unwrap_or(target);
+    let written = written.trim_start_matches("./");
+    let joined = join_relative(linking_relpath, written);
     pick(candidates, linking_relpath, true, |c| {
-        normalize(&c.relpath) == want
+        c.relpath == written || joined.as_deref() == Some(c.relpath.as_str())
     })
 }
 
@@ -156,8 +170,11 @@ fn common_prefix_segments(a: &str, b: &str) -> usize {
 }
 
 /// A target is a code *path* when it contains a `/` or its basename carries a
-/// known code-language extension.
-fn is_code_path(target: &str) -> bool {
+/// known code-language extension. A target that is neither goes down the
+/// **symbol** branch of [`resolve_code_link`] — which is why callers need to
+/// know: only a bare name can be shadowed by a same-named code symbol.
+#[must_use]
+pub fn is_code_path(target: &str) -> bool {
     target.contains('/') || code_extension(target)
 }
 
@@ -182,10 +199,6 @@ fn code_extension(target: &str) -> bool {
 fn basename(target: &str) -> &str {
     let no_anchor = target.split('#').next().unwrap_or(target);
     no_anchor.rsplit('/').next().unwrap_or(no_anchor)
-}
-
-fn normalize(path: &str) -> String {
-    path.trim_start_matches("./").replace("../", "")
 }
 
 /// Split `Auth.OrderHandler` / `mod::Type` into (`qualifier`, `short`).
@@ -277,6 +290,51 @@ mod tests {
         }
     }
 
+    /// A correct *relative* file link is Exact, not Drifted. Before
+    /// `honest-link-grades` the comparison ran through a `normalize` that
+    /// deleted `../` instead of popping a segment, so `../frames.ts` was
+    /// compared as `frames.ts` against `indexers/frames.ts`, missed, and fell
+    /// to the locality rung.
+    #[test]
+    fn relative_file_link_resolves_against_the_linking_dir() {
+        let m = Mock {
+            files: vec![file(7, "indexers/frames.ts")],
+            symbols: vec![],
+        };
+        let t = resolve_file_ref("../frames.ts", "indexers/kenn-dotnet/README.md", &m);
+        assert_eq!(
+            t,
+            [CodeTarget {
+                id: 7,
+                grade: LinkGrade::Exact,
+                is_file: true
+            }]
+        );
+    }
+
+    /// The same bug's dangerous half: deleting `../` also made a link match a
+    /// same-basename file it does not name. `../../x/mod.rs` from
+    /// `crates/a/src/m/README.md` means `crates/a/x/mod.rs`; graded through the
+    /// old `normalize` it became `x/mod.rs` and matched the root file **Exact**.
+    /// Basename pre-filtering makes this reachable wherever a name repeats, and
+    /// this workspace has 38 `mod.rs`.
+    #[test]
+    fn a_parent_hop_does_not_match_a_same_named_file_elsewhere() {
+        let m = Mock {
+            files: vec![file(9, "x/mod.rs")],
+            symbols: vec![],
+        };
+        let t = resolve_file_ref("../../x/mod.rs", "crates/a/src/m/README.md", &m);
+        // The candidate is still reachable by basename + locality (the Drifted
+        // rung), but it must not be called an exact match.
+        assert_eq!(t.len(), 1);
+        assert_ne!(
+            t[0].grade,
+            LinkGrade::Exact,
+            "a joined path of crates/a/x/mod.rs must not grade exact against x/mod.rs"
+        );
+    }
+
     #[test]
     fn file_exact_path() {
         let m = Mock {
@@ -317,8 +375,22 @@ mod tests {
             files: vec![file(1, "api/order.rs"), file(2, "ui/order.rs")],
             symbols: vec![],
         };
-        // linking from api/ → api/order.rs is nearer (1 shared segment).
-        let near = resolve_code_link("order.rs", "api/docs.md", &m);
+        // A bare sibling name resolves by the join, not by locality: from
+        // `api/docs.md`, `order.rs` *means* `api/order.rs`. Before the shared
+        // join this reached the locality rung and graded Drifted.
+        let sibling = resolve_code_link("order.rs", "api/docs.md", &m);
+        assert_eq!(
+            sibling,
+            [CodeTarget {
+                id: 1,
+                grade: LinkGrade::Exact,
+                is_file: true
+            }]
+        );
+        // A stale path that no join can satisfy still falls to locality:
+        // `api/old/order.rs` matches nothing, so basename + nearness pick
+        // api/order.rs over ui/order.rs.
+        let near = resolve_code_link("old/order.rs", "api/docs.md", &m);
         assert_eq!(
             near,
             [CodeTarget {

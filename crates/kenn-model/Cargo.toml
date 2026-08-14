@@ -15,6 +15,7 @@ schemars = ["dep:schemars"]
 
 [dependencies]
 thiserror.workspace = true
+strum.workspace = true
 serde = { workspace = true }
 xxhash-rust = { workspace = true }
 globset.workspace = true

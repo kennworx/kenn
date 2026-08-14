@@ -16,6 +16,7 @@ use kenn_model::LinkGrade;
 
 use super::index::ResolutionIndex;
 use super::links::RawLink;
+use crate::relpath::join_relative;
 
 /// One resolved endpoint of a link.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,29 +223,6 @@ fn worsen(grade: LinkGrade) -> LinkGrade {
 
 fn ids(nodes: &[super::index::NodeRef]) -> Vec<String> {
     nodes.iter().map(|n| n.id.clone()).collect()
-}
-
-/// Resolve a relative inline `target` against the linking file's directory,
-/// normalizing `.`/`..` segments, into a workspace-relative path. Returns `None`
-/// if `..` walks above the workspace root (the target then isn't in the corpus).
-/// Pure string math — no filesystem, `/`-normalized paths only.
-fn join_relative(linking_relpath: &str, target: &str) -> Option<String> {
-    let dir = linking_relpath.rsplit_once('/').map_or("", |(d, _)| d);
-    let mut segs: Vec<&str> = if dir.is_empty() {
-        Vec::new()
-    } else {
-        dir.split('/').collect()
-    };
-    for seg in target.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                segs.pop()?; // escapes the workspace root → not in-corpus
-            }
-            s => segs.push(s),
-        }
-    }
-    Some(segs.join("/"))
 }
 
 /// Filename of `target` without directory or `.md`/`.markdown` extension.

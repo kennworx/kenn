@@ -99,7 +99,22 @@ pub struct CheckAnchorsResponse {
     /// Findings whose anchored **files** still exist but changed content since
     /// the finding was anchored — re-read each before relying on it (a stale
     /// directive), then re-`attach` to refresh its sha.
+    ///
+    /// Rules only. A rule survives edits to the file it is anchored to, so
+    /// drift here is usually incidental and clearing it is routine.
     pub drifted: Vec<AnchorEntry>,
+    /// **Claims** — findings asserting something about the current state of the
+    /// code (a bug, a limitation, deferred work, a fix) — whose anchored content
+    /// changed since the claim was recorded, so the assertion may no longer be
+    /// true.
+    ///
+    /// Unlike `drifted`, this is not a routine re-read: whoever changed the code
+    /// had no reason to look for a finding describing it, so a claim can quietly
+    /// stop being true while still being served as fact. Re-verify against the
+    /// current code and record the outcome. Do NOT clear these by re-attaching —
+    /// `attach` means "this applied to my change" and asserts nothing about
+    /// whether the claim holds.
+    pub unverified: Vec<AnchorEntry>,
 }
 
 /// Report committed findings whose anchors no longer resolve on disk, so a
@@ -128,6 +143,14 @@ pub async fn check_anchors(
                         .map(|d| AnchorEntry {
                             finding_id: d.finding_id,
                             anchors: d.anchors,
+                        })
+                        .collect(),
+                    unverified: health
+                        .unverified
+                        .into_iter()
+                        .map(|u| AnchorEntry {
+                            finding_id: u.finding_id,
+                            anchors: u.anchors,
                         })
                         .collect(),
                 })

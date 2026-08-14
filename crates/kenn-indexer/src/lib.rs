@@ -28,6 +28,7 @@ pub(crate) static BENCH_ENABLED: LazyLock<bool> =
 pub mod aggregate;
 pub mod atlas;
 pub mod canonicalize;
+pub mod code_sql;
 pub mod css;
 pub mod docker;
 pub mod driver;
@@ -42,13 +43,17 @@ pub mod parse_jsonl;
 pub mod pipeline;
 pub mod provision;
 pub mod pubid;
+pub mod relpath;
 pub mod report;
 pub mod sink;
 pub mod snapshot;
+pub mod sql;
 pub mod text;
 pub mod transform;
 pub mod transform_jsonl;
 pub mod workflow;
+pub mod xml;
+pub mod xml_sql;
 
 pub use canonicalize::{
     discover_other_worktrees, CanonicalizeError, Workspace, WorkspaceRelativePath,

@@ -40,8 +40,8 @@ fingerprint is absent SHALL be left unembedded and queued for the background job
 ### Requirement: Incremental background embedding job
 
 The embedding pass SHALL run as a background job that embeds only the
-reconciliation misses, appends one sidecar segment, and hot-swaps the new
-vectors into the searchable store. It SHALL be invokable both from the MCP
+reconciliation misses, appends the resulting sidecar segments, and hot-swaps the
+new vectors into the searchable store. It SHALL be invokable both from the MCP
 server's cold-start orchestration and from a CLI trigger.
 
 The job SHALL submit its misses to the embedding producer as **bulk
@@ -51,32 +51,42 @@ yields to interactive work between batches, so a large background pass
 cannot monopolize the embedder or starve interactive search —
 responsiveness does not depend on how the job frames its input.
 
-The job SHALL consume the Lance scan as a stream and embed
-**one scan batch at a time**. Texts and vectors SHALL NOT be
-accumulated for the whole corpus before submission; each scan
-batch's name-row texts are embedded, applied, and appended to the
-build store before the next scan batch is pulled. Peak memory
-SHALL be bounded by one scan batch plus one in-flight producer
-request, independent of corpus size. A single doc-lookup pre-pass
-over the scan is permitted (only doc strings are retained, not
-the full record batches) where the schema requires cross-batch
-lookup to compose the name+doc embed text.
+The job SHALL consume its scan in **chunks** and embed one chunk at a time.
+Texts and vectors SHALL NOT be accumulated for the whole corpus before
+submission; each chunk's texts are embedded, applied, and appended to the
+sidecar before the next chunk is scanned. Peak memory SHALL be bounded by one
+chunk plus one in-flight producer request, **independent of corpus size**.
 
-The full re-embedding pass (the `kenn update` flow that fills a
-freshly-built knowledge store with null embeddings) SHALL follow
-the same per-scan-batch streaming discipline.
+The chunk size SHALL be the configured embedding `batch_size` — the same value
+the producer backends batch their own requests by — so the pass and the
+producer cannot disagree about how much work is in flight.
 
-"Streaming" governs **stream consumption only** — the sidecar segment is
-still **appended and hot-swapped atomically** (accumulate into a segment,
-then publish by atomic rename), NOT published in torn partial pieces; a
-crash mid-pass SHALL NOT leave a partial segment in the live set. Vectors
-SHALL be applied in submission order so the published segment is independent
-of batching.
+The scan SHALL advance by a **rowid cursor**, not by offset and not by relying
+on its own writes to shrink the candidate set: a full pass has no
+"already embedded" filter to advance it, and an offset re-walks the skipped
+prefix on every chunk. Rows with no embeddable text SHALL be excluded by the
+scan query itself, so that an exhausted scan and a chunk of entirely-skipped
+rows are not confusable.
+
+The full re-embedding pass (the flow that fills a freshly-built knowledge store
+with null embeddings) SHALL follow the same per-chunk discipline. It SHALL clear
+the existing vectors in the **first** chunk's insert transaction, not before the
+loop, so that an unavailable embedder — which is detected on the first
+submission — never wipes vectors it cannot replace.
+
+A full pass that fails partway SHALL leave the chunks it completed applied
+rather than restoring the prior vectors. The resulting state is self-healing: a
+subsequent incremental pass embeds exactly the rows still missing a vector.
+
+"Chunking" governs **scan consumption and submission only** — each sidecar
+segment is still written whole and published by atomic rename, never in torn
+partial pieces; a crash mid-pass SHALL NOT leave a partial segment in the live
+set. Vectors SHALL be applied in submission order.
 
 #### Scenario: only the diff is embedded
 
 - **WHEN** the background job runs after an index whose reconciliation left `M` misses
-- **THEN** exactly `M` symbols are sent to the model and a new segment containing `M` entries is appended to `.kenn/vectors/`
+- **THEN** exactly `M` symbols are sent to the model and the resulting entries are appended to `.kenn/vectors/`
 
 #### Scenario: the background pass is low priority
 
@@ -84,19 +94,33 @@ of batching.
 - **THEN** they are classed bulk/low priority
 - **AND** an interactive query embed issued concurrently is served ahead of the remaining bulk work
 
-#### Scenario: scan is consumed as a stream, not collected
+#### Scenario: scan is consumed in chunks, not collected
 
-- **GIVEN** a knowledge store with `N` row groups in its Lance scan
+- **GIVEN** a knowledge store with more embeddable rows than the configured `batch_size`
 - **WHEN** the embedding pass (full or incremental) runs
-- **THEN** the pass holds at most one `RecordBatch` from the scan in memory at a time
-- **AND** it does not call `try_collect()` on the scan stream
-- **AND** each batch's vectors are applied and appended to the build store before the next batch is pulled
+- **THEN** the producer is called more than once
+- **AND** no single call is larger than `batch_size`
+- **AND** each chunk's vectors are applied and appended before the next chunk is scanned
 
-#### Scenario: the segment is published atomically despite streamed consumption
+#### Scenario: undocumented symbols do not stall the cursor
 
-- **GIVEN** the job consumes the producer's vector stream incrementally to bound memory
-- **WHEN** all misses are embedded
-- **THEN** the segment is published by one atomic append + hot-swap, not as torn partial pieces
+- **GIVEN** a corpus in which rows with no embeddable text are interleaved with documented ones
+- **WHEN** the pass runs
+- **THEN** every documented row is embedded exactly once
+- **AND** the pass terminates rather than re-scanning a chunk it has already passed
+
+#### Scenario: an unavailable embedder does not wipe existing vectors
+
+- **GIVEN** a full re-embed pass and an embedder that is unavailable
+- **WHEN** the pass runs
+- **THEN** it reports the embedder as unavailable
+- **AND** the previously published vectors remain intact
+
+#### Scenario: the segment is published atomically despite chunked consumption
+
+- **GIVEN** the job consumes the producer's vectors chunk by chunk to bound memory
+- **WHEN** a chunk's vectors are appended
+- **THEN** each segment is published by one atomic write + rename, not as torn partial pieces
 - **AND** a crash mid-pass leaves no partial segment in the live set
 
 #### Scenario: a search stays responsive during a large background pass
@@ -166,20 +190,20 @@ not recorded.
 
 ### Requirement: Committed versus derived store layout
 
-Within the kenn store, `.kenn/vectors/` SHALL be the only committed artifact. The databases that store builds — the code-graph Lance datasets, the `knowledge/` Lance dataset, the BM25 indexes, and the IVF_PQ index — SHALL be classified as derived, gitignored, and rebuilt per worktree. There SHALL be no redb store. (The findings store, `.kenn/findings/`, is a separate durable Lance store on its own lifecycle — outside this requirement's scope; the `committed-findings` change governs its committed-versus-derived disposition.)
+Within the kenn store, `.kenn/vectors/` SHALL be the only committed artifact. The databases that store builds — the code-graph snapshot database, the search database, and the full-text and vector indexes inside them — SHALL be classified as derived, gitignored, and rebuilt per worktree. There SHALL be no redb store. (The findings store is a separate durable store on its own lifecycle — its committed per-finding records live under `.kenn/findings/` and its database at the derived root — outside this requirement's scope; the `committed-findings` change governs its committed-versus-derived disposition.)
 
-The derived Lance datasets — the code graph and the knowledge store — SHALL be co-located under `.kenn/local/` as one per-index-run snapshot: built into a single `building/` directory and published by one atomic directory swap. `.kenn/knowledge/` SHALL NOT remain a separate top-level path. `.kenn/.gitignore` therefore ignores `local/`, with `.kenn/vectors/` tracked as the committed embedding sidecar.
+The derived databases — the code graph and the search store — SHALL be co-located under `.kenn/local/` as one per-index-run snapshot: built into a single `building/` directory and published by one atomic directory swap. `.kenn/knowledge/` SHALL NOT remain a separate top-level path. `.kenn/.gitignore` therefore ignores `local/`, with `.kenn/vectors/` tracked as the committed embedding sidecar.
 
 #### Scenario: a fresh worktree rebuilds derived state and reuses vectors
 
 - **WHEN** a fresh git worktree or clone runs `kenn index`
-- **THEN** the code-graph Lance datasets, the `knowledge/` Lance store, BM25, and IVF_PQ are rebuilt locally from source, and vectors are taken from the committed `.kenn/vectors/` sidecar — only that worktree's own diff is embedded
+- **THEN** the code-graph and search databases and their full-text and vector indexes are rebuilt locally from source, and vectors are taken from the committed `.kenn/vectors/` sidecar — only that worktree's own diff is embedded
 
 #### Scenario: derived datasets publish as one snapshot
 
 - **WHEN** an index run finalizes
-- **THEN** the code graph and the knowledge store are published together by a single atomic directory swap under `.kenn/local/`
-- **AND** no derived Lance dataset remains at a separate top-level `.kenn/` path
+- **THEN** the code graph and the search store are published together by a single atomic directory swap under `.kenn/local/`
+- **AND** no derived database remains at a separate top-level `.kenn/` path
 
 ### Requirement: Embeddable text is doc-only and skips undocumented symbols
 

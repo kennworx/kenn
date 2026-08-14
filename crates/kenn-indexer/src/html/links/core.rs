@@ -8,6 +8,7 @@ use kenn_model::{
 use super::super::ids::HtmlIdIndex;
 use super::super::parse::{Attr, Element};
 use crate::markdown::{resolve_file_ref, CodeCandidate, CodeLookup};
+use crate::relpath::{join_relative, PathExists};
 
 /// The workspace file set HTML references resolve against — the "resolution
 /// index of known files/documents" (relpath → file node id). Implements
@@ -101,15 +102,6 @@ impl FragmentIndex {
     }
 }
 
-/// Whether a non-indexed asset exists on disk at a canonical workspace-relative
-/// path. An existing asset is keyed by that path (so spellings collapse); a
-/// missing one dangles by its written string. The caller backs this with a
-/// filesystem check (Phase 4); tests use a fixed set.
-pub trait AssetIndex {
-    /// True when an asset file exists at this canonical workspace-relative path.
-    fn exists(&self, canonical_path: &str) -> bool;
-}
-
 /// Accumulates the dangling external stubs minted while resolving one file's
 /// references, deduped by `pub_id`.
 #[derive(Debug, Default)]
@@ -120,9 +112,24 @@ pub struct StubSink {
 
 impl StubSink {
     fn intern(&mut self, pub_id: &str, ids: &mut HtmlIds) -> ShortId {
+        self.intern_with(pub_id, ids, stub_symbol)
+    }
+
+    /// Intern a stub whose target is known to exist — always an `attachment`
+    /// (see [`attachment_symbol`]).
+    fn intern_attachment(&mut self, pub_id: &str, ids: &mut HtmlIds) -> ShortId {
+        self.intern_with(pub_id, ids, attachment_symbol)
+    }
+
+    fn intern_with(
+        &mut self,
+        pub_id: &str,
+        ids: &mut HtmlIds,
+        record: fn(ShortId, &str) -> SymbolRecord,
+    ) -> ShortId {
         *self.by_pub_id.entry(pub_id.to_string()).or_insert_with(|| {
             let id = ids.mint();
-            self.records.push(stub_symbol(id, pub_id));
+            self.records.push(record(id, pub_id));
             id
         })
     }
@@ -143,7 +150,7 @@ pub fn anchor_link_edges(
     doc_sym: ShortId,
     files: &dyn CodeLookup,
     frags: &FragmentIndex,
-    assets: &dyn AssetIndex,
+    assets: &dyn PathExists,
     ids: &mut HtmlIds,
     stubs: &mut StubSink,
 ) -> Vec<EdgeRecord> {
@@ -178,7 +185,7 @@ pub fn asset_link_edges(
     elements: &[Element],
     linking_relpath: &str,
     doc_sym: ShortId,
-    assets: &dyn AssetIndex,
+    assets: &dyn PathExists,
     ids: &mut HtmlIds,
     stubs: &mut StubSink,
 ) -> Vec<EdgeRecord> {
@@ -203,7 +210,7 @@ pub fn asset_link_edges(
 struct Anchor<'a> {
     files: &'a dyn CodeLookup,
     frags: &'a FragmentIndex,
-    assets: &'a dyn AssetIndex,
+    assets: &'a dyn PathExists,
     ids: &'a mut HtmlIds,
     stubs: &'a mut StubSink,
     doc_sym: ShortId,
@@ -227,11 +234,12 @@ impl Anchor<'_> {
             return;
         }
         let targets = resolve_file_ref(file_part, self.linking_relpath, self.files);
-        if !targets.is_empty() {
-            for t in targets {
-                self.push(t.id, EdgeProperties::LinksToFile { grade: t.grade });
-            }
-        } else if is_asset_ref(file_part) {
+        if targets.is_empty() {
+            // Existence decides, not spelling. `mint_asset` already dangles a
+            // target the workspace does not hold, so the old `is_asset_ref`
+            // gate only ever suppressed *existing* targets whose extension kenn
+            // indexes — an excluded `.md` dangled here while markdown resolved
+            // it, which is the divergence this change removes.
             let (stub, grade) = mint_asset(
                 file_part,
                 self.linking_relpath,
@@ -241,8 +249,9 @@ impl Anchor<'_> {
             );
             self.push(stub, links_props(grade));
         } else {
-            let stub = self.stubs.intern(&unresolved_id(file_part), self.ids);
-            self.push(stub, links_props(LinkGrade::Dangling));
+            for t in targets {
+                self.push(t.id, EdgeProperties::LinksToFile { grade: t.grade });
+            }
         }
     }
 
@@ -250,12 +259,15 @@ impl Anchor<'_> {
     /// `html_id` anchor; an unknown fragment dangles by the written href.
     fn fragment(&mut self, href: &str, frag: &str) {
         let file_part = href.split('#').next().unwrap_or("").trim();
+        // `None` = the href walks above the workspace root, so there is no
+        // in-corpus file to look the fragment up in; fall through to dangling
+        // rather than resolving it against the root.
         let target_rel = if file_part.is_empty() {
-            self.linking_relpath.to_string()
+            Some(self.linking_relpath.to_string())
         } else {
-            canonical_path(self.linking_relpath, file_part)
+            join_relative(self.linking_relpath, file_part)
         };
-        if let Some(id) = self.frags.get(&target_rel, frag) {
+        if let Some(id) = target_rel.and_then(|rel| self.frags.get(&rel, frag)) {
             self.push(id, links_props(LinkGrade::Exact));
         } else {
             let stub = self.stubs.intern(&unresolved_id(href), self.ids);
@@ -282,14 +294,18 @@ impl Anchor<'_> {
 fn mint_asset(
     href: &str,
     linking_relpath: &str,
-    assets: &dyn AssetIndex,
+    assets: &dyn PathExists,
     ids: &mut HtmlIds,
     stubs: &mut StubSink,
 ) -> (ShortId, LinkGrade) {
-    let canonical = canonical_path(linking_relpath, href);
+    // An href walking above the workspace root has no canonical in-corpus path,
+    // so it cannot key a shared stub — it dangles by its written string.
+    let Some(canonical) = join_relative(linking_relpath, href) else {
+        return (stubs.intern(&unresolved_id(href), ids), LinkGrade::Dangling);
+    };
     if assets.exists(&canonical) {
         (
-            stubs.intern(&format!("html:{}", crate::pubid::floor(&canonical)), ids),
+            stubs.intern_attachment(&format!("html:{}", crate::pubid::floor(&canonical)), ids),
             LinkGrade::Exact,
         )
     } else {
@@ -330,16 +346,6 @@ fn media_srcs(elements: &[Element]) -> Vec<&str> {
         .collect()
 }
 
-/// An `<a href>` to a **non-indexed** file — an asset, not a document/stylesheet/
-/// script. True when the basename's extension is not one an indexer owns.
-fn is_asset_ref(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    match name.rsplit_once('.') {
-        Some((_, ext)) => !is_indexed_ext(ext),
-        None => false, // extensionless → treat as a document ref, not an asset
-    }
-}
-
 /// Whether `ext` (any case) belongs to a producer kenn indexes — HTML, CSS/Sass,
 /// markdown, or a code language. Everything else (png, svg, pdf, woff…) is an
 /// asset. The set mirrors the discovery extensions of the indexed languages.
@@ -367,34 +373,6 @@ fn is_indexed_ext(ext: &str) -> bool {
             | "mts"
             | "cts"
     )
-}
-
-/// Normalize `href` to a canonical workspace-relative path: a site-absolute
-/// `/x` is rooted at the workspace; a relative `x` / `../x` is joined onto the
-/// linking file's directory. `.`/`..` segments resolve (a `..` past the root is
-/// dropped). Pure string math, `/`-normalized — the asset/fragment key so all
-/// spellings of one path collapse.
-fn canonical_path(linking_relpath: &str, href: &str) -> String {
-    let mut segs: Vec<&str> = if href.starts_with('/') {
-        Vec::new()
-    } else {
-        let dir = linking_relpath.rsplit_once('/').map_or("", |(d, _)| d);
-        if dir.is_empty() {
-            Vec::new()
-        } else {
-            dir.split('/').collect()
-        }
-    };
-    for seg in href.trim_start_matches('/').split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                segs.pop();
-            }
-            s => segs.push(s),
-        }
-    }
-    segs.join("/")
 }
 
 /// `<link rel="stylesheet" href>` and `<script src>` import edges for one file
@@ -585,17 +563,28 @@ fn unresolved_id(target: &str) -> String {
 /// D7); an indexed-but-missing target (`gone.html`, `theme.css`) stays a
 /// `document` stub.
 fn stub_symbol(id: ShortId, pub_id: &str) -> SymbolRecord {
-    let name = pub_id
+    let name = stub_name(pub_id);
+    let kind = stub_kind(&name);
+    stub_record(id, pub_id, name, kind)
+}
+
+/// The display name behind a stub's `pub_id` — the written target for a
+/// dangling stub, the canonical path for a resolved one.
+fn stub_name(pub_id: &str) -> String {
+    pub_id
         .strip_prefix("html:@unresolved/")
         .or_else(|| pub_id.strip_prefix("html:"))
         .unwrap_or(pub_id)
-        .to_string();
+        .to_string()
+}
+
+fn stub_record(id: ShortId, pub_id: &str, name: String, kind: Kind) -> SymbolRecord {
     SymbolRecord {
         id,
         pub_id: pub_id.to_string(),
         language: Language::Html,
         pkg_id: 0,
-        kind: stub_kind(&name),
+        kind,
         name,
         enclosing_sym_id: 0,
         partial: false,
@@ -622,6 +611,18 @@ fn stub_kind(name: &str) -> Kind {
     } else {
         Kind::Document
     }
+}
+
+/// The record for a stub whose target is **known to exist** in the workspace.
+/// Kinded by [`crate::markdown::existing_target_kind`] — the same rule the
+/// markdown corpus applies, so one on-disk target is not a leaf on one side and
+/// a document on the other. [`stub_kind`]'s guess is for a *dangling* stub,
+/// which has only a written string to go on; running it here and discarding the
+/// result would be dead work on every asset reference.
+fn attachment_symbol(id: ShortId, pub_id: &str) -> SymbolRecord {
+    let name = stub_name(pub_id);
+    let kind = crate::markdown::existing_target_kind(&name);
+    stub_record(id, pub_id, name, kind)
 }
 
 #[cfg(test)]

@@ -52,6 +52,20 @@ pub enum EdgeKind {
     /// Source is the extending `css_class` node; target is the extended
     /// `css_class`. Emitted only on a registry hit (no dangling stubs).
     ExtendsRule,
+    /// A statement or element brings a table into being (`CREATE TABLE`).
+    /// Marks the table internal — it does NOT gate the table's existence, since
+    /// any reference may mint one. Source is the reference site, target the
+    /// `sql_table` node.
+    DefinesTable,
+    /// A statement or element changes an existing table's definition
+    /// (`ALTER TABLE`, `DROP TABLE`). A modification never mints identity: an
+    /// alter of an undeclared table links to a table minted by the reference
+    /// itself, and the index does not evaluate history, so a drop does not
+    /// unregister its target.
+    AltersTable,
+    /// A statement or element reads or writes a table's data. Source is the
+    /// reference site, target the `sql_table` node.
+    AccessesTable,
 }
 
 impl EdgeKind {
@@ -77,6 +91,9 @@ impl EdgeKind {
             Self::LinksToFile => "links_to_file",
             Self::UsesCssClass => "uses_css_class",
             Self::ExtendsRule => "extends_rule",
+            Self::DefinesTable => "defines_table",
+            Self::AltersTable => "alters_table",
+            Self::AccessesTable => "accesses_table",
         }
     }
 }
@@ -110,8 +127,11 @@ impl From<EdgeKind> for NonZeroU32 {
             EdgeKind::UsesCssClass => 15,
             EdgeKind::ExtendsRule => 16,
             EdgeKind::ExtendsType => 17,
+            EdgeKind::DefinesTable => 18,
+            EdgeKind::AltersTable => 19,
+            EdgeKind::AccessesTable => 20,
         };
-        NonZeroU32::new(code).expect("edge-kind codes are 1..=17, never 0")
+        NonZeroU32::new(code).expect("edge-kind codes are 1..=20, never 0")
     }
 }
 
@@ -139,6 +159,9 @@ impl TryFrom<u32> for EdgeKind {
             15 => Self::UsesCssClass,
             16 => Self::ExtendsRule,
             17 => Self::ExtendsType,
+            18 => Self::DefinesTable,
+            19 => Self::AltersTable,
+            20 => Self::AccessesTable,
             other => return Err(UnknownEdgeKindCode(other)),
         })
     }
@@ -233,6 +256,14 @@ pub enum EdgeProperties {
     ExtendsRule {
         grade: LinkGrade,
     },
+    /// A reference site names a table. One shape covers all three table edge
+    /// kinds because they differ only in what the site does to the table, and a
+    /// single site can carry more than one — a create-as-select both defines its
+    /// target and accesses its sources.
+    Table {
+        kind: EdgeKind,
+        grade: LinkGrade,
+    },
 }
 
 impl EdgeProperties {
@@ -256,6 +287,7 @@ impl EdgeProperties {
             Self::LinksToFile { .. } => EdgeKind::LinksToFile,
             Self::UsesCssClass { .. } => EdgeKind::UsesCssClass,
             Self::ExtendsRule { .. } => EdgeKind::ExtendsRule,
+            Self::Table { kind, .. } => *kind,
         }
     }
 }

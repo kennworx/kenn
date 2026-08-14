@@ -28,6 +28,33 @@ pub(super) fn is_directive_or_guide(finding: &Finding) -> bool {
         .any(|t| t == TAG_DIRECTIVE || t == TAG_GUIDE)
 }
 
+/// Tags marking a finding as a **claim**: an assertion about the current state
+/// of the code, rather than a rule about how the codebase works.
+///
+/// The distinction decides what drift means. A rule ("flooring is per-ingester")
+/// survives edits to the file it is anchored to — drift on it is incidental. A
+/// claim ("the producer emits spurious zero-range defs") is a statement about
+/// code someone may since have changed, and whoever changed it had no reason to
+/// look for a finding describing it. Drift on a claim means it may simply have
+/// stopped being true.
+///
+/// These are the tags the store already carries on exactly the findings that
+/// decay, so classification needs no migration and no re-tagging pass.
+const CLAIM_TAGS: [&str; 5] = ["bug", "deferred", "gotcha", "fixed", "usability"];
+
+/// True iff `finding` asserts something about current code state.
+///
+/// An unmarked finding is a **rule**. That default is deliberate: this store is
+/// overwhelmingly rules, and treating every unmarked finding as a decaying claim
+/// would flood the re-verification surface with entries that do not need it —
+/// which is how a signal stops being read.
+pub(super) fn is_claim(finding: &Finding) -> bool {
+    finding
+        .tags
+        .iter()
+        .any(|t| CLAIM_TAGS.contains(&t.as_str()))
+}
+
 /// Resolves whether a code-graph node id still exists in the current
 /// branch's code graph — the membership test that drives read-time
 /// staleness. A code-node id has the form `<lang>:<pub_id>`.

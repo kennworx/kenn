@@ -267,6 +267,136 @@ async fn paraphrase_query_retrieves_code_symbol() {
 
 // ── incremental embed job ───────────────────────────────────────────
 
+/// A full re-embed with an unavailable embedder must not wipe the vectors it
+/// cannot replace.
+///
+/// This is why the `Full` clear lives inside the **first chunk's** insert
+/// transaction rather than before the loop (design D2). Chunking made that
+/// placement load-bearing: a `DELETE FROM vec_knowledge` hoisted above the loop
+/// would run before the first submission tells us the embedder is missing, and
+/// a workspace whose embedder simply is not running would lose its vectors.
+#[tokio::test(flavor = "multi_thread")]
+#[file_serial(embedder)]
+async fn a_full_pass_without_an_embedder_keeps_existing_vectors() {
+    let _guard = ReleaseGuard;
+    if !enable_model() {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    build_code_corpus(dir.path(), None).await;
+    let layout = Layout::default_for(dir.path());
+    let model = kenn_config::EmbeddingsConfig::default().model.clone();
+    let vectors_dir = kenn_store::code_generation_dir(&layout, &model);
+
+    // Populate: five rows embedded, segments on disk.
+    let seeded =
+        kenn_store::embed_pending(&layout, false, 0, &model, kenn_store::shared_embedder())
+            .await
+            .expect("seed embed");
+    assert_eq!(seeded.vectors, 5);
+    let before = std::fs::read_dir(&vectors_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("seg-"))
+        .count();
+    assert!(before >= 1, "seed produced no segments");
+
+    // Take the model away and run a FULL pass, which is the mode that clears.
+    kenn_store::release_shared_embedder();
+    std::env::set_var(
+        "KENN_EMBED_MODEL_PATH",
+        dir.path().join("no-such-model.gguf"),
+    );
+    let report = kenn_store::reembed(&layout, false, 0, kenn_store::shared_embedder()).await;
+    std::env::remove_var("KENN_EMBED_MODEL_PATH");
+
+    // A missing model surfaces as `Err(Backend("no embedder available"))`
+    // rather than the `disabled` degradation, which is reserved for embedding
+    // being switched off. Either way the invariant is the same and it is the
+    // one D2 turns on: the pass failed, so it must not have cleared anything.
+    assert!(
+        report.as_ref().err().is_some() || !report.as_ref().unwrap().embedder_available,
+        "expected a full pass with no model to fail or degrade, got a success"
+    );
+    // The vectors at risk are the `vec_knowledge` rows, not the sidecar
+    // segments on disk — a `DELETE FROM vec_knowledge` leaves every seg- file
+    // untouched, so counting files cannot tell the two apart (it did not: the
+    // first version of this test survived the mutation it exists to catch).
+    // The distinguishing observable is what a *subsequent* incremental pass
+    // finds pending: nothing, if the rows survived; all five, if they were
+    // cleared.
+    std::env::set_var("KENN_EMBED_MODEL_PATH", model_path().expect("model"));
+    kenn_store::release_shared_embedder();
+    let after = kenn_store::embed_pending(&layout, false, 0, &model, kenn_store::shared_embedder())
+        .await
+        .expect("incremental pass after the failed full pass");
+    assert_eq!(
+        after.vectors, 0,
+        "a full pass that could not embed must leave the existing vectors in \
+         place — {} rows came back pending, so they were cleared before the \
+         embedder was found to be missing",
+        after.vectors
+    );
+    let _ = before;
+}
+
+/// The pass chunks its scan instead of holding the corpus.
+///
+/// Before `bounded-embed-pass` it issued one `scan_rows` and one
+/// `embed_block_until_ready` for the whole match set, so texts, vectors and
+/// sidecar entries were all corpus-sized at once — ~3 KB per row, ~93 MB on
+/// kenn's own repo and linear in the corpus after that. The observable
+/// consequence of chunking is that a corpus larger than `batch_size` appends
+/// more than one segment: entries are appended per chunk precisely so they are
+/// not accumulated.
+///
+/// `KENN_EMBED_BATCH_SIZE` makes this testable without embedding 257 rows.
+/// `std::env::set_var` is safe on edition 2021, and `file_serial(embedder)`
+/// already serializes every test that touches the embedder.
+#[tokio::test(flavor = "multi_thread")]
+#[file_serial(embedder)]
+async fn the_embed_pass_chunks_its_scan() {
+    let _guard = ReleaseGuard;
+    if !enable_model() {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    build_code_corpus(dir.path(), None).await;
+    let vectors_dir = kenn_store::code_generation_dir(
+        &Layout::default_for(dir.path()),
+        &kenn_config::EmbeddingsConfig::default().model,
+    );
+
+    // Five doc'd rows, chunked two at a time → three chunks.
+    std::env::set_var("KENN_EMBED_BATCH_SIZE", "2");
+    let report = kenn_store::embed_pending(
+        &Layout::default_for(dir.path()),
+        false,
+        0,
+        &kenn_config::EmbeddingsConfig::default().model,
+        kenn_store::shared_embedder(),
+    )
+    .await;
+    std::env::remove_var("KENN_EMBED_BATCH_SIZE");
+    let report = report.expect("embed_pending");
+
+    assert_eq!(
+        report.vectors, 5,
+        "chunking must not change what is embedded"
+    );
+    let segments = std::fs::read_dir(&vectors_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("seg-"))
+        .count();
+    assert!(
+        segments > 1,
+        "expected the pass to append per chunk (>1 seg- file for 5 rows at \
+         batch_size 2), got {segments} — a single segment means the whole \
+         corpus was embedded and accumulated in one shot"
+    );
+}
+
 /// The incremental embed job (`embed_pending`) embeds only the symbols
 /// left null, appends one sidecar segment plus a manifest, and is a
 /// clean no-op on a second run (incremental-embedding 3.1 / 3.6).

@@ -46,6 +46,10 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub docker: DockerConfig,
+    /// The XML↔SQL bridge. Top-level, not under `[language.xml]`: the bridge
+    /// runs after both producers join and belongs to neither.
+    #[serde(default)]
+    pub xml_sql: crate::XmlSqlConfig,
 }
 
 impl Config {
@@ -163,6 +167,14 @@ impl Config {
                 return Err(ConfigError::DuplicateTarget { value: t.clone() });
             }
         }
+        self.validate_globs()?;
+        self.validate_xml_sql()?;
+        Ok(())
+    }
+
+    /// Every configured glob, from one place: an invalid pattern is a config
+    /// error rather than a producer failure at walk time.
+    fn validate_globs(&self) -> Result<(), ConfigError> {
         for (scope, patterns) in [
             ("workspace", &self.workspace.excludes),
             ("rust", &self.language.rust.excludes),
@@ -201,6 +213,23 @@ impl Config {
                 pattern: pat.clone(),
                 reason: e.to_string(),
             })?;
+        }
+        Ok(())
+    }
+
+    /// A bridge rule naming an element or a role but no attribute identifies no
+    /// table — the attribute is what holds the name. Rejected loudly rather than
+    /// ignored, because a silently inert rule looks configured: someone would
+    /// conclude the bridge cannot see their schema rather than that the rule is
+    /// malformed.
+    fn validate_xml_sql(&self) -> Result<(), ConfigError> {
+        for (i, rule) in self.xml_sql.rules.iter().enumerate() {
+            if rule.attribute.trim().is_empty() {
+                return Err(ConfigError::XmlSqlRuleWithoutAttribute {
+                    index: i,
+                    element: rule.element.clone().unwrap_or_default(),
+                });
+            }
         }
         Ok(())
     }

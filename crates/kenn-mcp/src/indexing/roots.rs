@@ -121,9 +121,31 @@ pub async fn resolve_roots_and_maybe_rebind(state: Arc<ServerState>, peer: Peer<
     let uris: Vec<String> = roots.roots.iter().map(|r| r.uri.clone()).collect();
     let current = state.layout().source_root().to_path_buf();
     let (decision, ignored) = decide_roots_resolution(&uris, &current);
+    log_ignored_roots(&ignored);
+    apply_roots_decision(&state, decision, &current).await;
+    drop(rebind_guard);
+}
+
+/// Note roots the resolution discarded. Split out so the caller stays a
+/// straight line: the decision is already made by `decide_roots_resolution`,
+/// and this only reports what it set aside.
+fn log_ignored_roots(ignored: &[String]) {
     if !ignored.is_empty() {
         tracing::info!("kenn-mcp: ignored roots beyond the first: {ignored:?}");
     }
+}
+
+/// Act on a resolved roots decision. Separated from the `roots/list` round
+/// trip above so the branching lives next to the enum it switches on, leaving
+/// the caller as sequence rather than sequence-plus-fan-out.
+///
+/// The caller holds `rebind_lock` across this call; taking `state` by reference
+/// and cloning only for `rebind_workspace` keeps that guard live throughout.
+async fn apply_roots_decision(
+    state: &Arc<ServerState>,
+    decision: RootsResolution,
+    current: &std::path::Path,
+) {
     match decision {
         RootsResolution::NoUsableRoot => {
             tracing::info!("kenn-mcp: roots/list returned no usable file:// root");
@@ -144,18 +166,14 @@ pub async fn resolve_roots_and_maybe_rebind(state: Arc<ServerState>, peer: Peer<
                 to = %new_ws.display(),
                 "rebind triggered by roots/list"
             );
-            // Clone the Arc for the rebind call so the rebind_lock guard
-            // (still held below) can drop after rebind_workspace returns,
-            // satisfying the borrow checker while preserving exclusivity.
             rebind_workspace(
-                Arc::clone(&state),
+                Arc::clone(state),
                 new_ws,
                 crate::state::WorkspaceSource::RootsList,
             )
             .await;
         }
     }
-    drop(rebind_guard);
 }
 
 /// Atomically rebind to a new workspace. Flips the lifecycle to

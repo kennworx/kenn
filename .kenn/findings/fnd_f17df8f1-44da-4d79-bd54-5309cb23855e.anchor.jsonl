@@ -1,0 +1,4 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src","ts":"2026-08-13T19:32:27.983025Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/sql/parse.rs","ts":"2026-08-13T19:32:27.838152Z","sha":"de9d472adb95b432"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/xml","ts":"2026-08-13T19:32:27.838152Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/code_sql","ts":"2026-08-13T19:32:27.838152Z"}

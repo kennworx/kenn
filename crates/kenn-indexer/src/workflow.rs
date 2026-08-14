@@ -411,6 +411,16 @@ pub fn configure_runner(ws: Workspace, config: &Config) -> IndexerDriver {
     if config.language.html.enabled {
         runner = runner.with_html(config.language.html.clone());
     }
+    if config.language.sql.enabled {
+        runner = runner.with_sql(config.language.sql.clone());
+    }
+    if config.language.xml.enabled {
+        runner = runner.with_xml(config.language.xml.clone());
+        // The bridge only has inputs when XML is indexed. Enabled with it
+        // rather than by its own flag: with no rules configured it still works
+        // from element text, so there is nothing to opt into.
+        runner = runner.with_xml_sql(config.xml_sql.clone());
+    }
     if config.language.text.enabled {
         runner = runner.with_text(config.language.text.clone(), claimed_extensions(config));
     }
@@ -576,7 +586,7 @@ pub fn language_claimed_extensions(language: Language) -> Vec<&'static str> {
 /// claims both css and sass extensions.
 fn claimed_extensions(config: &Config) -> std::collections::BTreeSet<String> {
     let lang = &config.language;
-    let enabled: [(bool, Language); 9] = [
+    let enabled: [(bool, Language); 10] = [
         (lang.rust.enabled, Language::Rust),
         (lang.typescript.enabled, Language::TypeScript),
         (lang.csharp.enabled, Language::Csharp),
@@ -586,6 +596,7 @@ fn claimed_extensions(config: &Config) -> std::collections::BTreeSet<String> {
         (lang.markdown.enabled, Language::Markdown),
         (lang.css.enabled, Language::Css),
         (lang.html.enabled, Language::Html),
+        (lang.sql.enabled, Language::Sql),
     ];
     let mut claimed = std::collections::BTreeSet::new();
     for (on, language) in enabled {
@@ -596,6 +607,11 @@ fn claimed_extensions(config: &Config) -> std::collections::BTreeSet<String> {
                     .map(|e| (*e).to_string()),
             );
         }
+    }
+    // XML claims from its configured list rather than the `Language` constant,
+    // so an added extension is walked and an absent one is not.
+    if lang.xml.enabled {
+        claimed.extend(lang.xml.claimed_extensions());
     }
     claimed
 }

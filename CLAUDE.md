@@ -86,6 +86,7 @@ Workflow: run `just crap-ci` before claiming a Rust change is done. If it fails 
 - Once all logic is in place and `cargo clippy --workspace --all-targets` + `just crap-ci` are green, run `cargo fmt --all` as the very last step before staging the commit.
 - If the run touches files you didn't edit, that's formatting drift from elsewhere. Commit those files under their own focused message (e.g. `workspace: cargo fmt --all`); don't bundle drift with logic changes.
 - This rule overrides §3's "don't touch adjacent formatting" for `.rs` files: `rustfmt` output is canonical, and the diff that matters is "what `rustfmt` would produce."
+- **Then run clippy once more.** Formatting is not warning-neutral: re-wrapping a call across more lines pushed a function from 99 to 101 lines and tripped `clippy::too_many_lines` *after* a green gate, so the reported "zero warnings" was stale by the time it was said. The order is clippy → CRAP → fmt → **clippy**.
 
 ## 8. C#: Format with `dotnet format`
 
@@ -104,6 +105,8 @@ Workflow: run `just crap-ci` before claiming a Rust change is done. If it fails 
 ## 9. A Test Is Not a Guard Until You've Seen It Fail
 
 **Break the code, watch the test go red, restore. Then claim it guards something.**
+
+(How to *run* them is §11 — `just test`, never bare `cargo test --workspace`.)
 
 §4 says "write a test that reproduces it, then make it pass." That is necessary
 and not sufficient: a test can pass for reasons unrelated to the property it
@@ -128,6 +131,22 @@ Corollary: **fix one finding per edit.** Two fixes in one edit hide each other �
 removing a duplicate `Console.Error.WriteLine` while adding `logger.LogError`
 looked like one change and silently made the diagnostic suppressible by an
 env var.
+
+Corollary: **when a mutation survives, suspect the fixture before the test.** The
+usual cause is that the setup never reaches the branch the test names, so the
+assertion is true for an unrelated reason. Four in one session, all this shape:
+
+- a fixture that registered `src/order.rs` in the *store* but never created it on
+  disk, so the existence rung it was meant to order against was unreachable;
+- a link written `../notes` in a test for *bare-name* handling — the slash routed
+  it to the file branch, so the symbol lookup under test never ran;
+- a `HashSet` mock that distinguished `docs` from `docs/` where the real
+  `Path::exists` does not, rejecting the bad input by accident;
+- a `RawLink { target: "[[gone]]" }` the extractor can never produce, since it
+  strips the brackets before the code under test sees it.
+
+A mock that is *stricter* than the thing it stands for is the most dangerous
+kind: it makes the guard pass for a reason production would not reproduce.
 
 If a property genuinely cannot be asserted from the test harness (see the
 `dotnet exec` / MSBuildLocator case in `just probe-smoke`), say so in a comment
@@ -178,3 +197,74 @@ TOML/JSON/YAML. The symbol graph doesn't index those.
 edits. This is NOT a licence to fall back to grep: for code you haven't edited
 this session it is accurate; if you have moved or renamed symbols, run
 `kenn index --force` — or say plainly that the answer may lag.
+
+## 11. Rust: Run Tests With `just test`
+
+**`just test`. Never bare `cargo test --workspace`.**
+
+The recipe is `KENN_EMBED_IN_PROCESS=1 cargo test --workspace`, and that variable
+is load-bearing, not decoration. Without it an early test binary reaches the
+embedder selector, finds no in-process forcing, and auto-spawns a local `kenn
+server` daemon (`kenn-embed/src/selector.rs`, `try_spawn_local_server`) with a
+**600-second** lifetime. On macOS that daemon holds the Metal device, so the
+later `kenn-store/tests/hybrid_search.rs` suite cannot initialise its own
+embedder and its vector-dependent tests fail.
+
+`hybrid_search` sets the flag for *itself*, which cannot evict a daemon another
+binary already started — only setting it workspace-wide stops the spawn.
+Serializing the tests would not help either: the daemon outlives whichever
+binary spawned it, so ordering does not remove the contention. Removing the
+daemon does.
+
+| command | result |
+|---|---|
+| `cargo test --workspace` | 7 failures in `hybrid_search`, **0** `ggml_metal_device_init` |
+| `just test` | 60 suites green, 13 `ggml_metal_device_init` |
+
+**If `paraphrase_query_retrieves_code_symbol`, `store_finding_surfaces_near_duplicate`,
+or the embed-pass tests fail, check the invocation before you read any code.**
+This has been misdiagnosed twice — once as "a flake", once as "parallel test
+binaries", which is also wrong: cargo runs test *binaries* sequentially.
+
+### The commands
+
+```sh
+just test                       # everything — the default before any commit
+just test sql::parse            # filter; ARGS pass straight through to cargo
+just test -- --nocapture        # so do trailing test-harness args
+```
+
+A single package or target is fine for a fast inner loop, but **carry the flag
+yourself** — the recipe is the only thing that sets it:
+
+```sh
+KENN_EMBED_IN_PROCESS=1 cargo test -p kenn-store --test hybrid_search
+```
+
+`cargo test -p <crate> --lib` needs no flag: unit tests never load the model.
+That is the normal mid-refactor loop, and it is what makes bare `cargo` feel
+safe right up until the suite that does load it runs.
+
+### The other suites
+
+| recipe | what it runs |
+|---|---|
+| `just test-indexers` | dotnet + swift + `probe-smoke` + `index-stability`, then the TypeScript sidecar via `bun test` |
+| `just test-indexer-dotnet` / `-swift` | one sidecar's own suite |
+| `cd indexers/kenn-ts && bun test` | the TypeScript sidecar alone — no recipe wraps it, and it is `bun`, never `npx` |
+| `just embed-smoke` | the real `EmbeddingGemma` weights (macOS; first run downloads ~300MB) |
+| `just crap-ci` | the CRAP gate — see §6; runs the suite under `llvm-cov` itself |
+| `just probe-smoke` | every sidecar against an unreachable toolchain |
+
+Sidecar suites are NOT part of `just test`, which is Rust only. A change under
+`indexers/` needs its own suite run (§8).
+
+### Where this sits in the sequence
+
+Unit tests (`cargo test -p <crate> --lib`) are the mid-work loop. Before a
+commit, the full order is:
+
+```
+just test  →  cargo clippy --workspace --all-targets  →  just crap-ci
+           →  cargo fmt --all  →  cargo clippy once more   (§7)
+```

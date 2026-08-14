@@ -16,8 +16,10 @@ pub mod md;
 pub mod package;
 mod py;
 mod rs;
+pub mod sql;
 pub mod text;
 mod ts;
+pub mod xml;
 
 pub use go::{go_package_of, GoTransformer};
 pub use py::PythonTransformer;

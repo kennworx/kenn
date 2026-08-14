@@ -75,6 +75,57 @@ enabled = false                             # opt-in; built-in, no external comm
 [language.html]
 enabled = false                             # opt-in; built-in, no external command
 
+[language.sql]
+enabled = false                             # opt-in; built-in, no external command
+# roots = ["."]                             # default: the whole workspace. Narrow it to
+#                                           # your migrations dir when `.sql` lives in
+#                                           # several unrelated places.
+# dialect = "postgresql"                    # normally leave UNSET. On a failed parse the
+#                                           # indexer retries every dialect, so the
+#                                           # permissive default already beats picking one:
+#                                           # measured, it scored 13/16 against postgres
+#                                           # 10/16 and mysql 11/16 — named dialects are
+#                                           # STRICTER, not better informed. Set one only
+#                                           # for a case it genuinely wins (T-SQL brackets).
+#                                           # An unknown name is an error, never a fallback.
+# excludes = []                             # ADDED to the always-on build/vendor denies
+
+[language.xml]
+enabled = false                             # opt-in; built-in, no external command
+# roots = ["."]                             # default: the whole workspace
+# extensions = ["xml"]                      # default. `.xsd`/`.xsl`/`.csproj` are opt-in:
+#                                           # claiming them by default would take files
+#                                           # from a producer that already handles them.
+# excludes = []                             # ADDED to the always-on denies, which include
+#                                           # bin/obj/packages — load-bearing here, not
+#                                           # hygiene: measured on a real repo, build and
+#                                           # vendor dirs held 10854 .xml against 485
+#                                           # first-party ones.
+
+# --- XML ↔ SQL bridge ---------------------------------------------------------
+# Joins XML elements to the table graph after both producers have run. Active
+# whenever `[language.xml]` is enabled; needs no flag of its own, because with
+# no rules it still works from element text.
+#
+# [xml_sql]
+# roots = ["."]                             # default: the whole workspace. Narrowing this
+#                                           # is a real saving — the dialect sweep retries
+#                                           # only a FAILED parse, so its cost falls
+#                                           # entirely on element text that is not SQL,
+#                                           # which is most of it.
+# dialect = "postgresql"                    # normally leave UNSET; see [language.sql].
+#
+# `rules` is the one piece of vocabulary kenn does not ship: which attribute
+# holds a table name belongs to whichever migration tool you chose, and a
+# built-in list would make kenn correct only for the tools its authors knew.
+# `role` is one of declares / modifies / accesses; omit it for a plain
+# reference, and omit `element` to match the attribute anywhere.
+#
+# rules = [
+#   { attribute = "tableName", element = "createTable", role = "declares" },
+#   { attribute = "tableName" },
+# ]
+
 [language.text]
 # Generic text fallback: chunked FTS + embeddings for files no semantic
 # producer handles. `kenn init` enables this and fills `include` when a

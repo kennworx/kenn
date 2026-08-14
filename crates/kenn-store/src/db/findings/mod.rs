@@ -31,7 +31,7 @@ mod store;
 
 pub use anchor::{Anchor, AnchorEvent};
 pub use build::acquire_findings_publish_lock;
-pub use directives::{AnchorHealth, BrokenAnchors, DriftedAnchors};
+pub use directives::{AnchorHealth, BrokenAnchors, DriftedAnchors, UnverifiedClaim};
 pub(crate) use embed::embed_findings;
 pub use graph_resolver::CodeGraphNodeResolver;
 pub use lifecycle::{finding_is_stale, CodeNodeResolver};

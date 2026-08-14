@@ -42,6 +42,15 @@ sourcemap = "9"
 # script/style, malformed recovery). markup5ever_rcdom is the shared markup5ever
 # infra `html5ever` re-exports (QualName, interned strings, tendril, Attribute).
 html5ever = "0.39"
+# Multi-dialect SQL parser for the `.sql` producer and every later consumer of
+# embedded SQL. Chosen because it is the only Rust parser covering
+# Oracle/MSSQL/MySQL/PostgreSQL from one API, and it is lean: one mandatory
+# dependency (`log`), no arrow/datafusion despite the repository name.
+sqlparser = { version = "0.62", features = ["visitor"] }
+# Read-only positioned XML DOM for the `.xml` producer: parent/child for the
+# containment edges, byte ranges for locations, namespace resolution, and a
+# positioned error instead of a panic on malformed input. One dependency.
+roxmltree = "0.21"
 markup5ever_rcdom = "0.39"
 # Maps a file extension → MIME type, to tell a note-link from an
 # attachment embed (`![[diagram.png]]`) and classify the attachment.

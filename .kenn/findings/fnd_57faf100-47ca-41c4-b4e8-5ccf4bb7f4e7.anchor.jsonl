@@ -3,3 +3,7 @@
 {"op":"attach","anchor":"crates/kenn-indexer/src/markdown/resolve.rs","ts":"2026-06-14T18:37:15.178236Z"}
 {"op":"attach","anchor":"crates/kenn-indexer/src/markdown/ingest.rs","ts":"2026-06-14T18:37:15.178236Z"}
 {"op":"rename","from":"crates/kenn-indexer/src/markdown/ingest.rs","to":"crates/kenn-indexer/src/markdown/ingest/core.rs","ts":"2026-07-15T16:45:54.852306Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/resolve.rs","ts":"2026-07-26T18:05:39.069159Z","sha":"79626bf548387310"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/code_resolve.rs","ts":"2026-07-26T18:05:39.123629Z","sha":"176dc933f206805e"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/resolve.rs","ts":"2026-07-26T18:05:51.252156Z","sha":"79626bf548387310"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/code_resolve.rs","ts":"2026-07-26T18:05:51.306439Z","sha":"176dc933f206805e"}

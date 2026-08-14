@@ -179,7 +179,9 @@ impl SqliteWriter {
         ktx: &Transaction,
         reuse: &HashMap<u64, QuantVector>,
     ) -> Result<(), DbError> {
-        use super::super::super::codes::{split_identifier, text_fingerprint};
+        use super::super::super::codes::{
+            is_verbatim_language, split_identifier, text_fingerprint, verbatim_projection,
+        };
 
         let mut ins = ktx
             .prepare_cached(
@@ -228,7 +230,18 @@ impl SqliteWriter {
             } else {
                 sig
             };
-            let text = split_identifier(&raw);
+            // Identifier splitting is for code: it breaks camelCase and drops
+            // punctuation so `getUserId` is reachable as "user". XML and SQL
+            // carry structured VALUES — namespaces, version pins, table names —
+            // where the punctuation is the meaning, so both take the verbatim
+            // projection over BOTH surfaces instead. One arm, not one per
+            // language: they differ in nothing that matters here, and two arms
+            // would drift.
+            let text = if is_verbatim_language(&lang) {
+                verbatim_projection(&raw, &doc)
+            } else {
+                split_identifier(&raw)
+            };
             // Doc-only recipe: the vector embeds the doc prose only, so the
             // fingerprint tracks `doc` alone. `embed_pending` reconstructs the
             // same text from the `doc_text` column.

@@ -386,6 +386,44 @@ pub struct FileRow {
     pub external: bool,
 }
 
+/// One symbol's two stored search surfaces, for a bulk language-filtered scan.
+///
+/// The pair is what makes a cross-producer consumer possible: the signature is
+/// a canonical rendering it can re-parse (an XML start tag, a statement's
+/// shape), and the content is the text a parser can be handed untouched. A
+/// consumer wanting one usually wants to check the other, so they arrive
+/// together rather than as two round-trips.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolSurfaceRow {
+    pub sym_id: u32,
+    pub pub_id: String,
+    /// Path of the file the symbol is defined in, for root filtering.
+    pub path: String,
+    pub sig: String,
+    pub doc: String,
+}
+
+/// One symbol's stored enclosing-item extent, with the file it lives in — the
+/// input for reading a symbol's own source back off disk.
+///
+/// Extents **nest**: a module's span contains its functions', a class's its
+/// methods'. A consumer placing something found in source must therefore pick
+/// the smallest containing extent, not every containing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolBodyRow {
+    pub sym_id: u32,
+    pub path: String,
+    pub language: String,
+    /// 1-based, inclusive.
+    pub body_start_line: u32,
+    /// 1-based, inclusive.
+    pub body_end_line: u32,
+    /// The symbol's own test marking — carried so a consumer can mark what it
+    /// emits rather than dropping it, leaving the existing query filters to
+    /// decide.
+    pub test: bool,
+}
+
 /// A code symbol candidate for md→code link resolution: its short (last-segment)
 /// name matched the link's target. Carries the `qualified` pub id (for
 /// qualifier-drift grading) and one def's `relpath` (for locality tiebreaks).

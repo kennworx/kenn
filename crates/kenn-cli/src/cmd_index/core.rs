@@ -101,6 +101,8 @@ fn any_language_enabled(config: &Config) -> bool {
         || l.css.enabled
         || l.html.enabled
         || l.swift.enabled
+        || l.sql.enabled
+        || l.xml.enabled
 }
 
 #[expect(

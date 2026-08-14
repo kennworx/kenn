@@ -5,3 +5,5 @@
 {"op":"attach","anchor":"crates/kenn-mcp/src/tools/links.rs","ts":"2026-06-14T15:15:28.58953Z"}
 {"op":"attach","anchor":"crates/kenn-store/src/db/sqlite/reader/code_links.rs","ts":"2026-06-14T15:15:28.58953Z"}
 {"op":"rename","from":"crates/kenn-indexer/src/markdown/ingest.rs","to":"crates/kenn-indexer/src/markdown/ingest/core.rs","ts":"2026-07-15T16:45:55.295891Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/code_resolve.rs","ts":"2026-07-26T18:05:39.3353Z","sha":"176dc933f206805e"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/code_resolve.rs","ts":"2026-07-26T18:05:51.512896Z","sha":"176dc933f206805e"}

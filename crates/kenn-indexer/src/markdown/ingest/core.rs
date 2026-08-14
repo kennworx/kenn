@@ -17,6 +17,8 @@ use super::super::StoreCodeLookup;
 use super::super::{
     collect, discover_markdown, resolve_code_link, CodeTarget, MarkdownDiscoverError,
 };
+pub use crate::relpath::FsPaths;
+use crate::relpath::{join_relative, PathExists};
 use crate::sink::BatchSink;
 
 #[derive(Debug, thiserror::Error)]
@@ -172,6 +174,7 @@ pub fn ingest_markdown_phase1(
 pub fn resolve_markdown_code(
     pending: MarkdownPending,
     code: Option<(&DbReader, &Handle)>,
+    exists: &dyn PathExists,
     mut sink: BatchSink,
 ) -> Result<MarkdownCounts, MarkdownIngestError> {
     let MarkdownPending { mut ids, deferred } = pending;
@@ -180,27 +183,54 @@ pub fn resolve_markdown_code(
     // Phase A — resolve all (reads only). Resolving every link before any write
     // lets the read snapshot's statements finalize before the sink writes to
     // the same building store.
-    let resolved: Vec<(ShortId, RawLink, Vec<CodeTarget>)> = deferred
+    let resolved: Vec<(ShortId, RawLink, String, Vec<CodeTarget>)> = deferred
         .into_iter()
         .map(|d| {
+            // An inline CommonMark destination *means* a path — `[t](docs)` in
+            // a README names the directory, not a `fn docs` that happens to
+            // share the name. So when the target is a bare name that the
+            // workspace holds as a path, skip the symbol lookup that would
+            // otherwise shadow it. A wikilink is the opposite convention: a
+            // bare `[[OrderHandler]]` is a name, so it keeps symbol-first.
+            // Only a *bare name* can be shadowed: a path-shaped target
+            // (`src/order.rs`) goes down the file branch, which resolves it to
+            // its indexed file node — that must still win over an attachment.
+            let path_wins = !d.raw.wikilink
+                && !super::super::is_code_path(&d.raw.target)
+                && attachment_key(&d.raw, &d.linking_relpath, exists).is_some();
             let targets = match code {
-                Some((reader, handle)) => {
+                Some((reader, handle)) if !path_wins => {
                     let lookup = StoreCodeLookup { reader, handle };
                     resolve_code_link(&d.raw.target, &d.linking_relpath, &lookup)
                 }
-                None => Vec::new(),
+                _ => Vec::new(),
             };
-            (d.src, d.raw, targets)
+            (d.src, d.raw, d.linking_relpath, targets)
         })
         .collect();
 
     // Phase B — emit md→code edges, dangling-stub the rest.
     let mut stubs: HashMap<String, ShortId> = HashMap::new();
     let mut stub_records: Vec<SymbolRecord> = Vec::new();
-    for (src, raw, targets) in &resolved {
+    for (src, raw, linking_relpath, targets) in &resolved {
         if targets.is_empty() {
-            let id = mint_stub(raw, &mut ids, &mut stubs, &mut stub_records);
-            sink.push_edge(link_edge(*src, id, raw, LinkGrade::Dangling))?;
+            // The target matched no markdown document, code file, or code
+            // symbol — but it may still be a real file or directory kenn does
+            // not index (`LICENSE-MIT`, `docs/`). That is not a broken link, so
+            // it resolves to a path-keyed `attachment` stub, exactly as HTML
+            // already does for `<img src="logo.png">`. Only a target the
+            // workspace does not hold dangles.
+            let (id, grade) = match attachment_key(raw, linking_relpath, exists) {
+                Some(key) => (
+                    mint_attachment(&key, &mut ids, &mut stubs, &mut stub_records),
+                    attachment_grade(raw),
+                ),
+                None => (
+                    mint_stub(raw, &mut ids, &mut stubs, &mut stub_records),
+                    LinkGrade::Dangling,
+                ),
+            };
+            sink.push_edge(link_edge(*src, id, raw, grade))?;
             counts.edges += 1;
         } else {
             for t in targets {
@@ -368,6 +398,90 @@ fn module_symbol(id: ShortId, pub_id: &str, name: String, enclosing: ShortId) ->
     }
 }
 
+/// The grade for a resolved attachment. `Exact` when the written target is the
+/// whole claim, `Drifted` when it carries an anchor: an attachment is not in the
+/// corpus, so its sections are unknown and the anchor cannot be verified.
+/// `apply_anchor` sets the precedent for md↔md — anchor present but unmatched →
+/// target the document, at least Drifted — and grading
+/// `[notes](vendor/CHANGELOG.md#v1-0-0)` exact would assert a section this pass
+/// never looked at.
+fn attachment_grade(raw: &super::super::links::RawLink) -> LinkGrade {
+    if raw.anchor.is_some() {
+        LinkGrade::Drifted
+    } else {
+        LinkGrade::Exact
+    }
+}
+
+/// The canonical workspace-relative path a link target resolves to when the
+/// workspace holds it, or `None` when it does not — the attachment rung of the
+/// ladder (design D4).
+///
+/// The written target is joined onto the linking file's directory, so every
+/// spelling of one on-disk target (`LICENSE-MIT` from the root,
+/// `../../LICENSE-MIT` from a crate doc) produces the same key and therefore the
+/// same node. A target walking above the workspace root has no in-corpus
+/// canonical path and is not an attachment.
+fn attachment_key(
+    raw: &super::super::links::RawLink,
+    linking_relpath: &str,
+    exists: &dyn PathExists,
+) -> Option<String> {
+    // `RawLink::target` is anchor-free by contract (the `#anchor` rides in
+    // `raw.anchor`), so there is nothing to strip here.
+    let written = raw.target.trim().trim_start_matches("./");
+    if written.is_empty() {
+        return None;
+    }
+    // The same two spellings the exact rung accepts (see `resolve_file_ref`):
+    // the path as written, already workspace-relative, then the path joined
+    // onto the linking file's directory. The rungs MUST agree on what a written
+    // target means — a target that the graph would have matched as written,
+    // but that this rung only tried joined, would dangle for a reason no reader
+    // could infer.
+    // Both spellings go through the same join so the KEY is canonical either
+    // way. Joining against an empty linking path just normalizes (drops `./`,
+    // empty segments, and a trailing `/`), which is what makes `[a](docs/)` and
+    // `[b](docs)` collapse to one node instead of two — the property
+    // `list_usages` on an attachment depends on.
+    //
+    // The **joined** spelling is tried first, and that ordering matters here in
+    // a way it does not for `resolve_file_ref`. There the as-written probe is
+    // checked against a basename-filtered candidate set drawn from the graph;
+    // here it is checked against the whole filesystem, where `docs`, `src`,
+    // `tests` and `assets` routinely exist at the root *and* nested. Probing
+    // root-first would bind `[the docs](docs)` written in
+    // `crates/kenn-indexer/README.md` to the repository-root `docs/` — a
+    // directory the link does not name, which is the false-match class this
+    // change exists to remove. Relative wins; root-relative is the fallback.
+    let hit = |c: &String| !c.is_empty() && exists.exists(c);
+    let joined = join_relative(linking_relpath, written);
+    if joined.as_ref().is_some_and(&hit) {
+        return joined;
+    }
+    let root = join_relative("", written)?;
+    // A root-level linking file makes both spellings identical; skip the second
+    // stat rather than asking the filesystem the same question twice.
+    (joined.as_deref() != Some(root.as_str()) && hit(&root)).then_some(root)
+}
+
+/// Intern the `attachment` stub for a target that exists in the workspace but is
+/// not an indexed node, keyed by its canonical path so every reference to one
+/// on-disk target collapses to a single node (the property `list_usages` needs).
+fn mint_attachment(
+    canonical: &str,
+    ids: &mut MarkdownIds,
+    stubs: &mut HashMap<String, ShortId>,
+    stub_records: &mut Vec<SymbolRecord>,
+) -> ShortId {
+    let pub_id = format!("md:@attachment/{}", crate::pubid::floor(canonical));
+    *stubs.entry(pub_id.clone()).or_insert_with(|| {
+        let id = ids.mint_symbol();
+        stub_records.push(attachment_stub(id, &pub_id, canonical.to_string()));
+        id
+    })
+}
+
 /// Intern a dangling target's external-stub node id, minting the stub record
 /// on first sight (deduped by `pub_id`).
 fn mint_stub(
@@ -401,6 +515,52 @@ fn enclosing_section(defs: &[DefRecord], line: u32, fallback: ShortId) -> ShortI
 fn attachment_mime(name: &str) -> Option<mime_guess::Mime> {
     let mime = mime_guess::from_path(name).first()?;
     (mime.essence_str() != "text/markdown").then_some(mime)
+}
+
+/// The node kind for a target that **exists** but resolved to no graph node.
+///
+/// `Document` when the name is something navigable kenn would have indexed as a
+/// document — a `.md` or `.html` the config excluded — and `Attachment`
+/// otherwise, covering binaries, extensionless files like `LICENSE-MIT`, and
+/// directories. Unlike [`external_stub`]'s guess, which works from a written
+/// string that may name nothing, here the target is known to exist; the only
+/// open question is whether it is a leaf.
+///
+/// Shared with the HTML corpus (`html-index` describes its asset handling as
+/// "reusing the markdown attachment model") so one on-disk target is never a
+/// leaf on one side and a document on the other.
+#[must_use]
+pub fn existing_target_kind(name: &str) -> Kind {
+    let navigable = mime_guess::from_path(name)
+        .first()
+        .is_some_and(|m| matches!(m.essence_str(), "text/markdown" | "text/html"));
+    if navigable {
+        Kind::Document
+    } else {
+        Kind::Attachment
+    }
+}
+
+/// The record for a resolved attachment: a stub standing for a real file or
+/// directory kenn does not index, kinded by [`existing_target_kind`].
+fn attachment_stub(id: ShortId, pub_id: &str, name: String) -> SymbolRecord {
+    SymbolRecord {
+        id,
+        pub_id: pub_id.to_string(),
+        language: Language::Markdown,
+        pkg_id: 0,
+        kind: existing_target_kind(&name),
+        name,
+        enclosing_sym_id: 0,
+        partial: false,
+        nargs: 0,
+        targs: 0,
+        // `external` marks a node with no workspace *definition*, which an
+        // attachment never has (kenn indexes no defs for a licence or a
+        // directory). Matches the flags HTML's asset stubs already carry.
+        external: true,
+        test: false,
+    }
 }
 
 fn external_stub(id: ShortId, pub_id: &str, name: String) -> SymbolRecord {

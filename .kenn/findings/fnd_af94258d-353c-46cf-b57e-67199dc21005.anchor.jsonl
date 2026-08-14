@@ -8,3 +8,7 @@
 {"op":"rename","from":"crates/kenn-cli/src/cmd_index.rs,crates/kenn-indexer/src/markdown/ingest.rs","to":"crates/kenn-indexer/src/markdown/ingest/core.rs","ts":"2026-07-15T16:45:55.257053Z"}
 {"op":"rename","from":"crates/kenn-cli/src/cmd_index.rs","to":"crates/kenn-cli/src/cmd_index/core.rs","ts":"2026-07-15T16:46:18.187438Z"}
 {"op":"rename","from":"crates/kenn-indexer/src/markdown/ingest.rs","to":"crates/kenn-indexer/src/markdown/ingest/core.rs","ts":"2026-07-15T16:46:18.233385Z"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/ingest/core.rs","ts":"2026-07-26T18:05:39.227125Z","sha":"81068a7d8a09456f"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/pipeline/api.rs","ts":"2026-07-26T18:05:39.281635Z","sha":"6817e82f7350c1ea"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/ingest/core.rs","ts":"2026-07-26T18:05:51.410903Z","sha":"81068a7d8a09456f"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/pipeline/api.rs","ts":"2026-07-26T18:05:51.460059Z","sha":"6817e82f7350c1ea"}

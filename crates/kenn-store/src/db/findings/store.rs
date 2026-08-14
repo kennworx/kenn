@@ -23,7 +23,9 @@ use crate::embed::sidecar;
 use crate::layout::Layout;
 
 use super::anchor::{self, Anchor, AnchorEvent};
-use super::directives::{self, AnchorHealth, BrokenAnchors, DirectiveInput, DriftedAnchors};
+use super::directives::{
+    self, AnchorHealth, BrokenAnchors, DirectiveInput, DriftedAnchors, UnverifiedClaim,
+};
 use super::index;
 use super::lifecycle::{
     carries_lifecycle_tag, finding_is_stale, is_directive_or_guide, lifecycle_sets,
@@ -370,14 +372,22 @@ impl FindingsStore {
     )]
     pub async fn check_anchors(&self) -> Result<AnchorHealth, DbError> {
         let (all, _, _) = record::read_records(&self.records_dir)?;
+        // Superseded and tombstoned findings are already excluded from
+        // retrieval, so they can never be served as guidance and repairing their
+        // anchors changes nothing. Reporting them is pure noise — measured on
+        // this repository, 26 of 127 drifted entries were superseded ancestors.
+        let (superseded, tombstoned) = super::lifecycle::lifecycle_sets(&all);
         let mut health = AnchorHealth::default();
         for finding in all {
+            if superseded.contains(&finding.id) || tombstoned.contains(&finding.id) {
+                continue;
+            }
             let mut broken = Vec::new();
-            let mut drifted = Vec::new();
+            let mut changed = Vec::new();
             for anchor in anchor::fold(&anchor::read_log(&self.records_dir, &finding.id)?) {
                 if self.source_root.join(&anchor.path).exists() {
                     if anchor_drifted(&self.source_root, &anchor) {
-                        drifted.push(anchor.path);
+                        changed.push(anchor.path);
                     }
                 } else {
                     broken.push(anchor.path);
@@ -389,11 +399,22 @@ impl FindingsStore {
                     anchors: broken,
                 });
             }
-            if !drifted.is_empty() {
-                health.drifted.push(DriftedAnchors {
-                    finding_id: finding.id,
-                    anchors: drifted,
-                });
+            if !changed.is_empty() {
+                // Same observation, different question. For a rule, changed
+                // content means "re-read before relying on it". For a claim it
+                // means the assertion may have stopped being true while still
+                // being served as fact, which is the failure worth a bucket.
+                if super::lifecycle::is_claim(&finding) {
+                    health.unverified.push(UnverifiedClaim {
+                        finding_id: finding.id,
+                        anchors: changed,
+                    });
+                } else {
+                    health.drifted.push(DriftedAnchors {
+                        finding_id: finding.id,
+                        anchors: changed,
+                    });
+                }
             }
         }
         Ok(health)

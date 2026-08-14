@@ -30,14 +30,16 @@ pub fn transformer_for(language: Language) -> Option<Box<dyn IdTransformer>> {
         Language::Go => Box::new(GoTransformer),
         Language::Python => Box::new(PythonTransformer),
         // C# and Swift go through the JSONL ingest path; markdown, stylesheets
-        // (css/sass), HTML, and the text fallback are walked by their own
-        // producers — none enters the SCIP transformer chain.
+        // (css/sass), HTML, SQL, XML, and the text fallback are walked by their
+        // own producers — none enters the SCIP transformer chain.
         Language::Csharp
         | Language::Swift
         | Language::Markdown
         | Language::Css
         | Language::Sass
         | Language::Html
+        | Language::Sql
+        | Language::Xml
         | Language::Text => return None,
     })
 }

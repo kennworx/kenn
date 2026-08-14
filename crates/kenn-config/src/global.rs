@@ -12,6 +12,8 @@
 //! - `KENN_SERVER_ADDR` overrides `[server].addr`.
 //! - `KENN_EMBED_URL` overrides `[embeddings].url`.
 //! - `KENN_EMBED_MODEL` overrides `[embeddings].model`.
+//! - `KENN_EMBED_BATCH_SIZE` overrides `[embeddings].batch_size` (the producer's
+//!   per-request cap *and* the embed pass's scan-chunk size).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -70,7 +72,11 @@ pub struct EmbeddingsConfig {
     /// the remote producer. A single `embed(texts)` call with more than
     /// this many inputs is split into multiple HTTP requests transparently.
     /// Bounds per-request body size and per-request latency so a large
-    /// bulk pass can't exceed the client's HTTP timeout. Default: 256.
+    /// bulk pass can't exceed the client's HTTP timeout. It is also the
+    /// **embed pass's scan-chunk size**, so the pass never hands the producer
+    /// more than the producer batches — the two layers disagreeing is what let
+    /// a full pass hold an entire corpus of vectors in memory. Default: 256.
+    /// Override: `KENN_EMBED_BATCH_SIZE`.
     #[serde(default = "default_embed_batch_size")]
     pub batch_size: usize,
 }
@@ -152,6 +158,16 @@ impl GlobalConfig {
         if let Ok(model) = std::env::var("KENN_EMBED_MODEL") {
             if !model.is_empty() {
                 self.embeddings.model = model;
+            }
+        }
+        // Also the embed pass's scan-chunk size, which is deliberately the same
+        // value — an override that moved only the producer's HTTP batching
+        // would recreate the split this setting exists to prevent.
+        if let Ok(n) = std::env::var("KENN_EMBED_BATCH_SIZE") {
+            if let Ok(n) = n.parse::<usize>() {
+                if n > 0 {
+                    self.embeddings.batch_size = n;
+                }
             }
         }
         Ok(())

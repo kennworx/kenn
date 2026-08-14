@@ -133,8 +133,8 @@ outside a git tree it SHALL remain `<committed_root>/vectors` (prior behavior).
 ### Requirement: Derived state is runs-centric; no separate snapshots directory
 
 Every index pass SHALL write its output into a single directory
-`<derived_root>/runs/{id}/` containing the raw inputs, all Lance
-datasets, and per-run metadata. On successful completion, the
+`<derived_root>/runs/{id}/` containing the raw inputs, all snapshot
+databases, and per-run metadata. On successful completion, the
 `<derived_root>/live` pointer is repointed to that run.
 
 A `runs/{id}/` directory SHALL contain:
@@ -144,15 +144,20 @@ A `runs/{id}/` directory SHALL contain:
   in steady state.
 - `*.scip` — one file per language with raw SCIP indexes
 - `*.jsonl` — one file per language with JSONL frame inputs
-- `lance/` — every Lance dataset for this run: the code graph
-  (`knowledge`, `aggregate_*`, `analysis_*`, `files`, `defs`,
-  `edges`, etc.) and the findings local mirror (`lance/findings/`).
-  `knowledge.lance` retains its `embedding` column, populated at
-  index time from the committed sidecar at `<vectors_root>/code/`;
-  the ANN index is built on that column. No separate vectors-Lance
-  dataset.
+- `code.db` — the code-graph snapshot database: `symbols`, `defs`,
+  `files`, the per-kind edge data, and the `aggregate_*` /
+  `analysis_*` data.
+- `vector.db` — the search database: the row text, its FTS5 indexes,
+  and the `vec0` vector table. Its `embedding` data is populated at
+  index time from the committed sidecar at `<vectors_root>/code/`.
+  There is no separate vectors dataset.
 - `report.json` — indexer outcome metadata
 - `meta.json` — snapshot stamp (timestamp, fingerprints, etc.)
+
+The findings store SHALL NOT be per-run: it lives at the derived root
+as `findings.db`, with the committed per-finding records under
+`<committed_root>/findings/`. A run directory SHALL NOT contain a
+findings database.
 
 Run ids SHALL be ISO-8601 UTC timestamps with second precision and
 colons replaced by dashes (`YYYY-MM-DDTHH-MM-SSZ`) so they sort
@@ -182,36 +187,19 @@ NEVER observe a missing, empty, or partially written pointer.
 
 - **WHEN** `kenn index` runs against a workspace
 - **THEN** a directory `<derived_root>/runs/{new_id}/` is created
-- **AND** every Lance dataset for the run lives under
-  `<derived_root>/runs/{new_id}/lance/`
+- **AND** the run's `code.db` and `vector.db` live directly under
+  `<derived_root>/runs/{new_id}/`
 - **AND** per-language `.scip` and `.jsonl` files live at
   `<derived_root>/runs/{new_id}/`
 - **AND** `<derived_root>/live` is a regular file whose contents are
   `runs/{new_id}` (relative path, no trailing slash)
-- **AND** no `<derived_root>/snapshots/` directory exists
 
-#### Scenario: rollback repoints live to a prior run
+#### Scenario: the findings store is not part of a run
 
-- **WHEN** the workspace has runs A (older) and B (active),
-  with `live` containing `runs/B`
-- **AND** the user invokes `kenn rollback`
-- **THEN** `live` is atomically repointed to `runs/A`
-- **AND** `runs/B/` remains on disk until the retention sweep
-  removes it
-
-#### Scenario: a concurrent reader never observes a partial pointer
-
-- **WHEN** a reader resolves `live` repeatedly while an index pass
-  publishes a new run
-- **THEN** every read resolves to a run directory that exists
-- **AND** no read observes an absent, empty, or truncated `live`
-
-#### Scenario: a store written before the pointer file is not served
-
-- **WHEN** `live` is a symlink left by an older kenn version
-- **THEN** resolution fails rather than following it
-- **AND** the caller treats the workspace as having no live run and
-  reindexes, per the documented no-migration policy
+- **WHEN** an index pass completes
+- **THEN** the run directory contains no findings database
+- **AND** `findings.db` remains at the derived root, unaffected by
+  the `live` repoint
 
 ### Requirement: Vector sidecar files are content-addressed and append-only
 
@@ -413,7 +401,7 @@ A schema mismatch SHALL surface as a typed `SchemaMismatch` error from the store
 
 ### Requirement: Deferred runs-centric placements have direct test coverage
 
-The deferred runs-centric layout claims SHALL hold true in code and SHALL be backed by direct tests: the indexer SHALL be exercised against per-language JSONL files written at `<derived_root>/runs/{id}/{lang}.jsonl` (not at multi-file driver-specific names); the findings store SHALL round-trip writes and reads against a Lance dataset at `<derived_root>/runs/{id}/lance/findings/` across an indexer pass; the deprecated path accessors `findings_local_dir()` and `embed_lock_path()` SHALL be removed from `Layout`; the `embed-locks/` directory SHALL no longer be created by any code path. If a workspace's `<derived_root>` already contains a stale `embed-locks/` directory from a prior layout, the indexer MAY sweep it at startup; this MUST NOT block normal operation.
+The deferred runs-centric layout claims SHALL hold true in code and SHALL be backed by direct tests: the indexer SHALL be exercised against per-language JSONL files written at `<derived_root>/runs/{id}/{lang}.jsonl` (not at multi-file driver-specific names); the findings store SHALL round-trip writes and reads against `findings.db` at the derived root across an indexer pass; the deprecated path accessors `findings_local_dir()` and `embed_lock_path()` SHALL be removed from `Layout`; the `embed-locks/` directory SHALL no longer be created by any code path. If a workspace's `<derived_root>` already contains a stale `embed-locks/` directory from a prior layout, the indexer MAY sweep it at startup; this MUST NOT block normal operation.
 
 #### Scenario: indexer reads JSONL from the runs-centric path
 
@@ -423,24 +411,19 @@ The deferred runs-centric layout claims SHALL hold true in code and SHALL be bac
   `<derived_root>/runs/{id}/{lang}.jsonl` (one file per language)
 - **AND** the indexer ingests those frames from that path
 - **AND** no `kenn-dotnet-stream-*.jsonl` or other multi-file
-  driver-specific name lives outside `runs/{id}/`
+  driver-specific name is produced
 
-#### Scenario: findings round-trip across an indexer pass via the runs-local mirror
+#### Scenario: findings round-trip across an indexer pass
 
-- **GIVEN** a workspace with findings written via `kenn find`
-- **WHEN** an indexer pass runs to completion and `live` is repointed
-- **THEN** the new run's `lance/findings/` Lance dataset contains
-  the findings
-- **AND** subsequent reads through the public findings-store API
-  return the same records
-- **AND** no `<derived_root>/findings/` directory remains as the
-  primary read path
+- **WHEN** a finding is written, an indexer pass runs, and the finding
+  is read back
+- **THEN** the read returns the written record
+- **AND** the store it round-tripped through is `findings.db` at the
+  derived root, which no `live` repoint moved or replaced
 
-#### Scenario: deprecated accessors and embed-locks directory are absent
+#### Scenario: the deprecated accessors and embed-locks are gone
 
-- **WHEN** the workspace's `Layout` is resolved
-- **THEN** the `Layout` type exposes no `findings_local_dir()` or
-  `embed_lock_path()` accessor
-- **AND** the indexer creates no `<derived_root>/embed-locks/`
-  directory at any point during a normal pass
+- **WHEN** the `Layout` API is inspected
+- **THEN** it exposes no `findings_local_dir()` and no `embed_lock_path()`
+- **AND** no code path creates an `embed-locks/` directory
 

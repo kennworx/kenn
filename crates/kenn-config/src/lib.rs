@@ -24,6 +24,7 @@ mod tests_config;
 mod vectors;
 mod visualize;
 mod workspace;
+mod xml_sql;
 
 pub use config::Config;
 pub use docker::DockerConfig;
@@ -33,7 +34,8 @@ pub use index::{IndexAnalysisOptions, IndexConfig};
 pub use ingest::IngestConfig;
 pub use language::{
     CsharpConfig, CssConfig, GoConfig, HtmlConfig, LanguageConfig, MarkdownConfig, MarkdownRoot,
-    PythonConfig, Runtime, RustConfig, SassConfig, SwiftConfig, TextConfig, TypescriptConfig,
+    PythonConfig, Runtime, RustConfig, SassConfig, SqlConfig, SwiftConfig, TextConfig,
+    TypescriptConfig, XmlConfig,
 };
 pub use layout::LayoutConfig;
 pub use lifecycle::LifecycleConfig;
@@ -44,3 +46,4 @@ pub use tests_config::TestsConfig;
 pub use vectors::VectorsConfig;
 pub use visualize::VisualizeConfig;
 pub use workspace::WorkspaceConfig;
+pub use xml_sql::{TableRole, TableRule, XmlSqlConfig};

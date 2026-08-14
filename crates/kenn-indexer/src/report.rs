@@ -75,6 +75,13 @@ pub struct RunReport {
     /// == 0` flags a too-old rust-analyzer that emits no `enclosing_range`.
     #[serde(default)]
     pub def_bodies_seen: u64,
+    /// Bodies that carried a string literal at all, for the code→table pass.
+    /// Sits between `def_bodies_seen` and `edges_seen` so a zero can be read:
+    /// no bodies means nothing to scan, bodies but no literals means the
+    /// language scanner is missing, and literals but no edges means the SQL is
+    /// assembled at runtime or mapped by an ORM rather than written out.
+    #[serde(default)]
+    pub bodies_with_literals: u64,
     pub edges_seen: u64,
     /// Documents dropped because their canonicalized path fell outside the
     /// workspace root (`CanonicalizeError::OutsideRoot`) — a container/host
@@ -134,6 +141,7 @@ impl RunReport {
             symbols_seen: 0,
             defs_seen: 0,
             def_bodies_seen: 0,
+            bodies_with_literals: 0,
             edges_seen: 0,
             out_of_root_seen: 0,
             failed_projects: Vec::new(),

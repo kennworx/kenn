@@ -26,6 +26,14 @@ pub enum Language {
     Sass,
     Html,
     Swift,
+    /// SQL as an indexed language: `.sql` files parsed into statements and the
+    /// tables they declare, alter, and access. Tables are workspace-global, not
+    /// file-scoped — see [`crate::id::sql`].
+    Sql,
+    /// XML as an indexed structure: documents and their elements. Deliberately
+    /// vocabulary-agnostic — no framework's element or attribute names are
+    /// recognized, so a workspace supplies any meaning it needs as config.
+    Xml,
     /// The generic text-fallback producer: user-configured non-semantic text
     /// files (yaml/json/txt/…) chunked into searchable nodes. Not a real
     /// language — it owns its own short-id partition so its ids never collide
@@ -49,6 +57,8 @@ impl Language {
             Self::Sass => "sass",
             Self::Html => "html",
             Self::Swift => "sw",
+            Self::Sql => "sql",
+            Self::Xml => "xml",
             Self::Text => "text",
         }
     }
@@ -76,6 +86,10 @@ impl Language {
             // Classic `.html` plus the legacy short `.htm`.
             Self::Html => &["html", "htm"],
             Self::Swift => &["swift"],
+            Self::Sql => &["sql"],
+            // Only `.xml`; other XML-shaped extensions belong to producers that
+            // already own them, and are opt-in through config.
+            Self::Xml => &["xml"],
             // Glob-driven, not extension-scoped: the text-fallback producer
             // owns no fixed extensions (the user's include globs decide).
             Self::Text => &[],
@@ -113,7 +127,13 @@ impl Language {
             // Markdown, stylesheets (css/sass), HTML, and the text fallback have
             // no project/build files; a change to one restructures nothing the
             // way a manifest does.
-            Self::Markdown | Self::Css | Self::Sass | Self::Html | Self::Text => &[],
+            Self::Markdown
+            | Self::Css
+            | Self::Sass
+            | Self::Html
+            | Self::Sql
+            | Self::Xml
+            | Self::Text => &[],
         }
     }
 
@@ -131,6 +151,8 @@ impl Language {
             Self::Sass => "sass",
             Self::Html => "html",
             Self::Swift => "swift",
+            Self::Sql => "sql",
+            Self::Xml => "xml",
             Self::Text => "text",
         }
     }
@@ -148,6 +170,8 @@ impl Language {
             "sass" => Self::Sass,
             "html" => Self::Html,
             "sw" => Self::Swift,
+            "sql" => Self::Sql,
+            "xml" => Self::Xml,
             "text" => Self::Text,
             _ => return None,
         })
@@ -167,6 +191,8 @@ impl Language {
             "sass" => Self::Sass,
             "html" => Self::Html,
             "swift" => Self::Swift,
+            "sql" => Self::Sql,
+            "xml" => Self::Xml,
             "text" => Self::Text,
             _ => return None,
         })

@@ -13,7 +13,7 @@ use crate::api::types::{
     AggregateEdgeRow, AggregateNodeRow, AnalysisAnchoredCommunityRow, AnalysisFlatCommunityRow,
     AnalysisGodNodeRow, AnalysisNodeMembershipRow, BlendedHit, BlendedSymbolRow, DbError,
     DefLineRow, DefRow, FileRow, FoundSymbolRow, PackageRow, RankedSymbolRow, RowNarrow,
-    SymbolDocsRow, SymbolRow,
+    SymbolBodyRow, SymbolDocsRow, SymbolRow, SymbolSurfaceRow,
 };
 
 /// Storage-side reader contract. The MCP server holds an `impl Reader`
@@ -188,6 +188,27 @@ pub trait Reader: Send + Sync {
     fn scan_def_files(
         &self,
     ) -> impl std::future::Future<Output = Result<Vec<(ShortId, ShortId)>, DbError>> + Send;
+
+    /// Stream every symbol carrying a usable enclosing-item extent, with its
+    /// file — the input for reading a symbol's own source back off disk.
+    ///
+    /// Extents nest, so a consumer placing something found in that source must
+    /// choose the smallest containing extent, not every containing one. Cold
+    /// path; the whole set in one call, because the alternative is one
+    /// round-trip per symbol.
+    fn scan_symbol_bodies(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<SymbolBodyRow>, DbError>> + Send;
+
+    /// Every symbol of one language with its two stored search surfaces.
+    ///
+    /// Language-filtered in SQL rather than by the caller: the candidate set is
+    /// up to every element in the workspace, and the trait's per-symbol
+    /// `fetch_symbol_docs_row` would mean one round-trip each.
+    fn scan_symbol_surfaces(
+        &self,
+        language: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<SymbolSurfaceRow>, DbError>> + Send;
 
     /// Stream every non-empty `(file, module doc)`. Cold path.
     fn scan_file_docs(

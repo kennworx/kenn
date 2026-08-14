@@ -13,10 +13,12 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::token::LlamaToken;
 
 use crate::producer::apply_task_prompt;
 
@@ -46,17 +48,20 @@ fn llama_backend() -> Result<&'static LlamaBackend, EmbedError> {
     let _gate = GATE
         .lock()
         .map_err(|e| EmbedError::Backend(format!("llama backend init lock: {e}")))?;
+    // Double-checked: another thread may have initialized between the fast
+    // path above and acquiring the gate. Without this re-check, `init` would
+    // run twice, which llama.cpp forbids.
     if let Some(b) = BACKEND.get() {
         return Ok(b);
     }
     let backend = LlamaBackend::init()
         .map_err(|e| EmbedError::Backend(format!("llama backend init: {e}")))?;
-    if BACKEND.set(backend).is_err() {
-        return Err(EmbedError::Backend("llama backend double-init".into()));
-    }
-    BACKEND
-        .get()
-        .ok_or_else(|| EmbedError::Backend("llama backend missing after init".into()))
+    // `get_or_init` is infallible and returns the reference directly, so the
+    // "double-init" and "missing after init" error arms this used to carry are
+    // gone — both were unreachable anyway, since the gate is held and the slot
+    // was just observed empty. An `init` failure still returns above without
+    // touching the slot, so a later call retries rather than caching the error.
+    Ok(BACKEND.get_or_init(|| backend))
 }
 
 /// GPU layer count: offload everything on macOS (Metal), CPU elsewhere.
@@ -120,11 +125,6 @@ impl LlamaEmbedder {
     /// internally by the async [`EmbeddingProducer::embed`] impl below.
     /// Pulled out so both call sites share the inference body without a
     /// per-call tokio runtime to bridge sync ↔ async.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "CTX_TOKENS (2048) and SEQS_PER_BATCH (16) are small constants, and the sequence index is bounded by SEQS_PER_BATCH — all well within u32/i32"
-    )]
     pub(crate) fn embed_sync(
         &self,
         texts: &[&str],
@@ -136,12 +136,25 @@ impl LlamaEmbedder {
         // Query texts carry the model's task prompt; document texts stay
         // raw, so stored corpus vectors are unaffected by prompting.
         let prompted = apply_task_prompt(&self.model_id, kind, texts);
-        let texts: Vec<&str> = match &prompted {
-            Some(p) => p.iter().map(String::as_str).collect(),
-            None => texts.to_vec(),
-        };
+        let texts: Vec<&str> = prompted.as_ref().map_or_else(
+            || texts.to_vec(),
+            |p| p.iter().map(String::as_str).collect(),
+        );
+        let mut ctx = self.new_embedding_context()?;
+        let tokenized = self.tokenize_all(&texts)?;
+        let lens: Vec<usize> = tokenized.iter().map(Vec::len).collect();
+        encode_batches(&mut ctx, &tokenized, &plan_batches(&lens))
+    }
+
+    /// A fresh embedding context. One per `embed_sync` call — the weights are
+    /// immutable and shared, the context is not.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "CTX_TOKENS (2048) and SEQS_PER_BATCH (16) are small literal constants, well within u32"
+    )]
+    fn new_embedding_context(&self) -> Result<LlamaContext<'_>, EmbedError> {
         let backend = llama_backend()?;
-        let ctx_params = LlamaContextParams::default()
+        let params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(CTX_TOKENS as u32))
             .with_n_batch(CTX_TOKENS as u32)
             .with_n_ubatch(CTX_TOKENS as u32)
@@ -150,65 +163,130 @@ impl LlamaEmbedder {
             // Unspecified → llama.cpp uses the GGUF's own declared
             // pooling type (MEAN for EmbeddingGemma).
             .with_pooling_type(LlamaPoolingType::Unspecified);
-        let mut ctx = self
-            .model
-            .new_context(backend, ctx_params)
-            .map_err(|e| EmbedError::Backend(format!("create embedding context: {e}")))?;
+        self.model
+            .new_context(backend, params)
+            .map_err(|e| EmbedError::Backend(format!("create embedding context: {e}")))
+    }
 
-        // Tokenize up-front; EmbeddingGemma is BERT-family, so add BOS.
-        let mut tokenized = Vec::with_capacity(texts.len());
-        for text in &texts {
+    /// Tokenize every text, clamped to the context window. `EmbeddingGemma` is
+    /// BERT-family, so BOS is always added.
+    fn tokenize_all(&self, texts: &[&str]) -> Result<Vec<Vec<LlamaToken>>, EmbedError> {
+        let mut out = Vec::with_capacity(texts.len());
+        for text in texts {
             let mut toks = self
                 .model
                 .str_to_token(text, AddBos::Always)
                 .map_err(|e| EmbedError::Backend(format!("tokenize text: {e}")))?;
-            if toks.len() > CTX_TOKENS {
-                toks.truncate(CTX_TOKENS);
-            }
-            tokenized.push(toks);
+            // `truncate` is already a no-op when the vector is shorter, so the
+            // length guard it used to carry was dead weight.
+            toks.truncate(CTX_TOKENS);
+            out.push(toks);
         }
-
-        let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
-        let mut batch = LlamaBatch::new(CTX_TOKENS, SEQS_PER_BATCH as i32);
-        let mut i = 0;
-        while i < tokenized.len() {
-            batch.clear();
-            let mut seqs = 0usize;
-            let mut tokens_in_batch = 0usize;
-            // Pack up to SEQS_PER_BATCH sequences within the token budget.
-            while seqs < SEQS_PER_BATCH {
-                let Some(toks) = tokenized.get(i) else {
-                    break;
-                };
-                if seqs > 0 && tokens_in_batch + toks.len() > CTX_TOKENS {
-                    break; // flush; this text rides the next decode
-                }
-                // `logits_all = true`: mark every token of the sequence
-                // as an output. EmbeddingGemma mean-pools over all
-                // tokens, so llama.cpp needs them all flagged — passing
-                // `false` marks only the last token and llama.cpp then
-                // logs an "overriding" notice as it corrects it.
-                batch
-                    .add_sequence(toks, seqs as i32, true)
-                    .map_err(|e| EmbedError::Backend(format!("add sequence to batch: {e}")))?;
-                tokens_in_batch += toks.len();
-                seqs += 1;
-                i += 1;
-            }
-            // BERT-family encoder: route through `encode` (no kv-cache).
-            ctx.encode(&mut batch)
-                .map_err(|e| EmbedError::Backend(format!("encode embedding batch: {e}")))?;
-            for seq in 0..seqs {
-                let raw = ctx
-                    .embeddings_seq_ith(seq as i32)
-                    .map_err(|e| EmbedError::Backend(format!("read embedding: {e}")))?;
-                let mut v = raw.to_vec();
-                l2_normalize(&mut v);
-                vectors.push(v);
-            }
-        }
-        Ok(vectors)
+        Ok(out)
     }
+}
+
+/// Run one `encode` per planned batch and collect the pooled vectors.
+#[expect(
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    reason = "SEQS_PER_BATCH is the literal constant 16, well within i32"
+)]
+fn encode_batches(
+    ctx: &mut LlamaContext<'_>,
+    tokenized: &[Vec<LlamaToken>],
+    plan: &[usize],
+) -> Result<Vec<Vec<f32>>, EmbedError> {
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(tokenized.len());
+    let mut batch = LlamaBatch::new(CTX_TOKENS, SEQS_PER_BATCH as i32);
+    let mut next = 0usize;
+    for &seqs in plan {
+        batch.clear();
+        let filled = fill_batch(&mut batch, tokenized, next, seqs)?;
+        // Read back what was actually added, not what the plan asked for. The
+        // two agree for any plan `plan_batches` produced, but they are computed
+        // in different functions, and reading more sequences than were encoded
+        // would pull slots this batch never wrote.
+        let added = filled - next;
+        next = filled;
+        // BERT-family encoder: route through `encode` (no kv-cache).
+        ctx.encode(&mut batch)
+            .map_err(|e| EmbedError::Backend(format!("encode embedding batch: {e}")))?;
+        vectors.extend(read_batch_embeddings(ctx, added)?);
+    }
+    Ok(vectors)
+}
+
+/// Add `seqs` sequences starting at `next` to `batch`; returns the new cursor.
+///
+/// `logits_all = true`: mark every token of the sequence as an output.
+/// `EmbeddingGemma` mean-pools over all tokens, so llama.cpp needs them all
+/// flagged — passing `false` marks only the last token and llama.cpp then logs
+/// an "overriding" notice as it corrects it.
+fn fill_batch(
+    batch: &mut LlamaBatch,
+    tokenized: &[Vec<LlamaToken>],
+    next: usize,
+    seqs: usize,
+) -> Result<usize, EmbedError> {
+    let mut cursor = next;
+    for slot in 0..seqs {
+        let Some(toks) = tokenized.get(cursor) else {
+            break;
+        };
+        batch
+            .add_sequence(toks, i32::try_from(slot).unwrap_or(i32::MAX), true)
+            .map_err(|e| EmbedError::Backend(format!("add sequence to batch: {e}")))?;
+        cursor += 1;
+    }
+    Ok(cursor)
+}
+
+/// Read and L2-normalize the pooled embedding of each sequence in the batch.
+fn read_batch_embeddings(ctx: &LlamaContext<'_>, seqs: usize) -> Result<Vec<Vec<f32>>, EmbedError> {
+    let mut out = Vec::with_capacity(seqs);
+    for seq in 0..seqs {
+        let raw = ctx
+            .embeddings_seq_ith(i32::try_from(seq).unwrap_or(i32::MAX))
+            .map_err(|e| EmbedError::Backend(format!("read embedding: {e}")))?;
+        let mut v = raw.to_vec();
+        l2_normalize(&mut v);
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// How many sequences go into each `encode` call, from each text's token count.
+///
+/// Pure arithmetic over lengths, so the packing rule is testable without a
+/// model even though everything around it needs one — and packing is where the
+/// interesting decision lives.
+///
+/// A batch takes up to [`SEQS_PER_BATCH`] sequences and stays within the
+/// [`CTX_TOKENS`] budget, **except** that it always takes at least one: a
+/// single text at or over the budget must still ride alone rather than wedge
+/// the loop. That `seqs > 0` guard is why the outer loop always advances, so
+/// no batch is ever planned empty.
+fn plan_batches(lens: &[usize]) -> Vec<usize> {
+    let mut plan = Vec::new();
+    let mut i = 0usize;
+    while i < lens.len() {
+        let mut seqs = 0usize;
+        let mut tokens = 0usize;
+        while seqs < SEQS_PER_BATCH {
+            let Some(&len) = lens.get(i) else {
+                break;
+            };
+            if seqs > 0 && tokens + len > CTX_TOKENS {
+                break; // flush; this text rides the next encode
+            }
+            tokens += len;
+            seqs += 1;
+            i += 1;
+        }
+        plan.push(seqs);
+    }
+    plan
 }
 
 #[async_trait::async_trait]
@@ -486,5 +564,62 @@ mod tests {
         };
         assert!(msg.contains("KENN_EMBED_MODEL_PATH"));
         assert!(msg.contains("missing"));
+    }
+
+    // ── batch packing ────────────────────────────────────────────────
+    // Previously inline in `embed_sync`, so it could only be exercised with
+    // real weights loaded — which the default suite never does. As arithmetic
+    // over token counts it needs no model at all.
+
+    #[test]
+    fn short_texts_pack_into_one_batch() {
+        assert_eq!(plan_batches(&[10, 20, 30]), vec![3]);
+    }
+
+    #[test]
+    fn a_batch_never_exceeds_the_sequence_cap() {
+        let lens = vec![1; SEQS_PER_BATCH * 2 + 3];
+        let plan = plan_batches(&lens);
+        assert_eq!(plan, vec![SEQS_PER_BATCH, SEQS_PER_BATCH, 3]);
+        assert!(plan.iter().all(|&s| s <= SEQS_PER_BATCH));
+    }
+
+    #[test]
+    fn a_batch_never_exceeds_the_token_budget() {
+        // Three texts at half the window: two fit, the third flushes.
+        let half = CTX_TOKENS / 2;
+        assert_eq!(plan_batches(&[half, half, half]), vec![2, 1]);
+    }
+
+    #[test]
+    fn an_oversized_text_rides_alone_rather_than_wedging_the_loop() {
+        // The `seqs > 0` guard, exercised by a length STRICTLY over the budget
+        // — at exactly `CTX_TOKENS` the comparison is `2048 + 0 > 2048`, which
+        // is false, so the guard is never consulted and this would pass for the
+        // wrong reason. Over the budget, without the guard, the inner loop
+        // breaks immediately, `seqs` stays 0, `i` never advances, and the outer
+        // loop spins forever.
+        //
+        // `tokenize_all` truncates to `CTX_TOKENS`, so this input cannot arise
+        // today; the guard is what keeps that a bounded assumption rather than
+        // a hang if truncation ever moves.
+        let plan = plan_batches(&[CTX_TOKENS + 1, 5, 5]);
+        assert_eq!(plan, vec![1, 2]);
+        assert!(
+            plan.iter().all(|&s| s > 0),
+            "a planned batch is never empty: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn every_text_is_planned_exactly_once() {
+        let lens = vec![300, 900, 1500, 40, 2048, 7, 800, 800, 800];
+        let planned: usize = plan_batches(&lens).iter().sum();
+        assert_eq!(planned, lens.len(), "no text dropped or double-counted");
+    }
+
+    #[test]
+    fn no_texts_plans_no_batches() {
+        assert!(plan_batches(&[]).is_empty());
     }
 }

@@ -15,9 +15,9 @@ fn files(pairs: &[(&str, u32)]) -> WorkspaceFiles {
     )
 }
 
-/// An on-disk asset set for [`AssetIndex`] tests.
+/// An on-disk asset set for [`PathExists`] tests.
 struct Assets(std::collections::HashSet<String>);
-impl AssetIndex for Assets {
+impl PathExists for Assets {
     fn exists(&self, canonical_path: &str) -> bool {
         self.0.contains(canonical_path)
     }
@@ -43,7 +43,7 @@ fn anchors_with(
     relpath: &str,
     files: &dyn CodeLookup,
     frags: &FragmentIndex,
-    assets: &dyn AssetIndex,
+    assets: &dyn PathExists,
 ) -> (Vec<EdgeRecord>, StubSink) {
     let els = parse_elements(html);
     let mut ids = HtmlIds::new(1000);
@@ -211,6 +211,58 @@ fn anchor_to_existing_asset_is_path_keyed_attachment() {
     assert_eq!(edges[0].target_id, stubs.records[0].id);
 }
 
+/// The gate is existence, not spelling. `is_asset_ref` used to answer `false`
+/// for a name with no extension, so `<a href="LICENSE-MIT">` skipped the
+/// attachment rung entirely and dangled even though the file was right there —
+/// one of the five false positives `kenn check links` reported on this repo.
+#[test]
+fn anchor_to_an_existing_extensionless_file_is_an_attachment() {
+    let (edges, stubs) = anchors_with(
+        r#"<a href="../LICENSE-MIT">x</a>"#,
+        "docs/index.html",
+        &files(&[]),
+        &FragmentIndex::default(),
+        &assets(&["LICENSE-MIT"]),
+    );
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].properties, links_props(LinkGrade::Exact));
+    assert_eq!(stubs.records[0].pub_id, "html:LICENSE-MIT");
+    assert_eq!(stubs.records[0].kind, Kind::Attachment);
+}
+
+/// A directory reference points at something real too, which is why the
+/// filesystem backing widened from `is_file()` to `exists()`.
+#[test]
+fn anchor_to_an_existing_directory_is_an_attachment() {
+    let (edges, stubs) = anchors_with(
+        r#"<a href="docs/">x</a>"#,
+        "index.html",
+        &files(&[]),
+        &FragmentIndex::default(),
+        &assets(&["docs"]),
+    );
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].properties, links_props(LinkGrade::Exact));
+    assert_eq!(stubs.records[0].pub_id, "html:docs");
+}
+
+/// Widening the gate must not make everything resolve: an extensionless href
+/// naming nothing on disk — a client-side route, say — still dangles by its
+/// written string.
+#[test]
+fn an_extensionless_anchor_that_does_not_exist_still_dangles() {
+    let (edges, stubs) = anchors_with(
+        r#"<a href="about">x</a>"#,
+        "index.html",
+        &files(&[]),
+        &FragmentIndex::default(),
+        &assets(&["docs"]),
+    );
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].properties, links_props(LinkGrade::Dangling));
+    assert!(stubs.records[0].pub_id.contains("@unresolved"));
+}
+
 #[test]
 fn external_anchor_is_not_graphed() {
     let f = files(&[]);
@@ -315,7 +367,7 @@ fn repeated_reference_yields_one_edge() {
 fn media(
     html: &str,
     relpath: &str,
-    assets: &dyn AssetIndex,
+    assets: &dyn PathExists,
     ids: &mut HtmlIds,
     stubs: &mut StubSink,
 ) -> Vec<EdgeRecord> {

@@ -39,6 +39,10 @@ impl Language {
             Self::Html => 8,
             Self::Swift => 9,
             Self::Text => 10,
+            // Appended, never inserted: a partition index is load-bearing for
+            // every id already on disk. 13 of 16 partitions are now spoken for.
+            Self::Sql => 11,
+            Self::Xml => 12,
         }
     }
 }

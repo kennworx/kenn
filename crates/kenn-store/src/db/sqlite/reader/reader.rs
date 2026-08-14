@@ -14,7 +14,7 @@ use crate::api::types::{
     AggregateEdgeRow, AggregateNodeRow, AnalysisAnchoredCommunityRow, AnalysisFlatCommunityRow,
     AnalysisGodNodeRow, AnalysisNodeMembershipRow, BlendedHit, BlendedSymbolRow, DbError,
     DefLineRow, DefRow, FileRow, FoundSymbolRow, PackageRow, RankedSymbolRow, StatRow,
-    SymbolDocsRow, SymbolRow,
+    SymbolBodyRow, SymbolDocsRow, SymbolRow, SymbolSurfaceRow,
 };
 use crate::api::{Reader, RowNarrow};
 use kenn_model::ShortId;
@@ -278,6 +278,14 @@ impl Reader for SqliteReader {
     }
     async fn scan_def_files(&self) -> Result<Vec<(ShortId, ShortId)>, DbError> {
         self.with_conn(|c| c.scan_def_files()).await
+    }
+    async fn scan_symbol_bodies(&self) -> Result<Vec<SymbolBodyRow>, DbError> {
+        self.with_conn(|c| c.scan_symbol_bodies()).await
+    }
+    async fn scan_symbol_surfaces(&self, language: &str) -> Result<Vec<SymbolSurfaceRow>, DbError> {
+        let language = language.to_owned();
+        self.with_conn(move |c| c.scan_symbol_surfaces(&language))
+            .await
     }
     async fn scan_file_docs(&self) -> Result<Vec<(ShortId, String)>, DbError> {
         self.with_conn(|c| c.scan_file_docs()).await

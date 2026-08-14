@@ -12,9 +12,11 @@ mod markdown;
 mod python;
 mod runtime;
 mod rust;
+mod sql;
 mod swift;
 mod text;
 mod typescript;
+mod xml;
 
 pub use csharp::CsharpConfig;
 pub use css::{CssConfig, SassConfig};
@@ -24,9 +26,11 @@ pub use markdown::{MarkdownConfig, MarkdownRoot};
 pub use python::PythonConfig;
 pub use runtime::Runtime;
 pub use rust::RustConfig;
+pub use sql::SqlConfig;
 pub use swift::SwiftConfig;
 pub use text::TextConfig;
 pub use typescript::TypescriptConfig;
+pub use xml::XmlConfig;
 
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +55,10 @@ pub struct LanguageConfig {
     pub html: HtmlConfig,
     #[serde(default)]
     pub swift: SwiftConfig,
+    #[serde(default)]
+    pub sql: SqlConfig,
+    #[serde(default)]
+    pub xml: XmlConfig,
     #[serde(default)]
     pub text: TextConfig,
 }

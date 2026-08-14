@@ -303,3 +303,120 @@ async fn supersede_tombstone_and_staleness() {
         .expect("still returned — stale findings are flagged, not omitted");
     assert!(gone_hit.stale, "stale where the code node is gone");
 }
+
+// ── claims decay (openspec/changes/claims-decay) ─────────────────────
+//
+// A RULE says how the codebase works and survives edits to the file it is
+// anchored to. A CLAIM asserts the current state of the code, and whoever
+// later changes that code has no reason to look for a finding describing it —
+// so the claim quietly stops being true while still being served as fact.
+
+/// Store one finding, anchor it to `file` with the sha of its CURRENT content,
+/// then rewrite the file so the anchor drifts.
+async fn drifted_finding(ws: &Path, tags: &[&str], file: &str) -> String {
+    let mut store = FindingsStore::open_default(ws).await.expect("open");
+    let (id, _) = store
+        .store_finding(
+            "an assertion".to_owned(),
+            vec![],
+            tags.iter().map(|t| (*t).to_owned()).collect(),
+            None,
+        )
+        .await
+        .expect("store");
+    store.flush().await.expect("flush");
+
+    let abs = ws.join(file);
+    std::fs::write(&abs, "before").expect("seed");
+    let sha = kenn_store::file_content_sha(&abs);
+    store
+        .record_anchor_event(
+            &id,
+            &kenn_store::AnchorEvent::Attach {
+                anchor: file.to_owned(),
+                ts: kenn_store::Timestamp::now(),
+                sha,
+            },
+        )
+        .await
+        .expect("attach");
+    // The change nobody linked back to the finding.
+    std::fs::write(&abs, "after").expect("edit");
+    id
+}
+
+#[tokio::test]
+async fn a_drifted_claim_is_unverified_and_a_drifted_rule_is_not() {
+    let dir = TempDir::new().expect("tmp");
+    let ws = dir.path();
+    let claim = drifted_finding(ws, &["bug", "deferred"], "claim.rs").await;
+    let rule = drifted_finding(ws, &["directive", "polarity:do"], "rule.rs").await;
+
+    let store = FindingsStore::open_default(ws).await.expect("open");
+    let health = store.check_anchors().await.expect("check");
+
+    assert!(
+        health.unverified.iter().any(|u| u.finding_id == claim),
+        "a claim whose code moved needs re-verifying, not a routine re-read"
+    );
+    assert!(
+        health.drifted.iter().any(|d| d.finding_id == rule),
+        "a rule still reports as ordinary drift"
+    );
+    assert!(
+        !health.unverified.iter().any(|u| u.finding_id == rule),
+        "a rule survives edits to its anchor — it is not an unverified claim"
+    );
+    assert!(
+        !health.drifted.iter().any(|d| d.finding_id == claim),
+        "a claim is reported once, in the bucket that says what to do about it"
+    );
+}
+
+#[tokio::test]
+async fn an_unmarked_finding_is_a_rule() {
+    // The safe default: this store is overwhelmingly rules, and treating every
+    // unmarked finding as a decaying claim would flood the re-verification
+    // surface with entries that do not need it — which is how a signal stops
+    // being read.
+    let dir = TempDir::new().expect("tmp");
+    let ws = dir.path();
+    let id = drifted_finding(ws, &[], "unmarked.rs").await;
+
+    let store = FindingsStore::open_default(ws).await.expect("open");
+    let health = store.check_anchors().await.expect("check");
+
+    assert!(health.drifted.iter().any(|d| d.finding_id == id));
+    assert!(!health.unverified.iter().any(|u| u.finding_id == id));
+}
+
+#[tokio::test]
+async fn a_superseded_finding_is_in_no_health_bucket() {
+    // A superseded ancestor is already excluded from retrieval, so it can never
+    // be served as guidance and repairing its anchors changes nothing. Measured
+    // on the kenn repo, 26 of 127 drifted entries were superseded ancestors — a
+    // fifth of the list, which is how a report trains its reader to skim.
+    let dir = TempDir::new().expect("tmp");
+    let ws = dir.path();
+    let old = drifted_finding(ws, &["bug"], "old.rs").await;
+
+    let mut store = FindingsStore::open_default(ws).await.expect("open");
+    store
+        .store_finding(
+            "the current state".to_owned(),
+            vec![old.clone()],
+            vec!["directive".to_owned(), format!("supersedes:{old}")],
+            None,
+        )
+        .await
+        .expect("supersede");
+    store.flush().await.expect("flush");
+
+    let health = store.check_anchors().await.expect("check");
+    assert!(
+        !health.unverified.iter().any(|u| u.finding_id == old),
+        "a superseded claim is history, not outstanding re-verification"
+    );
+    assert!(!health.drifted.iter().any(|d| d.finding_id == old));
+    assert!(!health.broken.iter().any(|b| b.finding_id == old));
+}

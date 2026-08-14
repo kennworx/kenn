@@ -13,6 +13,7 @@ expression: dump(&r)
   "symbols_seen": 1234,
   "defs_seen": 2345,
   "def_bodies_seen": 0,
+  "bodies_with_literals": 0,
   "edges_seen": 3210,
   "out_of_root_seen": 0,
   "failed_projects": [

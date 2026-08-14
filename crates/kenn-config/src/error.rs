@@ -12,6 +12,11 @@ pub enum ConfigError {
         value: String,
         error: std::net::AddrParseError,
     },
+    #[error(
+        "[xml_sql].rules[{index}] needs an `attribute`: an element name alone \
+         ({element}) identifies no table"
+    )]
+    XmlSqlRuleWithoutAttribute { index: usize, element: String },
     #[error("[language.{language}] command must be a non-empty array of tokens")]
     EmptyCommand { language: &'static str },
     #[error("[language.{language}] runtime = \"docker\" requires a non-empty `image`")]

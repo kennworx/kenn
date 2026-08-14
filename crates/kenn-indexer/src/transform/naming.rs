@@ -247,9 +247,9 @@ pub fn is_test_descriptor(language: Language, kind: Kind, public_id: &str) -> bo
             .split(['/', '.'])
             .any(|seg| seg.ends_with("_test") || seg == "tests" || seg == "test"),
         Language::Python => is_test_descriptor_python(kind, native),
-        // Markdown, stylesheets, and HTML have no test-descriptor convention.
-        // Swift's test flag is set by the sidecar from the SwiftPM target kind,
-        // not inferred from the descriptor here.
+        // Markdown, stylesheets, HTML, SQL, and XML have no test-descriptor
+        // convention. Swift's test flag is set by the sidecar from the SwiftPM
+        // target kind, not inferred from the descriptor here.
         Language::TypeScript
         | Language::Csharp
         | Language::Swift
@@ -257,6 +257,8 @@ pub fn is_test_descriptor(language: Language, kind: Kind, public_id: &str) -> bo
         | Language::Css
         | Language::Sass
         | Language::Html
+        | Language::Sql
+        | Language::Xml
         | Language::Text => false,
     }
 }

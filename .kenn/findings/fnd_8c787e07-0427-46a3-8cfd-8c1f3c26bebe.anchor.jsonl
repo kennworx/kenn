@@ -4,3 +4,6 @@
 {"op":"attach","anchor":"crates/kenn-indexer/src/css/ingest/core.rs","ts":"2026-07-21T13:16:19.271984Z","sha":"b832cb04f6ee995d"}
 {"op":"attach","anchor":"crates/kenn-indexer/src/html/links/core.rs","ts":"2026-07-21T13:16:19.271984Z","sha":"1dfa90fb7962539d"}
 {"op":"attach","anchor":"crates/kenn-indexer/src/markdown/ingest/core.rs","ts":"2026-07-21T13:16:19.271984Z","sha":"637c0f1e9ac0a09a"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/ingest/core_tests.rs","ts":"2026-07-26T18:05:39.387477Z","sha":"5331e1b523610a2e"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/markdown/ingest/core_tests.rs","ts":"2026-07-26T18:05:51.566601Z","sha":"5331e1b523610a2e"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/sql/parse.rs","ts":"2026-08-13T12:52:09.203424Z","sha":"0aa825c8cdac646e"}

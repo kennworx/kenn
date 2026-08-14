@@ -17,6 +17,198 @@ fn cfg() -> MarkdownConfig {
     }
 }
 
+/// A fixed answer set standing in for the workspace, so the attachment rung is
+/// testable without touching the filesystem.
+///
+/// The trailing-slash strip is not cosmetic: the real backing is
+/// `Path::exists`, and the filesystem answers the same for `docs` and `docs/`.
+/// A set that distinguishes them makes the key-canonicalization guard vacuous —
+/// it would reject the bad spelling by accident and pass no matter what the
+/// code under test does.
+struct Present(&'static [&'static str]);
+impl PathExists for Present {
+    fn exists(&self, canonical_path: &str) -> bool {
+        let probe = canonical_path.trim_end_matches('/');
+        self.0.iter().any(|p| p.trim_end_matches('/') == probe)
+    }
+}
+
+fn raw_link(target: &str) -> RawLink {
+    RawLink {
+        kind: LinkKind::Link,
+        wikilink: false,
+        target: target.to_string(),
+        anchor: None,
+        line: 1,
+        external: false,
+    }
+}
+
+/// An extensionless repository file and a directory both point at something
+/// real. Before `honest-link-grades` markdown had no existence check at all, so
+/// each was reported dangling — five of the seven rows `kenn check links`
+/// produced on this repo.
+#[test]
+fn an_existing_target_that_is_not_indexed_becomes_a_path_keyed_attachment() {
+    let ws = Present(&["LICENSE-MIT", "docs", "indexers/frames.ts"]);
+    assert_eq!(
+        attachment_key(&raw_link("LICENSE-MIT"), "README.md", &ws).as_deref(),
+        Some("LICENSE-MIT")
+    );
+    // A directory reference: the trailing slash normalizes away.
+    assert_eq!(
+        attachment_key(&raw_link("docs/"), "README.md", &ws).as_deref(),
+        Some("docs")
+    );
+}
+
+/// The key is the *canonical* path, so two documents at different depths that
+/// name one on-disk target produce one node — the property `list_usages`
+/// depends on, and the reason HTML already keys its asset stubs this way.
+#[test]
+fn every_spelling_of_one_target_produces_one_key() {
+    let ws = Present(&["LICENSE-MIT"]);
+    let from_root = attachment_key(&raw_link("LICENSE-MIT"), "README.md", &ws);
+    let from_crate = attachment_key(
+        &raw_link("../../LICENSE-MIT"),
+        "crates/kenn-indexer/README.md",
+        &ws,
+    );
+    assert_eq!(from_root, from_crate);
+    assert_eq!(from_root.as_deref(), Some("LICENSE-MIT"));
+}
+
+/// A directory written with and without a trailing slash is one directory, so
+/// it must key one node. The first cut of this change returned the written
+/// spelling verbatim when it matched, minting `md:@attachment/docs/` alongside
+/// `md:@attachment/docs` — visible only after reindexing the real workspace.
+#[test]
+fn a_trailing_slash_does_not_fork_the_attachment_key() {
+    let ws = Present(&["docs"]);
+    let slashed = attachment_key(&raw_link("docs/"), "README.md", &ws);
+    let bare = attachment_key(&raw_link("docs"), "README.md", &ws);
+    assert_eq!(slashed, bare);
+    assert_eq!(bare.as_deref(), Some("docs"));
+}
+
+/// A relative target must bind to the path it names, not to a same-named path
+/// at the repository root. The first cut probed root-relative first, which — on
+/// a filesystem where `docs`, `src` and `tests` exist at several depths —
+/// silently resolved a nested link to the root directory.
+#[test]
+fn a_relative_target_binds_nearest_not_to_the_root() {
+    let ws = Present(&["docs", "crates/kenn-indexer/docs"]);
+    assert_eq!(
+        attachment_key(&raw_link("docs"), "crates/kenn-indexer/README.md", &ws).as_deref(),
+        Some("crates/kenn-indexer/docs")
+    );
+    // With no nested candidate, the root-relative fallback still applies.
+    let root_only = Present(&["docs"]);
+    assert_eq!(
+        attachment_key(
+            &raw_link("docs"),
+            "crates/kenn-indexer/README.md",
+            &root_only
+        )
+        .as_deref(),
+        Some("docs")
+    );
+}
+
+/// Existence is the whole gate: a target the workspace does not hold is still
+/// broken, and must keep dangling by its written string.
+#[test]
+fn a_target_the_workspace_does_not_hold_is_not_an_attachment() {
+    let ws = Present(&["LICENSE-MIT"]);
+    assert_eq!(
+        attachment_key(&raw_link("missing-file"), "README.md", &ws),
+        None
+    );
+}
+
+/// A bare inline destination is a *path* by `CommonMark`'s reading, so an
+/// existing directory must not be shadowed by a code symbol that happens to
+/// share its name — `[the docs](docs)` in a README means the directory, not a
+/// `fn docs`. A wikilink is the opposite convention and keeps symbol-first.
+#[test]
+fn a_bare_inline_name_prefers_an_existing_path_over_a_symbol() {
+    // `is_code_path` is what routes a target to the symbol branch; a bare name
+    // is exactly the case that can be shadowed.
+    assert!(!crate::markdown::is_code_path("docs"));
+    assert!(crate::markdown::is_code_path("src/order.rs"));
+    assert!(crate::markdown::is_code_path("order.rs"));
+
+    // The bare name resolves as a path when the workspace holds one...
+    let ws = Present(&["docs"]);
+    assert_eq!(
+        attachment_key(&raw_link("docs"), "README.md", &ws).as_deref(),
+        Some("docs")
+    );
+    // ...and not when it does not, leaving the symbol branch to answer.
+    let empty = Present(&[]);
+    assert_eq!(attachment_key(&raw_link("docs"), "README.md", &empty), None);
+}
+
+/// An attachment's sections are unknown — the target is not in the corpus — so
+/// an anchor on it cannot be verified and the edge must not claim `exact`.
+/// Mirrors `apply_anchor`, which downgrades an unmatched md↔md anchor.
+#[test]
+fn an_unverifiable_anchor_downgrades_the_attachment_grade() {
+    let ws = Present(&["vendor/CHANGELOG.md"]);
+    let anchored = RawLink {
+        anchor: Some("v1-0-0".into()),
+        ..raw_link("vendor/CHANGELOG.md")
+    };
+    // The key is unaffected — the anchor addresses a place *inside* the target.
+    assert_eq!(
+        attachment_key(&anchored, "README.md", &ws).as_deref(),
+        Some("vendor/CHANGELOG.md")
+    );
+    assert_eq!(attachment_grade(&anchored), LinkGrade::Drifted);
+    assert_eq!(
+        attachment_grade(&raw_link("vendor/CHANGELOG.md")),
+        LinkGrade::Exact
+    );
+}
+
+/// D4 applies the existence check to *every* unresolved target, so a wikilink —
+/// a bare name, not a path — resolves when the workspace holds a path of that
+/// name and dangles otherwise.
+///
+/// The first cut of this test passed `raw_link("[[gone]]")`, a string
+/// `extract_links` can never produce: it strips the brackets, yielding
+/// `RawLink { wikilink: true, target: "gone" }`. The assertion therefore only
+/// restated the `missing-file` case above and could not go red for any change
+/// to wikilink handling (CLAUDE.md §9).
+#[test]
+fn a_wikilink_resolves_by_existence_of_its_bare_name() {
+    let ws = Present(&["docs"]);
+    let hit = RawLink {
+        wikilink: true,
+        ..raw_link("docs")
+    };
+    assert_eq!(
+        attachment_key(&hit, "README.md", &ws).as_deref(),
+        Some("docs")
+    );
+    let miss = RawLink {
+        wikilink: true,
+        ..raw_link("gone")
+    };
+    assert_eq!(attachment_key(&miss, "README.md", &ws), None);
+}
+
+/// A target whose `..` segments walk above the workspace root has no in-corpus
+/// canonical path, so it cannot key a shared node.
+#[test]
+fn a_target_above_the_workspace_root_is_not_an_attachment() {
+    let ws = Present(&["LICENSE-MIT"]);
+    assert_eq!(
+        attachment_key(&raw_link("../../../LICENSE-MIT"), "a/b.md", &ws),
+        None
+    );
+}
+
 #[test]
 fn external_stub_classifies_assets_vs_notes() {
     // Classification reads the raw (unescaped) name's extension: png/pdf/css
@@ -70,7 +262,7 @@ fn ingests_markdown_records_into_the_store() {
     // their sections + the root/dir modules, defs and contains/defined_in.
     assert!(counts.symbols >= 2 && counts.defs >= 2 && counts.edges >= 2);
     let p2 = BatchSink::new(writer, rt.handle().clone(), 16);
-    resolve_markdown_code(pending, None, p2).expect("resolve");
+    resolve_markdown_code(pending, None, &FsPaths { workspace_root: ws }, p2).expect("resolve");
 }
 
 // --- file_link_edges (pure) -------------------------------------------
@@ -298,7 +490,13 @@ fn md_to_code_link_resolves_and_backlinks() {
         .block_on(kenn_store::reader_from_writer(&writer))
         .expect("reader");
     let p2 = BatchSink::new(writer.clone(), rt.handle().clone(), 16);
-    resolve_markdown_code(pending, Some((&reader, rt.handle())), p2).expect("resolve");
+    resolve_markdown_code(
+        pending,
+        Some((&reader, rt.handle())),
+        &FsPaths { workspace_root: ws },
+        p2,
+    )
+    .expect("resolve");
     drop(reader);
 
     // code→md backlink: list_inbound on the code symbol over `links_to`
@@ -322,37 +520,13 @@ fn md_to_code_link_resolves_and_backlinks() {
     assert!(inbound[0].pub_id.starts_with("md:workspace/docs/guide.md"));
 }
 
-/// An md→code link to a source *file* emits a `links_to_file` edge (not
-/// `links_to`), so the code file gains a sound backlink to the md section.
-#[test]
-fn md_to_code_file_link_uses_links_to_file_edge() {
+/// One indexed Rust file (`src/order.rs`) plus a symbol and its def, so the file
+/// has the def row a real ingest would give it. Extracted from
+/// `md_to_code_file_link_uses_links_to_file_edge` to keep that test under the
+/// pedantic 100-line limit.
+fn rust_file_batch(code_file: kenn_model::ShortId) -> kenn_store::api::WriteBatch {
     use kenn_model::{compose_short_id, DefRecord, FileRecord};
-    use kenn_store::api::{Reader, WriteBatch};
-
-    let dir = TempDir::new().unwrap();
-    let ws = dir.path();
-    fs::create_dir_all(ws.join("docs")).unwrap();
-    fs::write(
-        ws.join("docs/guide.md"),
-        "# Guide\nsee [src](src/order.rs)\n",
-    )
-    .unwrap();
-
-    let building = ws.join(".kenn").join("local").join("building");
-    fs::create_dir_all(&building).unwrap();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let writer = rt
-        .block_on(kenn_store::open_writer(
-            &building,
-            kenn_store::WriterOptions::default(),
-        ))
-        .expect("open_writer");
-
-    let code_file = compose_short_id(Language::Rust, 1);
-    let mut b = WriteBatch::default();
+    let mut b = kenn_store::api::WriteBatch::default();
     b.files.push(FileRecord {
         id: code_file,
         path: "src/order.rs".into(),
@@ -361,7 +535,6 @@ fn md_to_code_file_link_uses_links_to_file_edge() {
         external: false,
         content_hash: 1,
     });
-    // A symbol so the file has a def row (mirrors a real ingest).
     b.symbols.push(SymbolRecord {
         id: compose_short_id(Language::Rust, 2),
         pub_id: "rs:order::handle".into(),
@@ -386,7 +559,165 @@ fn md_to_code_file_link_uses_links_to_file_edge() {
         body_start_line: 0,
         body_end_line: 0,
     });
-    rt.block_on(writer.write_batch(&b))
+    b
+}
+
+/// A bare inline destination naming an existing directory must resolve to the
+/// directory, not to a code symbol that shares its name. Store-backed on
+/// purpose: the unit guards above cover `attachment_key` and `is_code_path`
+/// separately, and a mutation of the `path_wins` wiring in
+/// `resolve_markdown_code` survives both (CLAUDE.md §9).
+#[test]
+fn an_existing_directory_is_not_shadowed_by_a_same_named_symbol() {
+    use kenn_model::{compose_short_id, DefRecord, FileRecord};
+    use kenn_store::api::{Reader, WriteBatch};
+
+    let dir = TempDir::new().unwrap();
+    let ws = dir.path();
+    fs::create_dir_all(ws.join("docs")).unwrap();
+    // The link target: a real directory, and a code symbol of the same name.
+    // The destination must be a *bare name* — a slash would route it to the
+    // file branch of `resolve_code_link` and never reach the symbol lookup
+    // that does the shadowing.
+    fs::create_dir_all(ws.join("docs/notes")).unwrap();
+    fs::write(
+        ws.join("docs/guide.md"),
+        "# Guide\nsee [the notes](notes)\n",
+    )
+    .unwrap();
+
+    let building = ws.join(".kenn").join("local").join("building");
+    fs::create_dir_all(&building).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let writer = rt
+        .block_on(kenn_store::open_writer(
+            &building,
+            kenn_store::WriterOptions::default(),
+        ))
+        .expect("open_writer");
+
+    let code_file = compose_short_id(Language::Rust, 1);
+    let sym = compose_short_id(Language::Rust, 2);
+    let mut b = WriteBatch::default();
+    b.files.push(FileRecord {
+        id: code_file,
+        path: "src/lib.rs".into(),
+        language: Language::Rust,
+        test: false,
+        external: false,
+        content_hash: 1,
+    });
+    b.symbols.push(SymbolRecord {
+        id: sym,
+        pub_id: "rs:lib::notes".into(),
+        language: Language::Rust,
+        pkg_id: 0,
+        kind: Kind::Function,
+        name: "notes".into(),
+        enclosing_sym_id: 0,
+        partial: false,
+        nargs: 0,
+        targs: 0,
+        external: false,
+        test: false,
+    });
+    b.defs.push(DefRecord {
+        sym_id: sym,
+        file_id: code_file,
+        start_line: 1,
+        start_col: 0,
+        end_line: 2,
+        end_col: 0,
+        body_start_line: 0,
+        body_end_line: 0,
+    });
+    rt.block_on(writer.write_batch(&b)).expect("write code");
+
+    let p1 = BatchSink::new(writer.clone(), rt.handle().clone(), 16);
+    let (_c, pending) = ingest_markdown_phase1(&cfg(), ws, p1).expect("phase1");
+    let reader = rt
+        .block_on(kenn_store::reader_from_writer(&writer))
+        .expect("reader");
+    let p2 = BatchSink::new(writer.clone(), rt.handle().clone(), 16);
+    resolve_markdown_code(
+        pending,
+        Some((&reader, rt.handle())),
+        &FsPaths { workspace_root: ws },
+        p2,
+    )
+    .expect("resolve");
+    drop(reader);
+
+    let reader = rt
+        .block_on(kenn_store::reader_from_writer(&writer))
+        .expect("reader");
+    // The symbol gains no backlink — the directory won.
+    let (_inbound, to_symbol) = rt
+        .block_on(Reader::list_inbound(
+            &reader,
+            sym,
+            "links_to",
+            50,
+            None,
+            &kenn_store::RowNarrow::visibility(false, true),
+        ))
+        .expect("list_inbound");
+    assert_eq!(
+        to_symbol, 0,
+        "a bare name must not resolve to a code symbol when the workspace holds that path"
+    );
+    // ...and the attachment node exists.
+    assert!(rt
+        .block_on(Reader::fetch_symbol(
+            &reader,
+            "markdown",
+            "md:@attachment/docs/notes"
+        ))
+        .expect("fetch")
+        .is_some());
+}
+
+/// An md→code link to a source *file* emits a `links_to_file` edge (not
+/// `links_to`), so the code file gains a sound backlink to the md section.
+#[test]
+fn md_to_code_file_link_uses_links_to_file_edge() {
+    use kenn_model::compose_short_id;
+    use kenn_store::api::Reader;
+
+    let dir = TempDir::new().unwrap();
+    let ws = dir.path();
+    fs::create_dir_all(ws.join("docs")).unwrap();
+    fs::write(
+        ws.join("docs/guide.md"),
+        "# Guide\nsee [src](src/order.rs)\n",
+    )
+    .unwrap();
+    // The target exists on disk *and* is an indexed code file — the realistic
+    // case, and the one that pins the resolution order (design D4): graph
+    // resolution wins, so this is a `links_to_file` edge to the file node and
+    // NOT an attachment stub. Without the file on disk the existence rung is
+    // unreachable here and the ordering goes unguarded.
+    fs::create_dir_all(ws.join("src")).unwrap();
+    fs::write(ws.join("src/order.rs"), "pub fn handle() {}\n").unwrap();
+
+    let building = ws.join(".kenn").join("local").join("building");
+    fs::create_dir_all(&building).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let writer = rt
+        .block_on(kenn_store::open_writer(
+            &building,
+            kenn_store::WriterOptions::default(),
+        ))
+        .expect("open_writer");
+
+    let code_file = compose_short_id(Language::Rust, 1);
+    rt.block_on(writer.write_batch(&rust_file_batch(code_file)))
         .expect("write code batch");
 
     let p1 = BatchSink::new(writer.clone(), rt.handle().clone(), 16);
@@ -397,7 +728,13 @@ fn md_to_code_file_link_uses_links_to_file_edge() {
         .block_on(kenn_store::reader_from_writer(&writer))
         .expect("reader");
     let p2 = BatchSink::new(writer.clone(), rt.handle().clone(), 16);
-    resolve_markdown_code(pending, Some((&reader, rt.handle())), p2).expect("resolve");
+    resolve_markdown_code(
+        pending,
+        Some((&reader, rt.handle())),
+        &FsPaths { workspace_root: ws },
+        p2,
+    )
+    .expect("resolve");
     drop(reader);
 
     // The code file has a `links_to_file` backlink from the md section;
@@ -596,7 +933,13 @@ fn end_to_end_corpus_graph() {
         .block_on(kenn_store::reader_from_writer(&writer))
         .expect("reader");
     let p2 = BatchSink::new(writer.clone(), rt.handle().clone(), 32);
-    resolve_markdown_code(pending, Some((&reader, rt.handle())), p2).expect("resolve");
+    resolve_markdown_code(
+        pending,
+        Some((&reader, rt.handle())),
+        &FsPaths { workspace_root: ws },
+        p2,
+    )
+    .expect("resolve");
     drop(reader);
 
     let reader = rt

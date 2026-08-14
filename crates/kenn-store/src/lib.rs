@@ -26,7 +26,8 @@ pub use api::types::{
     AggregateEdgeRow, AggregateNodeRow, AnalysisFlatCommunityRow, AnalysisNodeMembershipRow,
     BlendedFileRow, BlendedHit, BlendedSymbolRow, CodeSymbolHit, DbError, DefLineRow, DefRow,
     FileRow, Finding, FindingHit, FoundSymbolRow, LinkDiagnosticRow, MatchKind, PackageRow,
-    RankedSymbolRow, RowNarrow, StatRow, SymbolDocsRow, SymbolRow, WriterOptions,
+    RankedSymbolRow, RowNarrow, StatRow, SymbolBodyRow, SymbolDocsRow, SymbolRow, SymbolSurfaceRow,
+    WriterOptions,
 };
 pub use clock::Timestamp;
 
@@ -40,7 +41,7 @@ pub use clock::Timestamp;
 pub use db::{
     embed_pending, finding_is_stale, read_embed_error, reembed, stage_findings_for_publish, Anchor,
     AnchorEvent, AnchorHealth, BrokenAnchors, CodeGraphNodeResolver, CodeNodeResolver, DbConn,
-    DbReader, DbWriter, DriftedAnchors, FindingsStore, ReembedReport,
+    DbReader, DbWriter, DriftedAnchors, FindingsStore, ReembedReport, UnverifiedClaim,
 };
 pub use embed::sidecar::{
     code_generation_dir, current_model_id, findings_generation_dir, gc_vector_cache,

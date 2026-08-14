@@ -847,3 +847,176 @@ fn html_css_js_indexes_end_to_end() {
     assert_eq!(uses, 1, "btn used once, from the hero html_id");
     assert_eq!(use_rows[0].pub_id, "html:index.html#id:hero");
 }
+
+#[test]
+fn the_code_table_report_distinguishes_scanned_from_found() {
+    // Three numbers, and each must land on its own field. The failure this
+    // guards is not a crash: mapping one count to the wrong field, or dropping
+    // one, leaves a report that still parses and still looks complete — and a
+    // reader then cannot tell a table nothing touches from one whose access
+    // this pass could not see.
+    let counts = crate::code_sql::resolve::CodeSqlCounts {
+        bodies_scanned: 9309,
+        bodies_with_literals: 4103,
+        refs_emitted: 252,
+        tables_minted: 40,
+    };
+    let mut r = RunReport::started("code-tables", "0", "<corpus>");
+    super::api::record_code_table_counts(&mut r, &counts);
+
+    assert_eq!(r.def_bodies_seen, 9309, "bodies scanned");
+    assert_eq!(r.bodies_with_literals, 4103, "bodies carrying literals");
+    assert_eq!(r.edges_seen, 252, "references emitted");
+    assert_eq!(r.symbols_seen, 40, "tables minted");
+    assert_eq!(
+        r.files_seen, 0,
+        "files_seen rolls up into the per-language file total `kenn index` \
+         prints — this step re-reads files another unit already counted"
+    );
+}
+
+/// The XML↔SQL bridge, end to end through the real pipeline.
+///
+/// Both halves of a workspace's schema in one fixture: a `.sql` migration that
+/// declares a table, and XML that reaches the same table by attribute and names
+/// a second one that no statement declares.
+#[test]
+fn the_xml_sql_bridge_joins_both_surfaces_to_one_table_graph() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path();
+    std::fs::write(src.join("schema.sql"), "CREATE TABLE users (id INT);\n").unwrap();
+    std::fs::write(
+        src.join("changelog.xml"),
+        // One element reaches `users` by attribute; one reaches `orders`, which
+        // nothing declares, so it must be minted; one carries SQL as text.
+        "<changelog>\
+           <createTable tableName=\"users\"/>\
+           <createTable tableName=\"orders\"/>\
+           <sql>SELECT id FROM users WHERE id &gt; 1</sql>\
+         </changelog>\n",
+    )
+    .unwrap();
+
+    let ws = Workspace::new(src, &[]).unwrap();
+    let writer = temp_writer(src);
+    let runner = IndexerDriver::new(ws)
+        .with_sql(kenn_config::SqlConfig {
+            enabled: true,
+            ..Default::default()
+        })
+        .with_xml(kenn_config::XmlConfig {
+            enabled: true,
+            ..Default::default()
+        })
+        .with_xml_sql(kenn_config::XmlSqlConfig {
+            rules: vec![kenn_config::TableRule {
+                attribute: "tableName".into(),
+                element: Some("createTable".into()),
+                role: Some(kenn_config::TableRole::Declares),
+            }],
+            ..Default::default()
+        });
+
+    let (reports, out_writer) = run_pipeline(&runner, writer, 16).expect("pipeline runs");
+
+    // 2.3: the step reports separately from every producer, so a failure here
+    // would degrade only this report.
+    let bridge = reports
+        .iter()
+        .find(|r| r.indexer_name == "xml-tables")
+        .expect("the bridge files its own report");
+    assert_eq!(bridge.status, RunStatus::Success);
+    assert!(bridge.edges_seen > 0, "it emitted references");
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let reader = rt
+        .block_on(kenn_store::reader_from_writer(&out_writer))
+        .expect("reader");
+    let symbols = rt
+        .block_on(kenn_store::api::Reader::scan_symbols(&reader))
+        .expect("scan");
+
+    let tables: Vec<&str> = symbols
+        .iter()
+        .filter(|s| s.kind == kenn_model::Kind::SqlTable.db_name())
+        .map(|s| s.pub_id.as_str())
+        .collect();
+    assert!(
+        tables.contains(&"sql:users"),
+        "the declared table: {tables:?}"
+    );
+    assert!(
+        tables.contains(&"sql:orders"),
+        "5.3: a table named only by an attribute is minted: {tables:?}"
+    );
+
+    // 5.1 + 5.3: the attribute reference and the `.sql` declaration reach ONE
+    // node, and the XML edges come from elements rather than the document.
+    let users = symbols
+        .iter()
+        .find(|s| s.pub_id == "sql:users")
+        .expect("users node");
+    let (rows, _) = rt
+        .block_on(kenn_store::api::Reader::list_inbound(
+            &reader,
+            users.id,
+            "defines_table",
+            50,
+            None,
+            &kenn_store::RowNarrow::visibility(true, true),
+        ))
+        .expect("inbound");
+    let sources: Vec<&str> = rows.iter().map(|r| r.pub_id.as_str()).collect();
+    assert!(
+        sources.iter().any(|p| p.starts_with("sql:")),
+        "the statement declared it: {sources:?}"
+    );
+    assert!(
+        sources.iter().any(|p| p.starts_with("xml:")),
+        "and the element did too, on the same node: {sources:?}"
+    );
+    assert!(
+        sources.iter().all(|p| !p.ends_with("changelog.xml")),
+        "2.1/5.1: from the element, never the document: {sources:?}"
+    );
+}
+
+/// 2.2: a workspace with XML but no tables anywhere still indexes cleanly, and
+/// the step reports nothing rather than a degraded run.
+#[test]
+fn a_workspace_whose_xml_names_no_table_skips_the_bridge_cleanly() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path();
+    std::fs::write(
+        src.join("config.xml"),
+        "<config><timeout>30</timeout><name>svc</name></config>\n",
+    )
+    .unwrap();
+
+    let ws = Workspace::new(src, &[]).unwrap();
+    let writer = temp_writer(src);
+    let runner = IndexerDriver::new(ws)
+        .with_xml(kenn_config::XmlConfig {
+            enabled: true,
+            ..Default::default()
+        })
+        .with_xml_sql(kenn_config::XmlSqlConfig::default());
+
+    let (reports, _writer) = run_pipeline(&runner, writer, 16).expect("pipeline runs");
+    let bridge = reports.iter().find(|r| r.indexer_name == "xml-tables");
+    // It ran (there were elements) and found nothing — success with no edges,
+    // not a failure and not a claim of work it did not do.
+    if let Some(r) = bridge {
+        assert_eq!(r.status, RunStatus::Success);
+        assert_eq!(r.edges_seen, 0);
+        assert_eq!(r.symbols_seen, 0, "nothing minted from non-SQL content");
+    }
+    assert!(
+        reports.iter().all(|r| r.status != RunStatus::Failed),
+        "no unit degraded: {:?}",
+        reports.iter().map(|r| &r.indexer_name).collect::<Vec<_>>()
+    );
+}

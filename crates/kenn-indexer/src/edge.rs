@@ -294,6 +294,9 @@ fn edge_properties(kind: EdgeKind, occ: &Occurrence) -> EdgeProperties {
         | EdgeKind::LinksToFile
         | EdgeKind::UsesCssClass
         | EdgeKind::ExtendsRule
+        | EdgeKind::DefinesTable
+        | EdgeKind::AltersTable
+        | EdgeKind::AccessesTable
         | EdgeKind::ExtendsType => {
             unreachable!("producer-emitted {kind:?} edges are not derived from SCIP occurrences")
         }
