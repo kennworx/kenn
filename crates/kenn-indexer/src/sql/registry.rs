@@ -129,6 +129,44 @@ impl TableRegistry for NameSet {
     }
 }
 
+/// Two identity sets read as one.
+///
+/// A barrier step resolves against what the earlier pass wrote *and* what it has
+/// itself minted so far. Without the second half, a reference cannot see a
+/// sibling minted moments earlier in the same run, so the same table is minted
+/// under two spellings and its references split between them — which is how a
+/// `createTable` and an `ALTER TABLE users.…` naming one table ended up as two
+/// identities on a real corpus.
+pub struct Union<'a> {
+    pub known: &'a NameSet,
+    pub minted: &'a NameSet,
+}
+
+impl TableRegistry for Union<'_> {
+    fn identities_named(&self, name: &str) -> Vec<TableKey> {
+        let mut out = self.known.identities_named(name);
+        for key in self.minted.identities_named(name) {
+            if !out.contains(&key) {
+                out.push(key);
+            }
+        }
+        out
+    }
+}
+
+impl NameSet {
+    /// Whether this exact identity is present — schema and all.
+    ///
+    /// Distinct from [`identities_named`](TableRegistry::identities_named),
+    /// which matches on the bare name. Minting must test the whole key: a guard
+    /// that tests only the name lets one spelling satisfy it for another, and
+    /// the loser's edge then finds no node and is dropped.
+    #[must_use]
+    pub fn contains(&self, key: &TableKey) -> bool {
+        self.identities_named(&key.name).contains(key)
+    }
+}
+
 /// One resolved candidate: the identity an edge points at, and how sure we are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
@@ -145,6 +183,21 @@ pub struct Resolved {
 #[must_use]
 pub fn resolve(reg: &dyn TableRegistry, schema: Option<&str>, name: &str) -> Vec<Resolved> {
     // A qualified reference names its schema, so it matches only that identity.
+    //
+    // It does NOT adopt an unqualified identity of the same name, though a bare
+    // name does mean schema *unstated* rather than schema *empty*, and the two
+    // are usually one table. Adoption was implemented and reverted: with no
+    // record of *which* schema adopted the bare identity, a second schema
+    // adopts it too, and `sales.orders` and `archive.orders` collapse into one
+    // table — a worse error than splitting one, because it reports references
+    // against a table that never received them. Measured on this workspace's own
+    // index, which merged exactly those two.
+    //
+    // Unifying them properly needs promotion — the adopted identity becoming
+    // `sales.orders` so the next schema sees a taken name — which rewrites a
+    // `pub_id` already handed out. That is a modelling decision, tracked
+    // separately. What matters first is that neither spelling LOSES a reference,
+    // which is what the whole-key mint guard now guarantees.
     if let Some(s) = schema {
         return Vec::from([Resolved {
             key: TableKey::new(Some(s.to_string()), name.to_string()),
@@ -230,6 +283,94 @@ mod tests {
             ));
         }
         s
+    }
+
+    /// A qualified reference does NOT adopt a bare identity of the same name,
+    /// and this test exists to keep it that way until promotion is modelled.
+    ///
+    /// Adoption looks obviously right — a bare name means schema unstated, and
+    /// the two are usually one table — and was implemented. It over-merges:
+    /// nothing records *which* schema adopted the bare identity, so the next
+    /// schema adopts it too. On this workspace's own index that collapsed
+    /// `sales.orders` and `archive.orders` into one table, which reports
+    /// references against a table that never received them.
+    ///
+    /// The unit test that was supposed to catch that passed a *empty* registry,
+    /// so the adoption branch never ran — CLAUDE.md §9's "suspect the fixture"
+    /// again. Hence the bare identity in `known` here: without it this test
+    /// cannot fail.
+    #[test]
+    fn a_qualified_reference_does_not_absorb_a_bare_identity() {
+        let known = set(&[(None, "orders")]);
+        let got = resolve(&known, Some("sales"), "orders");
+        assert_eq!(
+            got,
+            vec![Resolved {
+                key: TableKey::new(Some("sales".into()), "orders".into()),
+                grade: LinkGrade::Exact,
+            }],
+            "sales.orders keeps its own identity; merging is unsafe without promotion"
+        );
+    }
+
+    /// The case that made adoption unsafe, stated directly: with a bare identity
+    /// already present, two schemas must still reach two identities.
+    #[test]
+    fn two_schemas_do_not_collapse_onto_a_bare_identity() {
+        let known = set(&[(None, "orders")]);
+        let sales = resolve(&known, Some("sales"), "orders");
+        let archive = resolve(&known, Some("archive"), "orders");
+        assert_ne!(
+            sales[0].key, archive[0].key,
+            "two schemas, two tables — even when a bare `orders` exists"
+        );
+    }
+
+    /// The asymmetry that keeps this from being the WORSE bug: two schemas can
+    /// each hold an `events`, and merging them would report references against a
+    /// table that never received them.
+    #[test]
+    fn two_qualified_identities_never_merge() {
+        let known = set(&[(Some("sales"), "orders")]);
+        let got = resolve(&known, Some("archive"), "orders");
+        assert_eq!(
+            got,
+            vec![Resolved {
+                key: TableKey::new(Some("archive".into()), "orders".into()),
+                grade: LinkGrade::Exact,
+            }],
+            "archive.orders is its own table, not sales.orders"
+        );
+    }
+
+    /// Adoption must not fire when the qualified identity is already the known
+    /// one — otherwise a workspace that consistently qualifies would resolve
+    /// onto a bare key nothing minted.
+    #[test]
+    fn a_qualified_reference_matching_a_qualified_identity_is_unchanged() {
+        let known = set(&[(Some("sales"), "orders")]);
+        let got = resolve(&known, Some("sales"), "orders");
+        assert_eq!(
+            got,
+            vec![Resolved {
+                key: TableKey::new(Some("sales".into()), "orders".into()),
+                grade: LinkGrade::Exact,
+            }]
+        );
+    }
+
+    /// Nothing known: the reference still mints itself, qualified as written.
+    #[test]
+    fn a_qualified_reference_to_an_unknown_table_mints_itself() {
+        let known = NameSet::new();
+        let got = resolve(&known, Some("sales"), "orders");
+        assert_eq!(
+            got,
+            vec![Resolved {
+                key: TableKey::new(Some("sales".into()), "orders".into()),
+                grade: LinkGrade::Exact,
+            }]
+        );
     }
 
     #[test]

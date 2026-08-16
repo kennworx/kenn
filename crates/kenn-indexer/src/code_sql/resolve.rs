@@ -12,7 +12,7 @@ use kenn_store::SymbolBodyRow;
 use super::attribute::{owner, Extent};
 use super::literals::literals;
 use crate::sql::parse::{extract, RefRole};
-use crate::sql::registry::{resolve as resolve_name, NameSet, TableKey, TableRegistry};
+use crate::sql::registry::{resolve as resolve_name, NameSet, TableKey, Union};
 
 /// One code→table reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +33,11 @@ pub struct CodeSqlCounts {
     pub refs_emitted: u64,
     /// Tables named by code that nothing in the workspace declares.
     pub tables_minted: u64,
+    /// References that reached no table node and were discarded.
+    ///
+    /// Should be zero. It is reported rather than assumed because a silent
+    /// version of this hid a lost declaration through a full corpus run.
+    pub refs_dropped: u64,
 }
 
 /// The references found, plus the identities that had to be minted for them.
@@ -99,11 +104,23 @@ pub fn resolve(
             };
             bodies_with_lits.insert(sym);
             for r in refs_of_literal(&lit.text) {
-                let candidates = resolve_name(known, r.schema.as_deref(), &r.name);
+                // Resolve against what the `.sql` pass wrote AND what this pass
+                // has minted, so a reference can reach a sibling minted moments
+                // ago rather than starting a second identity for one table.
+                let candidates = resolve_name(
+                    &Union {
+                        known,
+                        minted: &seen_minted,
+                    },
+                    r.schema.as_deref(),
+                    &r.name,
+                );
                 for c in candidates {
-                    if known.identities_named(&c.key.name).is_empty()
-                        && seen_minted.identities_named(&c.key.name).is_empty()
-                    {
+                    // Test the whole key, not the bare name. A name-only guard
+                    // lets `users.orders` satisfy it for `orders`, whose edge
+                    // then targets a node nothing minted and is silently
+                    // dropped by `emit_table_edges`.
+                    if !known.contains(&c.key) && !seen_minted.contains(&c.key) {
                         seen_minted.insert(c.key.clone());
                         minted.push(c.key.clone());
                     }
@@ -186,6 +203,38 @@ mod tests {
 
     fn src_of(text: &'static str) -> impl Fn(&str) -> Option<String> {
         move |_| Some(text.to_owned())
+    }
+
+    /// Two schemas holding the same table name each get their own node.
+    ///
+    /// The code barrier's copy of `two_schemas_sharing_a_name_both_get_nodes`.
+    /// Both steps carried the same name-keyed mint guard, so fixing one and
+    /// leaving the other would put a table's fate down to whether its schema was
+    /// written in a `.cs` file or a changelog.
+    #[test]
+    fn two_schemas_sharing_a_name_both_get_nodes() {
+        let known = NameSet::from_table_pub_ids(Vec::<&str>::new());
+        let bodies = [body(1, "a.rs", 1, 4)];
+        let got = resolve(
+            &known,
+            &bodies,
+            &src_of(
+                "fn f() {\n  \
+                 let a = \"CREATE TABLE sales.orders (id INT)\";\n  \
+                 let b = \"CREATE TABLE archive.orders (id INT)\";\n}",
+            ),
+        );
+        let keys: std::collections::BTreeSet<&TableKey> =
+            got.refs.iter().map(|r| &r.table).collect();
+        assert_eq!(keys.len(), 2, "two distinct tables: {keys:?}");
+        for r in &got.refs {
+            assert!(
+                got.minted.contains(&r.table),
+                "reference to {:?} was never minted; minted = {:?}",
+                r.table,
+                got.minted
+            );
+        }
     }
 
     /// The `CREATE VIRTUAL TABLE` spelling that started all this. Kept verbatim

@@ -78,10 +78,20 @@ pub fn mint_tables(
 
 /// Emit one edge per reference, from the symbol that carried it.
 ///
+/// Returns how many references were dropped for want of a target node.
+///
 /// A reference whose table is absent from `ids` is skipped rather than
 /// erroring: minting runs first, so absence means the identity resolved to
 /// something no node exists for, and a missing edge is a smaller wrong than a
 /// failed run.
+///
+/// **The count is the point.** Skipping is still the right recovery, but a
+/// silent one hid a real defect through a full corpus run, every unit test, and
+/// a green gate: the mint guard tested a table's bare name while the reference
+/// carried its whole key, so one spelling satisfied the guard for another and
+/// the loser's edge vanished here. It cost a `createTable` declaration on a real
+/// workspace and took a two-index hand diff to find. A non-zero count is now a
+/// bug report rather than an absence nobody can see.
 ///
 /// # Errors
 /// Propagates a store write failure.
@@ -89,9 +99,11 @@ pub fn emit_table_edges<'a>(
     sink: &mut BatchSink,
     ids: &BTreeMap<TableKey, ShortId>,
     refs: impl Iterator<Item = (ShortId, &'a TableKey, RefRole, LinkGrade)>,
-) -> Result<(), kenn_store::DbError> {
+) -> Result<u64, kenn_store::DbError> {
+    let mut dropped = 0u64;
     for (src_id, table, role, grade) in refs {
         let Some(target_id) = ids.get(table).copied() else {
+            dropped += 1;
             continue;
         };
         sink.push_edge(EdgeRecord {
@@ -103,7 +115,7 @@ pub fn emit_table_edges<'a>(
             },
         })?;
     }
-    Ok(())
+    Ok(dropped)
 }
 
 #[cfg(test)]

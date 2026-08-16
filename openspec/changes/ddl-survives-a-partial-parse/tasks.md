@@ -133,10 +133,24 @@ So this is a **pre-existing fragility this change exposes**, not one it
 introduces. That does not make it shippable: a user would see a table lose its
 declaration. Open questions before archiving:
 
-- [ ] 8.1 Should the two spellings unify? A bare reference and a
-  schema-qualified one that agree on the table name are almost certainly the same
-  table, and `resolve` already grades ambiguity rather than choosing — the
-  qualified path is the one that skips the registry entirely.
-- [ ] 8.2 Whichever way that goes, the census must be diffed per `pub_id`, not
-  per name (recorded as `fnd_601a3fe6-3fe2-4f5b-a3c1-c9339022a481`): read per
-  name, a pure addition looks like a regression and a real regression can hide.
+- [x] 8.1 Should the two spellings unify? **Yes, asymmetrically** — split out as
+  `one-table-one-identity`, where it is written up with the full chain measured.
+  The naive answer is wrong: merging every same-named identity would collapse
+  `sales.orders` and `archive.orders`, which the atlas deliberately keeps apart.
+  A *bare* name means schema unstated and can be absorbed by a qualified one; two
+  qualified names never merge.
+
+  Traced to the end while writing that up. The single new reference this change
+  admits on the corpus is `ALTER TABLE users.dealer_users RENAME TO
+  dealer_assignments`, in a `<sql>` body whose second statement (`ALTER … SET
+  SCHEMA public`) no dialect reads — so the block used to be dropped whole. That
+  reference is schema-qualified, the `createTable` that declares the same table
+  carries no schema, and the two never unify. One new reference, one table
+  re-attributed.
+- [x] 8.2 The census must be diffed per `pub_id`, not per name — recorded as
+  `fnd_601a3fe6-3fe2-4f5b-a3c1-c9339022a481`, and promptly violated: the §4.2
+  diff was keyed by name. Re-checked afterwards and it happened to be sound
+  (no two identities share a name on that corpus), but that was luck, not method.
+- [ ] 8.3 `4.2`, `4.3` and `6.1` stay open until `one-table-one-identity` lands.
+  The change is committed and gated but SHOULD NOT be archived: a user would see
+  one table lose its declaration.

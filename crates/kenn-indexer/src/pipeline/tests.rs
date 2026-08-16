@@ -860,6 +860,7 @@ fn the_code_table_report_distinguishes_scanned_from_found() {
         bodies_with_literals: 4103,
         refs_emitted: 252,
         tables_minted: 40,
+        refs_dropped: 0,
     };
     let mut r = RunReport::started("code-tables", "0", "<corpus>");
     super::api::record_code_table_counts(&mut r, &counts);

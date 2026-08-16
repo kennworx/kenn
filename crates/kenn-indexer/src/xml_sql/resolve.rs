@@ -22,7 +22,7 @@ use kenn_model::{LinkGrade, ShortId};
 use kenn_store::SymbolSurfaceRow;
 
 use crate::sql::parse::{extract, RefRole};
-use crate::sql::registry::{resolve as resolve_name, NameSet, TableKey, TableRegistry};
+use crate::sql::registry::{resolve as resolve_name, NameSet, TableKey, Union};
 
 /// One reference from an XML element to a table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +45,10 @@ pub struct XmlSqlCounts {
     pub elements_with_attribute: u64,
     pub refs_emitted: u64,
     pub tables_minted: u64,
+    /// References that reached no table node and were discarded. Should be
+    /// zero; reported rather than assumed, because a silent version of this hid
+    /// a lost declaration through a full corpus run.
+    pub refs_dropped: u64,
 }
 
 /// The references found, plus the identities that had to be minted.
@@ -81,10 +85,21 @@ pub fn resolve(known: &NameSet, config: &XmlSqlConfig, rows: &[SymbolSurfaceRow]
         }
 
         for (raw, role) in found {
-            for candidate in resolve_name(known, raw.schema.as_deref(), &raw.name) {
-                if known.identities_named(&candidate.key.name).is_empty()
-                    && seen_minted.identities_named(&candidate.key.name).is_empty()
-                {
+            // Resolve against what the `.sql` pass wrote AND what this pass has
+            // minted, so a reference reaches a sibling minted moments ago
+            // instead of starting a second identity for one table.
+            for candidate in resolve_name(
+                &Union {
+                    known,
+                    minted: &seen_minted,
+                },
+                raw.schema.as_deref(),
+                &raw.name,
+            ) {
+                // Guard on the whole key, not the bare name. Two schemas can
+                // each hold an `events`, and a name-only guard mints the first
+                // and silently drops the second's edge in `emit_table_edges`.
+                if !known.contains(&candidate.key) && !seen_minted.contains(&candidate.key) {
                     seen_minted.insert(candidate.key.clone());
                     minted.push(candidate.key.clone());
                 }
@@ -293,6 +308,121 @@ mod tests {
         assert_eq!(got.refs[0].table.name, "users");
         assert_eq!(got.refs[0].role, RefRole::Alters, "alters, not accesses");
         assert_eq!(got.counts.elements_with_sql, 1);
+    }
+
+    /// Neither spelling of one table loses its reference, in either order.
+    ///
+    /// The shape that cost a real corpus a `createTable` declaration: an
+    /// attribute names `dealer_users` bare, a `<sql>` body says `ALTER TABLE
+    /// users.dealer_users`. Under the old name-keyed mint guard, whichever
+    /// arrived second resolved to a key nothing minted and its edge was dropped.
+    ///
+    /// **Both orders on purpose.** Which spelling won was decided by walk order,
+    /// so a single-order fixture would pass with the bug fully present in the
+    /// other direction.
+    ///
+    /// Note what this does NOT claim. The two spellings remain two identities —
+    /// unifying them needs promotion (the adopted identity becoming
+    /// `users.dealer_users` so a second schema sees a taken name), and a
+    /// non-promoting version was implemented and reverted for collapsing
+    /// `sales.orders` into `archive.orders`. What is guaranteed here is the part
+    /// that was actually losing data: every reference reaches a node, so the
+    /// declaration is visible.
+    #[test]
+    fn neither_spelling_of_one_table_loses_its_reference() {
+        let declares = row(
+            1,
+            "db/create.xml",
+            "<createTable tableName=\"dealer_users\">",
+            "",
+        );
+        let alters = row(
+            2,
+            "db/update.xml",
+            "<sql>",
+            "ALTER TABLE users.dealer_users RENAME TO dealer_assignments;",
+        );
+
+        for (label, rows) in [
+            ("bare first", vec![declares.clone(), alters.clone()]),
+            ("qualified first", vec![alters.clone(), declares.clone()]),
+        ] {
+            let got = resolve(
+                &NameSet::new(),
+                &config(vec![rule("tableName", None, Some(TableRole::Declares))]),
+                &rows,
+            );
+            let mine: Vec<&XmlTableRef> = got
+                .refs
+                .iter()
+                .filter(|r| r.table.name == "dealer_users")
+                .collect();
+            assert_eq!(
+                mine.len(),
+                2,
+                "{label}: both references survive, got {:?}",
+                got.refs
+            );
+            for r in &mine {
+                assert!(
+                    got.minted.contains(&r.table),
+                    "{label}: reference to {:?} was never minted, so its edge is \
+                     dropped downstream; minted = {:?}",
+                    r.table,
+                    got.minted
+                );
+            }
+            assert!(
+                mine.iter().any(|r| r.role == RefRole::Defines),
+                "{label}: the declaration survives"
+            );
+        }
+    }
+
+    /// Two schemas holding the same table name each get their own node.
+    ///
+    /// This is what the whole-key mint guard is for, and the ONLY fixture that
+    /// exercises it: `Union` cannot collapse these two, because they are
+    /// genuinely different tables. Under the old name-keyed guard the second
+    /// identity was never minted, so its edge found no target and
+    /// `emit_table_edges` dropped it without a word.
+    #[test]
+    fn two_schemas_sharing_a_name_both_get_nodes() {
+        let rows = [
+            row(
+                1,
+                "db/a.xml",
+                "<sql>",
+                "CREATE TABLE sales.orders (id INT);",
+            ),
+            row(
+                2,
+                "db/b.xml",
+                "<sql>",
+                "CREATE TABLE archive.orders (id INT);",
+            ),
+        ];
+        let got = resolve(&NameSet::new(), &config(vec![]), &rows);
+
+        let keys: std::collections::BTreeSet<&TableKey> =
+            got.refs.iter().map(|r| &r.table).collect();
+        assert_eq!(keys.len(), 2, "two distinct tables: {keys:?}");
+        // Every reference must point at an identity a node was minted for.
+        // Without that, the edge is written against nothing and vanishes.
+        for r in &got.refs {
+            assert!(
+                got.minted.contains(&r.table),
+                "reference to {:?} was never minted; minted = {:?}",
+                r.table,
+                got.minted
+            );
+        }
+        assert_eq!(
+            got.minted.len(),
+            2,
+            "both identities minted: {:?}",
+            got.minted
+        );
     }
 
     /// A changeset body is the same kind of artifact as a schema constant in

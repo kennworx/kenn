@@ -43,7 +43,7 @@ pub fn ingest_xml_tables(
 
     let mut ids = existing;
     crate::sql::emit::mint_tables(&mut sink, minter, &found.minted, &mut ids)?;
-    crate::sql::emit::emit_table_edges(
+    let dropped = crate::sql::emit::emit_table_edges(
         &mut sink,
         &ids,
         // The element, never its document: a table's references should point at
@@ -55,5 +55,7 @@ pub fn ingest_xml_tables(
     )?;
 
     sink.finish()?;
-    Ok(found.counts)
+    let mut counts = found.counts;
+    counts.refs_dropped = dropped;
+    Ok(counts)
 }

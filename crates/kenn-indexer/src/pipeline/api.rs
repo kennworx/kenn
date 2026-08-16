@@ -890,6 +890,25 @@ pub(super) fn record_xml_table_counts(
     report.edges_seen = counts.refs_emitted;
     report.def_bodies_seen = counts.elements_scanned;
     report.bodies_with_literals = counts.elements_with_sql + counts.elements_with_attribute;
+    warn_on_dropped_refs(report, "xml→table", counts.refs_dropped);
+}
+
+/// A reference that reached no table node is a defect, not a degradation.
+///
+/// It means the identity a reference resolved to is not one anything minted,
+/// which can only happen if resolution and minting disagree. `emit_table_edges`
+/// discards such an edge — the right recovery, and previously a silent one: a
+/// mint guard keyed on a table's bare name while references carried the whole
+/// key hid a lost `createTable` declaration through a full corpus run, every
+/// unit test, and a green gate. Surfacing the count is what turns the next
+/// occurrence into a one-line report.
+fn warn_on_dropped_refs(report: &mut RunReport, pass: &str, dropped: u64) {
+    if dropped > 0 {
+        report.warnings.push(format!(
+            "{pass}: {dropped} reference(s) reached no table node and were dropped \
+             — resolution and minting disagree on an identity"
+        ));
+    }
 }
 
 /// Put the code→table pass's counts on its report.
@@ -911,6 +930,7 @@ pub(super) fn record_code_table_counts(
     report.edges_seen = counts.refs_emitted;
     report.def_bodies_seen = counts.bodies_scanned;
     report.bodies_with_literals = counts.bodies_with_literals;
+    warn_on_dropped_refs(report, "code→table", counts.refs_dropped);
 }
 
 /// A report standing in for an ingester thread that panicked.
