@@ -163,7 +163,13 @@ impl NameSet {
     /// the loser's edge then finds no node and is dropped.
     #[must_use]
     pub fn contains(&self, key: &TableKey) -> bool {
-        self.identities_named(&key.name).contains(key)
+        // Borrowed lookup, not `identities_named`: that returns an owned `Vec`,
+        // so a membership test through it clones every identity of that name
+        // (two `String`s each) and drops them. This runs twice per reference in
+        // both barrier steps.
+        self.by_name
+            .get(&key.name)
+            .is_some_and(|keys| keys.contains(key))
     }
 }
 
