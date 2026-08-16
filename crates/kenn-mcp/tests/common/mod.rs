@@ -111,7 +111,7 @@ pub async fn place_ready(state: &Arc<ServerState>, snapshot_path: &Path) {
     let reader = kenn_store::open_reader(snapshot_path)
         .await
         .expect("reader");
-    let snap_id = kenn_mcp::cursor::snapshot_id_from_timestamp(
+    let snap_id = kenn_query::cursor::snapshot_id_from_timestamp(
         snapshot_path
             .file_name()
             .and_then(|s| s.to_str())

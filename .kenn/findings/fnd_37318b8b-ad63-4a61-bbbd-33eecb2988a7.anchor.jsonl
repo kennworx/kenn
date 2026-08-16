@@ -1,1 +1,2 @@
 {"op":"attach","anchor":"crates/kenn-mcp/src/tools/support.rs","ts":"2026-06-14T09:54:14.572175Z"}
+{"op":"rename","from":"crates/kenn-mcp/src/tools/support.rs","to":"crates/kenn-query/src/support.rs","ts":"2026-08-15T11:12:39.159256Z"}

@@ -4,12 +4,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::cursor::{decode_cursor, encode_usages_cursor, DecodedCursor};
-use crate::error::{McpError, McpErrorCode};
+use crate::error::{QueryError, QueryErrorCode};
 use crate::types::{clamp_page, FindUsagesResponse, SymbolRef, UsageRef};
 
-use super::super::{
-    ensure_cursor_matches, internal, split_public_id, symbol_row_to_ref, ReadyView, ServerState,
-};
+use crate::ctx::QueryCtx;
+use crate::{ensure_cursor_matches, internal, split_public_id, symbol_row_to_ref};
 
 // ── FIND USAGES  (resolution + inbound traversal, fused) ────────────────────
 
@@ -122,14 +121,19 @@ fn passes_narrowing(r: &SymbolRef, args: &FindUsagesArgs) -> bool {
 /// filters. An unresolved query yields an empty vec — the search-tool
 /// exemption (D4), surfaced as an empty response, never an error.
 async fn resolve_targets(
-    h: &ReadyView,
+    ctx: &QueryCtx<'_>,
     args: &FindUsagesArgs,
     limit: u32,
-) -> Result<Vec<ResolvedTarget>, McpError> {
+) -> Result<Vec<ResolvedTarget>, QueryError> {
     let q = &args.query;
     // 1. pub_id used directly (only when it actually resolves).
     if let Ok((lang, native)) = split_public_id(q) {
-        if let Some(row) = h.read.fetch_symbol(lang, native).await.map_err(internal)? {
+        if let Some(row) = ctx
+            .read
+            .fetch_symbol(lang, native)
+            .await
+            .map_err(internal)?
+        {
             return Ok(vec![ResolvedTarget {
                 short_id: row.id,
                 label: row.pub_id,
@@ -137,7 +141,7 @@ async fn resolve_targets(
         }
     }
     // 2. Workspace-relative path → the file node (NOT the name index).
-    if let Some(file_id) = h.read.fetch_file_short_id(q).await.map_err(internal)? {
+    if let Some(file_id) = ctx.read.fetch_file_short_id(q).await.map_err(internal)? {
         return Ok(vec![ResolvedTarget {
             short_id: file_id,
             label: q.clone(),
@@ -149,7 +153,7 @@ async fn resolve_targets(
     // reachable as targets — you can ask for the usages of a test helper by
     // name. `args.include_external` / `args.include_tests` instead govern
     // which *referencing* nodes the traversal returns.
-    let hits = h
+    let hits = ctx
         .read
         .find_symbol_tiered(q, limit, true, true)
         .await
@@ -157,7 +161,7 @@ async fn resolve_targets(
     let mut targets = Vec::new();
     for hit in hits {
         let row = hit.symbol;
-        let r = symbol_row_to_ref(h, &row, None, None).await;
+        let r = symbol_row_to_ref(ctx.read, &row, None, None).await;
         if passes_narrowing(&r, args) {
             targets.push(ResolvedTarget {
                 short_id: row.id,
@@ -174,14 +178,14 @@ async fn resolve_targets(
 /// `list_inbound`, and when a kind is exhausted the ordinal advances and
 /// `last_short_id` resets to 0.
 async fn paginate_single_target(
-    h: &ReadyView,
+    ctx: &QueryCtx<'_>,
     target: &ResolvedTarget,
     edges: &[EdgeKind],
     start: Option<(u8, u32)>,
     limit: u32,
     include_external: bool,
     include_tests: bool,
-) -> Result<(Vec<UsageRef>, Option<String>), McpError> {
+) -> Result<(Vec<UsageRef>, Option<String>), QueryError> {
     let mut items: Vec<UsageRef> = Vec::new();
     let (mut ordinal, mut after) = start.unwrap_or((0, 0));
     let mut next: Option<String> = None;
@@ -193,11 +197,11 @@ async fn paginate_single_target(
         let done = u32::try_from(items.len()).unwrap_or(u32::MAX);
         let remaining = limit.saturating_sub(done);
         if remaining == 0 {
-            next = Some(encode_usages_cursor(h.snapshot_id, ordinal, after));
+            next = Some(encode_usages_cursor(ctx.snapshot_id, ordinal, after));
             break;
         }
         let cursor_after = (after != 0).then_some(after);
-        let (rows, total) = h
+        let (rows, total) = ctx
             .read
             .list_inbound(
                 target.short_id,
@@ -211,7 +215,7 @@ async fn paginate_single_target(
         let returned = u32::try_from(rows.len()).unwrap_or(u32::MAX);
         for r in &rows {
             after = r.id;
-            let reference = symbol_row_to_ref(h, r, Some(edge), None).await;
+            let reference = symbol_row_to_ref(ctx.read, r, Some(edge), None).await;
             items.push(UsageRef {
                 reference,
                 target: target.label.clone(),
@@ -221,10 +225,10 @@ async fn paginate_single_target(
             // Page is full at this kind's boundary — emit a cursor that
             // resumes either mid-kind or at the next kind.
             if u64::from(returned) < total {
-                next = Some(encode_usages_cursor(h.snapshot_id, ordinal, after));
+                next = Some(encode_usages_cursor(ctx.snapshot_id, ordinal, after));
             } else if oi + 1 < edges.len() {
                 let no = u8::try_from(oi + 1).unwrap_or(u8::MAX);
-                next = Some(encode_usages_cursor(h.snapshot_id, no, 0));
+                next = Some(encode_usages_cursor(ctx.snapshot_id, no, 0));
             }
             break;
         }
@@ -239,13 +243,13 @@ async fn paginate_single_target(
 /// target-tagged list, capped at `limit` rows total. Used for the
 /// multi-target (ambiguous) case, which does not paginate.
 async fn collect_multi_target(
-    h: &ReadyView,
+    ctx: &QueryCtx<'_>,
     targets: &[ResolvedTarget],
     edges: &[EdgeKind],
     limit: usize,
     include_external: bool,
     include_tests: bool,
-) -> Result<Vec<UsageRef>, McpError> {
+) -> Result<Vec<UsageRef>, QueryError> {
     let mut items: Vec<UsageRef> = Vec::new();
     'outer: for t in targets {
         for &edge in edges {
@@ -253,7 +257,7 @@ async fn collect_multi_target(
                 break 'outer;
             }
             let remaining = u32::try_from(limit - items.len()).unwrap_or(u32::MAX);
-            let (rows, _total) = h
+            let (rows, _total) = ctx
                 .read
                 .list_inbound(
                     t.short_id,
@@ -265,7 +269,7 @@ async fn collect_multi_target(
                 .await
                 .map_err(internal)?;
             for r in &rows {
-                let reference = symbol_row_to_ref(h, r, Some(edge), None).await;
+                let reference = symbol_row_to_ref(ctx.read, r, Some(edge), None).await;
                 items.push(UsageRef {
                     reference,
                     target: t.label.clone(),
@@ -287,12 +291,12 @@ async fn collect_multi_target(
 /// paginates with a `next` cursor; more than one returns the capped flat
 /// tagged list with `next: null` and `truncated` set.
 pub async fn find_usages(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &FindUsagesArgs,
-) -> Result<FindUsagesResponse, McpError> {
+) -> Result<FindUsagesResponse, QueryError> {
     if args.query.trim().is_empty() {
-        return Err(McpError::new(
-            McpErrorCode::InvalidInput,
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
             "find_usages: empty query",
         ));
     }
@@ -313,73 +317,68 @@ pub async fn find_usages(
     };
     if let Some(d) = &decoded {
         if !matches!(d, DecodedCursor::Usages { .. }) {
-            return Err(McpError::new(
-                McpErrorCode::InvalidInput,
+            return Err(QueryError::new(
+                QueryErrorCode::InvalidInput,
                 "find_usages: cursor is not a find_usages cursor",
             ));
         }
     }
     let args = args.clone();
-    state
-        .with_db(|h| async move {
-            if let Some(d) = &decoded {
-                ensure_cursor_matches(&h, d)?;
-            }
-            let targets = resolve_targets(&h, &args, limit).await?;
-            // Search-tool exemption (D4): nothing matched → empty, not an error.
-            if targets.is_empty() {
-                return Ok(FindUsagesResponse::default());
-            }
-            if let [target] = targets.as_slice() {
-                let start = match decoded {
-                    Some(DecodedCursor::Usages {
-                        edge_ordinal,
-                        last_short_id,
-                        ..
-                    }) => Some((edge_ordinal, last_short_id)),
-                    _ => None,
-                };
-                let (items, next) = paginate_single_target(
-                    &h,
-                    target,
-                    &edges,
-                    start,
-                    limit,
-                    include_external,
-                    include_tests,
-                )
-                .await?;
-                return Ok(FindUsagesResponse {
-                    items,
-                    next,
-                    targets: 1,
-                    truncated: false,
-                    total_targets: 1,
-                });
-            }
-            // Multiple targets: capped flat tagged list, no pagination.
-            let total_targets = u32::try_from(targets.len()).unwrap_or(u32::MAX);
-            let truncated = targets.len() > FIND_USAGES_TARGET_CAP;
-            let capped: Vec<ResolvedTarget> =
-                targets.into_iter().take(FIND_USAGES_TARGET_CAP).collect();
-            let items = collect_multi_target(
-                &h,
-                &capped,
-                &edges,
-                limit as usize,
-                include_external,
-                include_tests,
-            )
-            .await?;
-            Ok(FindUsagesResponse {
-                items,
-                next: None,
-                targets: u32::try_from(capped.len()).unwrap_or(u32::MAX),
-                truncated,
-                total_targets,
-            })
-        })
-        .await
+    if let Some(d) = &decoded {
+        ensure_cursor_matches(ctx.snapshot_id, d)?;
+    }
+    let targets = resolve_targets(ctx, &args, limit).await?;
+    // Search-tool exemption (D4): nothing matched → empty, not an error.
+    if targets.is_empty() {
+        return Ok(FindUsagesResponse::default());
+    }
+    if let [target] = targets.as_slice() {
+        let start = match decoded {
+            Some(DecodedCursor::Usages {
+                edge_ordinal,
+                last_short_id,
+                ..
+            }) => Some((edge_ordinal, last_short_id)),
+            _ => None,
+        };
+        let (items, next) = paginate_single_target(
+            ctx,
+            target,
+            &edges,
+            start,
+            limit,
+            include_external,
+            include_tests,
+        )
+        .await?;
+        return Ok(FindUsagesResponse {
+            items,
+            next,
+            targets: 1,
+            truncated: false,
+            total_targets: 1,
+        });
+    }
+    // Multiple targets: capped flat tagged list, no pagination.
+    let total_targets = u32::try_from(targets.len()).unwrap_or(u32::MAX);
+    let truncated = targets.len() > FIND_USAGES_TARGET_CAP;
+    let capped: Vec<ResolvedTarget> = targets.into_iter().take(FIND_USAGES_TARGET_CAP).collect();
+    let items = collect_multi_target(
+        ctx,
+        &capped,
+        &edges,
+        limit as usize,
+        include_external,
+        include_tests,
+    )
+    .await?;
+    Ok(FindUsagesResponse {
+        items,
+        next: None,
+        targets: u32::try_from(capped.len()).unwrap_or(u32::MAX),
+        truncated,
+        total_targets,
+    })
 }
 
 #[cfg(test)]

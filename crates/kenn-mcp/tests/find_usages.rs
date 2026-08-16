@@ -7,13 +7,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kenn_mcp::snapshot_id_from_timestamp;
 use kenn_mcp::state::LifecycleState;
-use kenn_mcp::tools::{find_usages, FindUsagesArgs, ServerState};
+use kenn_mcp::tools::ServerState;
 use kenn_model::{
     EdgeKind, EdgeProperties, EdgeRecord, FileRecord, ImportKind, Kind, Language, LinkGrade,
     PackageRecord, SymbolRecord,
 };
+use kenn_query::snapshot_id_from_timestamp;
+use kenn_query::{find_usages, FindUsagesArgs};
 use kenn_store::api::WriteBatch;
 use kenn_store::{open_writer, reader_from_writer, DbReader, DbWriter, WriterOptions};
 use tempfile::TempDir;
@@ -307,8 +308,10 @@ fn args(query: &str) -> FindUsagesArgs {
 async fn name_to_references_one_call() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = find_usages(&state, &args("OrderRepository"))
+    let resp = find_usages(&ctx, &args("OrderRepository"))
         .await
         .expect("find_usages");
     // The name index may also fuzzy-match OrderHandler (shared trigrams);
@@ -332,8 +335,10 @@ async fn name_to_references_one_call() {
 async fn path_resolves_to_file_and_surfaces_imports() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = find_usages(&state, &args("src/orders/api.ts"))
+    let resp = find_usages(&ctx, &args("src/orders/api.ts"))
         .await
         .expect("find_usages");
     assert_eq!(resp.targets, 1);
@@ -353,8 +358,10 @@ async fn path_resolves_to_file_and_surfaces_imports() {
 async fn asset_path_lists_links_to_references() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = find_usages(&state, &args("assets/logo.png"))
+    let resp = find_usages(&ctx, &args("assets/logo.png"))
         .await
         .expect("find_usages");
     assert_eq!(resp.targets, 1);
@@ -375,8 +382,10 @@ async fn asset_path_lists_links_to_references() {
 async fn pub_id_query_resolves_directly() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = find_usages(&state, &args("cs:OrderRepository"))
+    let resp = find_usages(&ctx, &args("cs:OrderRepository"))
         .await
         .expect("find_usages");
     assert_eq!(resp.targets, 1);
@@ -392,8 +401,10 @@ async fn pub_id_query_resolves_directly() {
 async fn ambiguous_name_flat_tagged_list_no_pagination() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = find_usages(&state, &args("Zephyr"))
+    let resp = find_usages(&ctx, &args("Zephyr"))
         .await
         .expect("find_usages");
     assert!(resp.next.is_none(), "multi-target must not paginate");
@@ -410,10 +421,12 @@ async fn ambiguous_name_flat_tagged_list_no_pagination() {
 async fn kind_filter_pins_single_target() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     let mut a = args("Zephyr");
     a.kind = Some(vec![Kind::Interface]);
-    let resp = find_usages(&state, &a).await.expect("find_usages");
+    let resp = find_usages(&ctx, &a).await.expect("find_usages");
     assert_eq!(resp.targets, 1);
     assert!(
         resp.items.iter().all(|u| u.target == "cs:Beta.Zephyr"),
@@ -427,8 +440,10 @@ async fn kind_filter_pins_single_target() {
 async fn missing_query_is_empty_not_error() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = find_usages(&state, &args("DefinitelyNotAName"))
+    let resp = find_usages(&ctx, &args("DefinitelyNotAName"))
         .await
         .expect("find_usages must not error on a no-match query");
     assert!(resp.items.is_empty());
@@ -442,8 +457,10 @@ async fn missing_query_is_empty_not_error() {
 async fn unreferenced_real_symbol_is_empty() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = find_usages(&state, &args("Loner"))
+    let resp = find_usages(&ctx, &args("Loner"))
         .await
         .expect("find_usages");
     assert_eq!(resp.targets, 1, "the symbol resolves");
@@ -456,10 +473,12 @@ async fn unreferenced_real_symbol_is_empty() {
 async fn explicit_edge_kinds_narrows_traversal() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     let mut a = args("OrderRepository");
     a.edge_kinds = Some(vec![EdgeKind::TypeUse]);
-    let resp = find_usages(&state, &a).await.expect("find_usages");
+    let resp = find_usages(&ctx, &a).await.expect("find_usages");
     assert!(
         resp.items.is_empty(),
         "OrderRepository has only a Calls referencer, not TypeUse"
@@ -472,18 +491,20 @@ async fn explicit_edge_kinds_narrows_traversal() {
 async fn single_target_pagination_round_trips() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     let mut a = args("PopularRepo");
     a.edge_kinds = Some(vec![EdgeKind::Calls]);
     a.page_size = Some(2);
 
-    let page1 = find_usages(&state, &a).await.expect("page1");
+    let page1 = find_usages(&ctx, &a).await.expect("page1");
     assert_eq!(page1.items.len(), 2, "first page is full");
     let cursor = page1.next.clone().expect("a next cursor for >1 page");
 
     let mut a2 = a.clone();
     a2.cursor = Some(cursor);
-    let page2 = find_usages(&state, &a2).await.expect("page2");
+    let page2 = find_usages(&ctx, &a2).await.expect("page2");
     assert_eq!(page2.items.len(), 1, "remaining reference");
     assert!(page2.next.is_none(), "stream exhausted");
 
@@ -503,16 +524,18 @@ async fn single_target_pagination_round_trips() {
 /// `InvalidInput`.
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_cursor_is_rejected() {
-    use kenn_mcp::{encode_usages_cursor, snapshot_id_from_timestamp};
+    use kenn_query::{encode_usages_cursor, snapshot_id_from_timestamp};
 
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     let rotated = encode_usages_cursor(snapshot_id_from_timestamp("some-other-snapshot"), 0, 0);
     let mut a = args("PopularRepo");
     a.cursor = Some(rotated);
-    let err = find_usages(&state, &a)
+    let err = find_usages(&ctx, &a)
         .await
         .expect_err("stale cursor errors");
-    assert_eq!(err.code, kenn_mcp::McpErrorCode::StaleCursor);
+    assert_eq!(err.code, kenn_query::QueryErrorCode::StaleCursor);
 }

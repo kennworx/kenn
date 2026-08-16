@@ -37,7 +37,7 @@ use std::sync::Mutex;
 use lru::LruCache;
 
 use crate::cursor::{CacheId, SnapshotId};
-use crate::error::{McpError, McpErrorCode};
+use crate::error::{QueryError, QueryErrorCode};
 
 /// Maximum number of in-flight top-K result sets per cache surface.
 /// At ~30 rows × ~200 B/row = ~6 KB/entry → ~400 KB worst case. Trivial.
@@ -55,8 +55,9 @@ pub struct CachedTopK<T> {
 }
 
 /// LRU-bounded result cache parametric over the cached row type. Two
-/// concrete instantiations live on `ServerState`:
-/// `ResultCache<RankedSymbolRef>` (`search_symbols`) and
+/// concrete instantiations are held by the host and lent to each query
+/// through [`QueryCaches`](crate::QueryCaches):
+/// `ResultCache<SearchHitRef>` (`search_symbols`) and
 /// `ResultCache<RankedFindingView>` (`search_findings`).
 pub struct ResultCache<T> {
     inner: Mutex<LruCache<CacheId, CachedTopK<T>>>,
@@ -118,10 +119,10 @@ impl<T: Clone> ResultCache<T> {
         offset: u32,
         page_size: usize,
         current_snapshot: SnapshotId,
-    ) -> Result<(Vec<T>, usize), McpError> {
+    ) -> Result<(Vec<T>, usize), QueryError> {
         let mut guard = self.inner.lock().map_err(|e| {
-            McpError::new(
-                McpErrorCode::InternalError,
+            QueryError::new(
+                QueryErrorCode::InternalError,
                 format!("ResultCache mutex poisoned: {e}"),
             )
         })?;
@@ -163,9 +164,9 @@ fn mint_cache_id() -> CacheId {
     id
 }
 
-fn stale_cursor() -> McpError {
-    McpError::new(
-        McpErrorCode::StaleCursor,
+fn stale_cursor() -> QueryError {
+    QueryError::new(
+        QueryErrorCode::StaleCursor,
         "cursor: result-cache entry not found (snapshot rotated or LRU evicted)",
     )
 }
@@ -221,7 +222,7 @@ mod tests {
         // One more put → evicts the LRU, which is `first`.
         let _ = cache.put(s, vec![3]);
         let err = cache.slice(first, 0, 1, s).unwrap_err();
-        assert_eq!(err.code, McpErrorCode::StaleCursor);
+        assert_eq!(err.code, QueryErrorCode::StaleCursor);
     }
 
     #[test]
@@ -229,7 +230,7 @@ mod tests {
         let cache: ResultCache<u32> = ResultCache::new();
         let s = snap("a");
         let err = cache.slice([0xFF; 16], 0, 1, s).unwrap_err();
-        assert_eq!(err.code, McpErrorCode::StaleCursor);
+        assert_eq!(err.code, QueryErrorCode::StaleCursor);
     }
 
     #[test]
@@ -239,7 +240,7 @@ mod tests {
         let s2 = snap("b");
         let id = cache.put(s1, vec![1, 2, 3]);
         let err = cache.slice(id, 0, 2, s2).unwrap_err();
-        assert_eq!(err.code, McpErrorCode::StaleCursor);
+        assert_eq!(err.code, QueryErrorCode::StaleCursor);
     }
 
     #[test]

@@ -1,3 +1,4 @@
 {"op":"attach","anchor":"crates/kenn-indexer/src/transform/document/walk.rs","ts":"2026-08-13T13:04:05.113146Z","sha":"08d1a925d26cd2e3"}
 {"op":"attach","anchor":"crates/kenn-mcp/src/tools/semantic.rs","ts":"2026-08-13T13:04:05.113146Z","sha":"8c08a14d70fa3eb9"}
 {"op":"attach","anchor":"crates/kenn-mcp/src/tools/semantic.rs","ts":"2026-08-13T13:04:05.00393Z","sha":"48bcd6c9cbfe12e1"}
+{"op":"rename","from":"crates/kenn-mcp/src/tools/semantic.rs","to":"crates/kenn-query/src/semantic.rs","ts":"2026-08-15T11:12:39.825867Z"}

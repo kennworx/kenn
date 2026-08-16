@@ -3,3 +3,5 @@
 {"op":"attach","anchor":"crates/kenn-cli/src/cmd_query.rs","ts":"2026-07-24T15:43:40.485441Z","sha":"8e56665bc64fe2ab"}
 {"op":"attach","anchor":"crates/kenn-mcp/src/tools/packages.rs","ts":"2026-07-25T13:23:15.537332Z","sha":"2f15177090359c68"}
 {"op":"attach","anchor":"crates/kenn-mcp/src/tools/domains.rs","ts":"2026-07-25T19:38:41.13762Z","sha":"471a5fdce5536003"}
+{"op":"rename","from":"crates/kenn-mcp/src/tools/domains.rs","to":"crates/kenn-query/src/domains.rs","ts":"2026-08-15T11:12:40.036902Z"}
+{"op":"rename","from":"crates/kenn-mcp/src/tools/packages.rs","to":"crates/kenn-query/src/packages.rs","ts":"2026-08-15T11:12:40.106628Z"}

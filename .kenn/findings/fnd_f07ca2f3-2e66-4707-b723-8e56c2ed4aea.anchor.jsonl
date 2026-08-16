@@ -1,3 +1,4 @@
 {"op":"attach","anchor":"crates/kenn-cli/src/cmd_query.rs","ts":"2026-07-26T12:56:32.378859Z","sha":"9e5296325c83230b"}
 {"op":"attach","anchor":"crates/kenn-mcp/src/tools/packages.rs","ts":"2026-07-26T12:56:32.378859Z","sha":"618adcd1ba593cfe"}
 {"op":"attach","anchor":"crates/kenn-indexer/src/atlas/okf.rs","ts":"2026-07-26T12:56:32.378859Z","sha":"5880a7826ca3bc90"}
+{"op":"rename","from":"crates/kenn-mcp/src/tools/packages.rs","to":"crates/kenn-query/src/packages.rs","ts":"2026-08-15T11:12:40.260066Z"}

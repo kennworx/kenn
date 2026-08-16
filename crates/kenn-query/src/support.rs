@@ -7,13 +7,11 @@ use kenn_store::api::Reader;
 use kenn_store::{BlendedHit, FoundSymbolRow, SymbolRow};
 
 use crate::cursor::DecodedCursor;
-use crate::error::{McpError, McpErrorCode};
+use crate::error::{QueryError, QueryErrorCode};
 use crate::types::{
     DefLocation, FindingView, FoundSymbolRef, ImportDirection, RankedFileRef, RankedSymbolRef,
     SearchHitRef, SymbolRef,
 };
-
-use super::ReadyView;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -53,40 +51,42 @@ pub(crate) fn slice_lines(content: &str, start_line: u32, end_line: u32) -> Stri
         .join("\n")
 }
 
-pub(crate) fn ensure_cursor_matches(h: &ReadyView, c: &DecodedCursor) -> Result<(), McpError> {
+pub(crate) fn ensure_cursor_matches(
+    snapshot: crate::cursor::SnapshotId,
+    c: &DecodedCursor,
+) -> Result<(), QueryError> {
     // Only List cursors carry a snapshot directly. TopK cursors are
     // validated via the ResultCache (which is cleared on rotation), so
     // there's nothing to check here for those.
     if let Some(snap) = c.list_snapshot() {
-        if snap != h.snapshot_id {
-            return Err(McpError::stale_cursor(
-                &snap.to_hex(),
-                &h.snapshot_id.to_hex(),
-            ));
+        if snap != snapshot {
+            return Err(QueryError::stale_cursor(&snap.to_hex(), &snapshot.to_hex()));
         }
     }
     Ok(())
 }
 
-pub(crate) fn split_public_id(id: &str) -> Result<(&'static str, &str), McpError> {
+pub(crate) fn split_public_id(id: &str) -> Result<(&'static str, &str), QueryError> {
     let prefix = id
         .split_once(':')
         .map(|(p, _)| p)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| McpError::new(McpErrorCode::InvalidInput, "id missing language prefix"))?;
+        .ok_or_else(|| {
+            QueryError::new(QueryErrorCode::InvalidInput, "id missing language prefix")
+        })?;
     let lang = Language::from_prefix(prefix).ok_or_else(|| {
-        McpError::new(
-            McpErrorCode::InvalidInput,
+        QueryError::new(
+            QueryErrorCode::InvalidInput,
             format!("unknown language prefix: `{prefix}`"),
         )
     })?;
     Ok((lang.db_name(), id))
 }
 
-pub(crate) async fn hit_to_ref(h: &ReadyView, hit: BlendedHit) -> SearchHitRef {
+pub(crate) async fn hit_to_ref(read: &kenn_store::DbConn, hit: BlendedHit) -> SearchHitRef {
     match hit {
         BlendedHit::Symbol(r) => {
-            let base = symbol_row_to_ref(h, &r.symbol, None, None).await;
+            let base = symbol_row_to_ref(read, &r.symbol, None, None).await;
             SearchHitRef::Symbol(RankedSymbolRef {
                 id: base.id,
                 kind: base.kind,
@@ -103,8 +103,8 @@ pub(crate) async fn hit_to_ref(h: &ReadyView, hit: BlendedHit) -> SearchHitRef {
     }
 }
 
-pub(crate) async fn found_to_ref(h: &ReadyView, r: FoundSymbolRow) -> FoundSymbolRef {
-    let base = symbol_row_to_ref(h, &r.symbol, None, None).await;
+pub(crate) async fn found_to_ref(read: &kenn_store::DbConn, r: FoundSymbolRow) -> FoundSymbolRef {
+    let base = symbol_row_to_ref(read, &r.symbol, None, None).await;
     FoundSymbolRef {
         base,
         match_kind: r.match_kind.as_str().into(),
@@ -112,19 +112,18 @@ pub(crate) async fn found_to_ref(h: &ReadyView, r: FoundSymbolRow) -> FoundSymbo
 }
 
 pub(crate) async fn symbol_row_to_ref(
-    h: &ReadyView,
+    read: &kenn_store::DbConn,
     r: &SymbolRow,
     via_edge_kind: Option<EdgeKind>,
     direction: Option<ImportDirection>,
 ) -> SymbolRef {
     let language = parse_language(&r.language).unwrap_or(Language::Rust);
     let kind = parse_kind(&r.kind).unwrap_or(Kind::Variable);
-    let location = first_def_location_string(h, r.id).await;
+    let location = first_def_location_string(read, r.id).await;
     let package = if r.pkg_id == 0 {
         String::new()
     } else {
-        h.read
-            .fetch_package(r.pkg_id)
+        read.fetch_package(r.pkg_id)
             .await
             .ok()
             .flatten()
@@ -149,8 +148,11 @@ pub(crate) async fn symbol_row_to_ref(
     }
 }
 
-pub(crate) async fn first_def_location_string(h: &ReadyView, sym_short_id: u32) -> Option<String> {
-    let lines = h.read.fetch_def_lines(sym_short_id).await.ok()?;
+pub(crate) async fn first_def_location_string(
+    read: &kenn_store::DbConn,
+    sym_short_id: u32,
+) -> Option<String> {
+    let lines = read.fetch_def_lines(sym_short_id).await.ok()?;
     // A symbol may carry several def rows — the real definition plus, for some
     // producers, a spurious zero-range occurrence (`file_id != 0` but
     // `start_line == 0`). Stored lines are 1-based (source-data-model D1), so
@@ -159,7 +161,7 @@ pub(crate) async fn first_def_location_string(h: &ReadyView, sym_short_id: u32) 
     let def = lines
         .into_iter()
         .find(|d| d.file_id != 0 && d.start_line >= 1)?;
-    let path = h.read.fetch_file_path(def.file_id).await.ok().flatten()?;
+    let path = read.fetch_file_path(def.file_id).await.ok().flatten()?;
     if def.start_line == def.end_line {
         Some(format!("./{path}#{}", def.start_line))
     } else {
@@ -167,8 +169,11 @@ pub(crate) async fn first_def_location_string(h: &ReadyView, sym_short_id: u32) 
     }
 }
 
-pub(crate) async fn defs_for_symbol(h: &ReadyView, sym_short_id: u32) -> Vec<DefLocation> {
-    let Ok(lines) = h.read.fetch_def_lines(sym_short_id).await else {
+pub(crate) async fn defs_for_symbol(
+    read: &kenn_store::DbConn,
+    sym_short_id: u32,
+) -> Vec<DefLocation> {
+    let Ok(lines) = read.fetch_def_lines(sym_short_id).await else {
         return Vec::new();
     };
     let mut out = Vec::with_capacity(lines.len());
@@ -178,7 +183,7 @@ pub(crate) async fn defs_for_symbol(h: &ReadyView, sym_short_id: u32) -> Vec<Def
         if d.file_id == 0 || d.start_line < 1 {
             continue;
         }
-        let Ok(Some(path)) = h.read.fetch_file_path(d.file_id).await else {
+        let Ok(Some(path)) = read.fetch_file_path(d.file_id).await else {
             continue;
         };
         out.push(DefLocation {
@@ -203,8 +208,8 @@ pub(crate) fn parse_kind(s: &str) -> Option<Kind> {
     Kind::from_db_name(s)
 }
 
-pub(crate) fn internal(e: impl std::fmt::Display) -> McpError {
-    McpError::new(McpErrorCode::InternalError, e.to_string())
+pub fn internal(e: impl std::fmt::Display) -> QueryError {
+    QueryError::new(QueryErrorCode::InternalError, e.to_string())
 }
 
 /// Convert a storage error to MCP, mapping `EmbedderStarting` to the
@@ -213,9 +218,11 @@ pub(crate) fn internal(e: impl std::fmt::Display) -> McpError {
 /// `INTERNAL_ERROR`. Use this at search-tool boundaries that may invoke
 /// the embedder; for non-embed call paths the plain [`internal`] helper
 /// is fine.
-pub(crate) fn db_to_mcp(e: kenn_store::api::DbError) -> McpError {
+pub(crate) fn db_to_mcp(e: kenn_store::api::DbError) -> QueryError {
     match e {
-        kenn_store::api::DbError::EmbedderStarting(reason) => McpError::embedder_starting(&reason),
+        kenn_store::api::DbError::EmbedderStarting(reason) => {
+            QueryError::embedder_starting(&reason)
+        }
         other => internal(other),
     }
 }
@@ -224,11 +231,11 @@ pub(crate) fn db_to_mcp(e: kenn_store::api::DbError) -> McpError {
 /// failure modes to MCP errors. `Ok(None)` means embedding is configured
 /// but the query returned no vector (model unavailable) — callers
 /// degrade to lexical-only by passing `None` to the search call.
-pub(crate) async fn embed_query(query: &str) -> Result<Option<Vec<f32>>, McpError> {
+pub(crate) async fn embed_query(query: &str) -> Result<Option<Vec<f32>>, QueryError> {
     use kenn_store::embed::EmbedError;
     match kenn_store::shared_embedder().embed_query(query).await {
         Ok(v) => Ok(v),
-        Err(EmbedError::Starting(reason)) => Err(McpError::embedder_starting(&reason)),
+        Err(EmbedError::Starting(reason)) => Err(QueryError::embedder_starting(&reason)),
         Err(other) => Err(internal(other)),
     }
 }
@@ -248,7 +255,7 @@ pub(crate) fn page_axis_items<T>(
     mut items: Vec<T>,
     pagination: Option<&crate::types::Pagination>,
     snapshot: crate::cursor::SnapshotId,
-) -> Result<(Vec<T>, Option<String>), crate::error::McpError> {
+) -> Result<(Vec<T>, Option<String>), crate::error::QueryError> {
     let page_size = pagination
         .and_then(|p| p.page_size)
         .unwrap_or(crate::types::DEFAULT_PAGE)
@@ -259,8 +266,8 @@ pub(crate) fn page_axis_items<T>(
         Some(c) => {
             let decoded = crate::cursor::decode_cursor(c)?;
             if decoded.list_snapshot() != Some(snapshot) {
-                return Err(crate::error::McpError::new(
-                    crate::error::McpErrorCode::InvalidInput,
+                return Err(crate::error::QueryError::new(
+                    crate::error::QueryErrorCode::InvalidInput,
                     "cursor is from a different snapshot; restart the listing",
                 ));
             }
@@ -282,6 +289,75 @@ pub(crate) fn page_axis_items<T>(
         crate::cursor::encode_list_cursor(snapshot, next_offset)
     });
     Ok((page, next))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_kind, slice_lines, split_public_id};
+    use kenn_model::Kind;
+
+    #[test]
+    fn split_public_id_returns_db_language_and_full_id() {
+        assert_eq!(
+            split_public_id("rs:foo::bar").unwrap(),
+            ("rust", "rs:foo::bar")
+        );
+        assert_eq!(
+            split_public_id("cs:Models.Order").unwrap(),
+            ("csharp", "cs:Models.Order")
+        );
+        split_public_id(":empty-lang").unwrap_err();
+        split_public_id("no-colon").unwrap_err();
+        split_public_id("xx:unknown").unwrap_err();
+    }
+
+    /// `parse_kind` is the argument decoder used by every query that takes a
+    /// `kind` filter (`find_symbol`, `search_symbols`, etc.). Round-trip every
+    /// `Kind` variant through `db_name → parse_kind` and cover the `None` arm
+    /// with unknown strings.
+    #[test]
+    fn parse_kind_decodes_every_variant() {
+        for k in [
+            Kind::Package,
+            Kind::Module,
+            Kind::Namespace,
+            Kind::Class,
+            Kind::Struct,
+            Kind::Interface,
+            Kind::Trait,
+            Kind::Enum,
+            Kind::EnumMember,
+            Kind::TypeAlias,
+            Kind::Method,
+            Kind::Function,
+            Kind::Constructor,
+            Kind::Destructor,
+            Kind::Operator,
+            Kind::Field,
+            Kind::Property,
+            Kind::Constant,
+            Kind::Variable,
+            Kind::Parameter,
+            Kind::TypeParameter,
+            Kind::Macro,
+        ] {
+            assert_eq!(parse_kind(k.db_name()), Some(k), "decode {k:?}");
+        }
+        for unknown in ["", "Class", "klass", "package_", " package"] {
+            assert!(parse_kind(unknown).is_none(), "{unknown:?} must not decode");
+        }
+    }
+
+    /// `slice_lines` consumes 1-based input per `source-data-model` D1.
+    /// A symbol whose `def_range.start_line = 1` MUST yield the file's
+    /// first line — not `""` and not the line above (impossible anyway).
+    #[test]
+    fn slice_lines_returns_first_line_for_start_line_1() {
+        let content = "first line\nsecond line\nthird line\n";
+        assert_eq!(slice_lines(content, 1, 1), "first line");
+        assert_eq!(slice_lines(content, 1, 2), "first line\nsecond line");
+        assert_eq!(slice_lines(content, 2, 3), "second line\nthird line");
+    }
 }
 
 #[cfg(test)]

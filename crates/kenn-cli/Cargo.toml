@@ -27,6 +27,7 @@ kenn-config = { path = "../kenn-config" }
 kenn-indexer = { path = "../kenn-indexer" }
 kenn-store = { path = "../kenn-store" }
 kenn-mcp = { path = "../kenn-mcp" }
+kenn-query = { path = "../kenn-query" }
 kenn-analyze = { path = "../kenn-analyze" }
 kenn-server = { path = "../kenn-server" }
 kenn-embed = { path = "../kenn-embed" }

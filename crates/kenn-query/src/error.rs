@@ -1,14 +1,19 @@
-//! MCP error model — `mcp-server` design D14.
+//! Query error model — `mcp-server` design D14.
 //!
 //! Distinguishes recoverable conditions (returned in the response envelope)
-//! from unrecoverable JSON-RPC errors. Each error carries a stable `code`
-//! string and an optional `data` payload that the agent uses to retry.
+//! from unrecoverable ones. Each error carries a stable `code` string and an
+//! optional `data` payload that the agent uses to retry.
+//!
+//! The codes are facts about the QUERY — a cursor outliving its snapshot, a
+//! model still loading — and both front ends render them. Mapping them onto
+//! JSON-RPC's numeric space is a convention of one wire format, and lives with
+//! that transport in `server/errors.rs`.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum McpErrorCode {
+pub enum QueryErrorCode {
     StaleCursor,
     IndexUnavailable,
     /// Embedder backend selection is still running (cold start or
@@ -32,7 +37,7 @@ pub enum McpErrorCode {
     InternalError,
 }
 
-impl McpErrorCode {
+impl QueryErrorCode {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -45,42 +50,18 @@ impl McpErrorCode {
             Self::InternalError => "INTERNAL_ERROR",
         }
     }
-
-    /// JSON-RPC numeric code. Custom server errors live in [-32099, -32000].
-    ///
-    /// Cursor errors map to `-32602` per the MCP pagination spec
-    /// (mcp-pagination-spec-alignment §2.1): both "decoded but stale"
-    /// and "couldn't decode" share the standard "Invalid params"
-    /// code, with the specific cause distinguished by the
-    /// `kenn_subcode` field in the error's `data` payload.
-    #[must_use]
-    pub const fn json_rpc_code(self) -> i32 {
-        match self {
-            Self::StaleCursor | Self::InvalidInput => -32602,
-            // EmbedderStarting and EmptySnapshot share the -32002
-            // "service-unavailable" family with IndexUnavailable — agents
-            // already branch on the string code in `data.code`, and an
-            // empty snapshot is conceptually "the index exists but has
-            // no data to serve you."
-            Self::IndexUnavailable
-            | Self::EmbedderStarting
-            | Self::EmptySnapshot
-            | Self::EmbeddingUnavailable => -32002,
-            Self::InternalError => -32603,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
-pub struct McpError {
-    pub code: McpErrorCode,
+pub struct QueryError {
+    pub code: QueryErrorCode,
     pub message: String,
     pub data: Option<serde_json::Value>,
 }
 
-impl McpError {
+impl QueryError {
     #[must_use]
-    pub fn new(code: McpErrorCode, message: impl Into<String>) -> Self {
+    pub fn new(code: QueryErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -97,7 +78,7 @@ impl McpError {
     #[must_use]
     pub fn stale_cursor(expected: &str, current: &str) -> Self {
         Self::new(
-            McpErrorCode::StaleCursor,
+            QueryErrorCode::StaleCursor,
             "Index was rebuilt during pagination",
         )
         .with_data(serde_json::json!({
@@ -109,7 +90,7 @@ impl McpError {
     #[must_use]
     pub fn index_unavailable() -> Self {
         Self::new(
-            McpErrorCode::IndexUnavailable,
+            QueryErrorCode::IndexUnavailable,
             "No `.kenn/live` snapshot. Run `kenn index` first.",
         )
     }
@@ -120,7 +101,7 @@ impl McpError {
     #[must_use]
     pub fn index_unavailable_indexing() -> Self {
         Self::new(
-            McpErrorCode::IndexUnavailable,
+            QueryErrorCode::IndexUnavailable,
             "indexing in progress; call `wait_for_index` to block until it is ready (or `get_index_status` to observe state), then retry",
         )
     }
@@ -134,7 +115,7 @@ impl McpError {
     #[must_use]
     pub fn index_unavailable_failed(reason: &str) -> Self {
         Self::new(
-            McpErrorCode::IndexUnavailable,
+            QueryErrorCode::IndexUnavailable,
             format!(
                 "indexing failed: {reason}. To recover: the file watcher retries on the \
                  next file change, or call the `reindex` tool to retry now; if it persists, \
@@ -154,7 +135,7 @@ impl McpError {
     pub fn embedder_starting(reason: &str) -> Self {
         tracing::debug!(target: "kenn_mcp::embedder", reason, "surfacing EMBEDDER_STARTING to agent");
         Self::new(
-            McpErrorCode::EmbedderStarting,
+            QueryErrorCode::EmbedderStarting,
             "embedder warming up; retry shortly",
         )
     }
@@ -174,7 +155,7 @@ impl McpError {
         // wire layer (server.rs::into_error_data); agents branch on
         // `data.kenn_subcode` for the code and `data.{kind,enabled_languages}`
         // for the classifier.
-        Self::new(McpErrorCode::EmptySnapshot, hint.suggestion.clone()).with_data(
+        Self::new(QueryErrorCode::EmptySnapshot, hint.suggestion.clone()).with_data(
             serde_json::json!({
                 "kind": hint.kind.as_str(),
                 "enabled_languages": hint.enabled_languages,
@@ -184,7 +165,7 @@ impl McpError {
 }
 
 /// Classification of an empty snapshot, surfaced both via
-/// [`McpError::empty_snapshot`] (on data-returning tools) and the
+/// [`QueryError::empty_snapshot`] (on data-returning tools) and the
 /// `config_hint` field of `get_workspace_overview` (always succeeds).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigHint {
@@ -313,13 +294,13 @@ impl ConfigHint {
     }
 }
 
-impl std::fmt::Display for McpError {
+impl std::fmt::Display for QueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code.as_str(), self.message)
     }
 }
 
-impl std::error::Error for McpError {}
+impl std::error::Error for QueryError {}
 
 #[cfg(test)]
 mod tests {
@@ -327,11 +308,14 @@ mod tests {
 
     #[test]
     fn code_strings_stable() {
-        assert_eq!(McpErrorCode::StaleCursor.as_str(), "STALE_CURSOR");
-        assert_eq!(McpErrorCode::IndexUnavailable.as_str(), "INDEX_UNAVAILABLE");
-        assert_eq!(McpErrorCode::EmptySnapshot.as_str(), "EMPTY_SNAPSHOT");
-        assert_eq!(McpErrorCode::InvalidInput.as_str(), "INVALID_INPUT");
-        assert_eq!(McpErrorCode::InternalError.as_str(), "INTERNAL_ERROR");
+        assert_eq!(QueryErrorCode::StaleCursor.as_str(), "STALE_CURSOR");
+        assert_eq!(
+            QueryErrorCode::IndexUnavailable.as_str(),
+            "INDEX_UNAVAILABLE"
+        );
+        assert_eq!(QueryErrorCode::EmptySnapshot.as_str(), "EMPTY_SNAPSHOT");
+        assert_eq!(QueryErrorCode::InvalidInput.as_str(), "INVALID_INPUT");
+        assert_eq!(QueryErrorCode::InternalError.as_str(), "INTERNAL_ERROR");
     }
 
     #[test]
@@ -360,7 +344,7 @@ mod tests {
             hint.suggestion
         );
         // ...and the EMPTY_SNAPSHOT error message is the same prose.
-        let err = McpError::empty_snapshot(&hint);
+        let err = QueryError::empty_snapshot(&hint);
         assert_eq!(err.message, hint.suggestion);
     }
 
@@ -388,11 +372,10 @@ mod tests {
             ConfigHintKind::ConfiguredButEmpty,
             vec!["python".to_string()],
         );
-        let err = McpError::empty_snapshot(&hint);
-        assert_eq!(err.code, McpErrorCode::EmptySnapshot);
-        assert_eq!(err.code.json_rpc_code(), -32002);
+        let err = QueryError::empty_snapshot(&hint);
+        assert_eq!(err.code, QueryErrorCode::EmptySnapshot);
         // `kenn_subcode = "EMPTY_SNAPSHOT"` is injected by the wire layer
-        // — McpError::data carries only the classifier payload.
+        // — QueryError::data carries only the classifier payload.
         let data = err.data.expect("empty_snapshot error must carry data");
         assert_eq!(data["kind"], "configured-but-empty");
         assert_eq!(data["enabled_languages"][0], "python");
@@ -402,7 +385,7 @@ mod tests {
     #[test]
     fn empty_snapshot_message_lists_four_language_keys_when_config_disabled() {
         let hint = ConfigHint::new(ConfigHintKind::ConfigDisabled, Vec::new());
-        let err = McpError::empty_snapshot(&hint);
+        let err = QueryError::empty_snapshot(&hint);
         assert!(err.message.contains("kenn.toml"));
         for lang in ["csharp", "rust", "typescript", "python"] {
             assert!(
@@ -415,8 +398,8 @@ mod tests {
 
     #[test]
     fn index_unavailable_failed_carries_reason_and_recovery_path() {
-        let err = McpError::index_unavailable_failed("opening store: disk I/O error");
-        assert_eq!(err.code, McpErrorCode::IndexUnavailable);
+        let err = QueryError::index_unavailable_failed("opening store: disk I/O error");
+        assert_eq!(err.code, QueryErrorCode::IndexUnavailable);
         // The raw reason survives for both human reading and structured
         // consumers (`data.reason`)...
         assert!(err.message.contains("opening store: disk I/O error"));
@@ -432,8 +415,8 @@ mod tests {
 
     #[test]
     fn stale_cursor_carries_both_ids() {
-        let e = McpError::stale_cursor("aabbccddeeff", "112233445566");
-        assert_eq!(e.code, McpErrorCode::StaleCursor);
+        let e = QueryError::stale_cursor("aabbccddeeff", "112233445566");
+        assert_eq!(e.code, QueryErrorCode::StaleCursor);
         let d = e.data.unwrap();
         assert_eq!(d["expected_snapshot_id"], "aabbccddeeff");
         assert_eq!(d["current_snapshot_id"], "112233445566");

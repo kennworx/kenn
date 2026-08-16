@@ -5,9 +5,11 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{McpError, McpErrorCode};
 use crate::state::LifecycleState;
-use crate::types::{IndexStatus, IndexStatusProgress, SingleResponse};
+use kenn_query::SingleResponse;
+use kenn_query::{QueryError, QueryErrorCode};
+
+use crate::index_status::{IndexStatus, IndexStatusProgress};
 
 use super::{ServerState, WatchStartResult};
 
@@ -19,7 +21,7 @@ pub struct GetIndexStatusArgs {}
 pub fn get_index_status(
     state: &ServerState,
     _: GetIndexStatusArgs,
-) -> Result<SingleResponse<IndexStatus>, McpError> {
+) -> Result<SingleResponse<IndexStatus>, QueryError> {
     let guard = state.lifecycle.read().map_err(lifecycle_poisoned)?;
     // `is_stale` is an event-seq generation comparison — two atomic
     // loads, no git and no store open on the call path (D1/D4).
@@ -34,20 +36,20 @@ pub fn get_index_status(
     Ok(SingleResponse::found(status))
 }
 
-fn lifecycle_poisoned<E: std::fmt::Display>(e: E) -> McpError {
-    McpError::new(
-        McpErrorCode::InternalError,
+fn lifecycle_poisoned<E: std::fmt::Display>(e: E) -> QueryError {
+    QueryError::new(
+        QueryErrorCode::InternalError,
         format!("lifecycle lock poisoned: {e}"),
     )
 }
 
 /// The `IndexStatus.state` string for a background embed stage.
-fn embed_stage_str(stage: crate::state::EmbedStage) -> &'static str {
+fn embed_stage_str(stage: kenn_query::EmbedStage) -> &'static str {
     match stage {
-        crate::state::EmbedStage::Building => "embedding",
-        crate::state::EmbedStage::Ready => "ready",
-        crate::state::EmbedStage::Disabled => "disabled",
-        crate::state::EmbedStage::Degraded => "degraded",
+        kenn_query::EmbedStage::Building => "embedding",
+        kenn_query::EmbedStage::Ready => "ready",
+        kenn_query::EmbedStage::Disabled => "disabled",
+        kenn_query::EmbedStage::Degraded => "degraded",
     }
 }
 
@@ -60,7 +62,7 @@ fn build_index_status(
     workspace_root: String,
     is_stale_cached: bool,
     watcher_state: crate::state::WatcherState,
-    embed_stage: crate::state::EmbedStage,
+    embed_stage: kenn_query::EmbedStage,
     embed_error: Option<String>,
 ) -> IndexStatus {
     match guard {
@@ -224,7 +226,7 @@ pub struct WaitForIndexResponse {
 pub async fn wait_for_index(
     state: &ServerState,
     args: WaitForIndexArgs,
-) -> Result<SingleResponse<WaitForIndexResponse>, McpError> {
+) -> Result<SingleResponse<WaitForIndexResponse>, QueryError> {
     let timeout = std::time::Duration::from_millis(clamp_timeout_ms(args.timeout_ms));
     let deadline = std::time::Instant::now() + timeout;
     let workspace_root = state.source_root().display().to_string();
@@ -287,10 +289,10 @@ pub struct ReindexResponse {
 pub fn reindex(
     state: &Arc<ServerState>,
     _: ReindexArgs,
-) -> Result<SingleResponse<ReindexResponse>, McpError> {
+) -> Result<SingleResponse<ReindexResponse>, QueryError> {
     let mut guard = state.lifecycle.write().map_err(|e| {
-        McpError::new(
-            McpErrorCode::InternalError,
+        QueryError::new(
+            QueryErrorCode::InternalError,
             format!("lifecycle lock poisoned: {e}"),
         )
     })?;
@@ -351,19 +353,19 @@ pub struct WatchStartArgs {}
 pub fn watch_start(
     state: &Arc<ServerState>,
     _: WatchStartArgs,
-) -> Result<SingleResponse<WatchStartResult>, McpError> {
+) -> Result<SingleResponse<WatchStartResult>, QueryError> {
     // State precondition: only meaningful in Ready.
     {
         let g = state.lifecycle.read().map_err(|e| {
-            McpError::new(
-                McpErrorCode::InternalError,
+            QueryError::new(
+                QueryErrorCode::InternalError,
                 format!("lifecycle lock poisoned: {e}"),
             )
         })?;
         let kind = g.kind();
         if kind != crate::state::StateKind::Ready {
-            return Err(McpError::new(
-                McpErrorCode::InvalidInput,
+            return Err(QueryError::new(
+                QueryErrorCode::InvalidInput,
                 format!(
                     "watch_start: server is `{}`, not `ready`; poll get_index_status and retry",
                     kind.as_str()
@@ -381,8 +383,8 @@ pub fn watch_start(
     // workspace root).
     let debounce_ms = state.config.mcp.watch_debounce_ms;
     let mut g = state.watcher.lock().map_err(|e| {
-        McpError::new(
-            McpErrorCode::InternalError,
+        QueryError::new(
+            QueryErrorCode::InternalError,
             format!("watcher mutex poisoned: {e}"),
         )
     })?;
@@ -396,8 +398,8 @@ pub fn watch_start(
     // Start a fresh watcher. notify::Watcher::new failures surface as
     // an MCP error; the watcher state stays `Off` on failure.
     let (result, handle) = crate::watcher::start(state).map_err(|e| {
-        McpError::new(
-            McpErrorCode::InternalError,
+        QueryError::new(
+            QueryErrorCode::InternalError,
             format!("watch_start: notify init failed: {e}"),
         )
     })?;
@@ -422,7 +424,7 @@ pub struct WatchStopResult {
 pub fn watch_stop(
     state: &ServerState,
     _: WatchStopArgs,
-) -> Result<SingleResponse<WatchStopResult>, McpError> {
+) -> Result<SingleResponse<WatchStopResult>, QueryError> {
     let stopped = crate::watcher::stop(state);
     Ok(SingleResponse::found(WatchStopResult { stopped }))
 }
@@ -430,7 +432,7 @@ pub fn watch_stop(
 #[cfg(test)]
 mod tests {
     use super::{clamp_timeout_ms, degraded_fields, embed_stage_str, WAIT_DEFAULT_MS, WAIT_MAX_MS};
-    use crate::state::EmbedStage;
+    use kenn_query::EmbedStage;
 
     /// Build a `SnapshotMeta` from a partial JSON object — serde defaults
     /// fill every field the test doesn't care about.

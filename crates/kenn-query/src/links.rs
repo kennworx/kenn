@@ -14,9 +14,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{McpError, McpErrorCode};
-use crate::tools::support::internal;
-use crate::tools::ServerState;
+use crate::ctx::QueryCtx;
+use crate::error::{QueryError, QueryErrorCode};
+use crate::support::internal;
 
 /// Default / maximum number of links returned in one call.
 const DEFAULT_LIMIT: u32 = 100;
@@ -69,14 +69,14 @@ const UNRESOLVED_PREFIX: &str = "md:@unresolved/";
 
 /// Map a grade name to its stored discriminant, erroring on an unknown name so
 /// a typo'd filter fails loudly rather than silently matching nothing.
-fn grade_code(name: &str) -> Result<u8, McpError> {
+fn grade_code(name: &str) -> Result<u8, QueryError> {
     match name {
         "drifted" => Ok(1),
         "fuzzy" => Ok(2),
         "ambiguous" => Ok(3),
         "dangling" => Ok(4),
-        other => Err(McpError::new(
-            McpErrorCode::InvalidInput,
+        other => Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
             format!("check_links: unknown grade `{other}` — use drifted|fuzzy|ambiguous|dangling"),
         )),
     }
@@ -84,9 +84,9 @@ fn grade_code(name: &str) -> Result<u8, McpError> {
 
 /// List the non-exact markdown links in the current index, bounded + filtered.
 pub async fn check_links(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &CheckLinksArgs,
-) -> Result<CheckLinksResponse, McpError> {
+) -> Result<CheckLinksResponse, QueryError> {
     let limit = args.limit.map_or(DEFAULT_LIMIT, |l| l.clamp(1, MAX_LIMIT));
     let grade_codes = match &args.grade {
         Some(names) => Some(
@@ -97,34 +97,30 @@ pub async fn check_links(
         ),
         None => None,
     };
-    state
-        .with_db(|h| async move {
-            let (rows, total) = h
-                .read
-                .scan_link_diagnostics(grade_codes, limit)
-                .await
-                .map_err(internal)?;
-            let returned = rows.len();
-            let links: Vec<LinkDiagnostic> = rows
-                .into_iter()
-                .map(|r| LinkDiagnostic {
-                    src: r.src_pub_id,
-                    location: r.location,
-                    kind: r.kind,
-                    grade: r.grade,
-                    // A dangling target is a stub id; surface the written target.
-                    target: r
-                        .target
-                        .strip_prefix(UNRESOLVED_PREFIX)
-                        .map_or_else(|| r.target.clone(), ToString::to_string),
-                })
-                .collect();
-            Ok(CheckLinksResponse {
-                total,
-                returned,
-                truncated: total > returned as u64,
-                links,
-            })
-        })
+    let (rows, total) = ctx
+        .read
+        .scan_link_diagnostics(grade_codes, limit)
         .await
+        .map_err(internal)?;
+    let returned = rows.len();
+    let links: Vec<LinkDiagnostic> = rows
+        .into_iter()
+        .map(|r| LinkDiagnostic {
+            src: r.src_pub_id,
+            location: r.location,
+            kind: r.kind,
+            grade: r.grade,
+            // A dangling target is a stub id; surface the written target.
+            target: r
+                .target
+                .strip_prefix(UNRESOLVED_PREFIX)
+                .map_or_else(|| r.target.clone(), ToString::to_string),
+        })
+        .collect();
+    Ok(CheckLinksResponse {
+        total,
+        returned,
+        truncated: total > returned as u64,
+        links,
+    })
 }

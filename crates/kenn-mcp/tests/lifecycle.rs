@@ -2,11 +2,9 @@
 //! foundation: tools fail-fast while not Ready, status tool always
 //! works, and the lifecycle transitions match the spec scenarios.
 
-use kenn_mcp::error::McpErrorCode;
-use kenn_mcp::tools::{
-    get_index_status, get_workspace_overview, search_symbols, GetIndexStatusArgs,
-    GetWorkspaceOverviewArgs, SearchSymbolsArgs, ServerState,
-};
+use kenn_mcp::tools::{get_index_status, GetIndexStatusArgs, ServerState};
+use kenn_query::error::QueryErrorCode;
+use kenn_query::{get_workspace_overview, GetWorkspaceOverviewArgs};
 use tempfile::TempDir;
 
 mod common;
@@ -26,23 +24,12 @@ async fn no_live_snapshot_reports_indexing_and_blocks_other_tools() {
     assert!(s.snapshot_id.is_none());
     assert!(s.error.is_none());
 
-    let err = get_workspace_overview(&state, GetWorkspaceOverviewArgs::default())
-        .await
-        .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::IndexUnavailable);
+    let err = state.open_query_allow_empty().err().expect("not ready");
+    assert_eq!(err.code, QueryErrorCode::IndexUnavailable);
     assert!(err.message.to_lowercase().contains("indexing"));
 
-    let err = search_symbols(
-        &state,
-        &SearchSymbolsArgs {
-            query: "anything".into(),
-            filters: None,
-            pagination: None,
-        },
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::IndexUnavailable);
+    let err = state.open_query().await.err().expect("not ready");
+    assert_eq!(err.code, QueryErrorCode::IndexUnavailable);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -90,10 +77,8 @@ async fn failed_indexing_is_terminal_and_reports_via_status() {
     assert!(s.error.is_some());
     assert!(!s.error.unwrap().is_empty());
 
-    let err = get_workspace_overview(&state, GetWorkspaceOverviewArgs::default())
-        .await
-        .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::IndexUnavailable);
+    let err = state.open_query_allow_empty().err().expect("not ready");
+    assert_eq!(err.code, QueryErrorCode::IndexUnavailable);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -129,17 +114,17 @@ async fn live_snapshot_bootstraps_to_ready() {
     assert_eq!(s.state, "ready");
     assert!(s.snapshot_id.is_some());
     assert!(s.error.is_none());
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
 
-    let overview = get_workspace_overview(&state, GetWorkspaceOverviewArgs::default())
+    let overview = get_workspace_overview(&ctx, GetWorkspaceOverviewArgs::default())
         .await
         .unwrap();
     assert!(overview.found);
 
     // The embed stage drives the reported `state` once the graph is Ready, and
     // structural tools keep serving across embed stages (mcp-embedding-stage).
-    state
-        .embed_stage
-        .store(kenn_mcp::state::EmbedStage::Building);
+    state.embed_stage.store(kenn_query::EmbedStage::Building);
     let s = get_index_status(&state, GetIndexStatusArgs::default())
         .unwrap()
         .item
@@ -149,17 +134,17 @@ async fn live_snapshot_bootstraps_to_ready() {
         s.snapshot_id.is_some(),
         "ready-shape fields populated while embedding"
     );
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
     // Structural query works while embedding (does not wait for `ready`).
     assert!(
-        get_workspace_overview(&state, GetWorkspaceOverviewArgs::default())
+        get_workspace_overview(&ctx, GetWorkspaceOverviewArgs::default())
             .await
             .unwrap()
             .found
     );
 
-    state
-        .embed_stage
-        .store(kenn_mcp::state::EmbedStage::Disabled);
+    state.embed_stage.store(kenn_query::EmbedStage::Disabled);
     let s = get_index_status(&state, GetIndexStatusArgs::default())
         .unwrap()
         .item

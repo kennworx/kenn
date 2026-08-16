@@ -18,6 +18,7 @@ kenn-analyze = { path = "../kenn-analyze" }
 kenn-config = { path = "../kenn-config" }
 kenn-model = { path = "../kenn-model", features = ["schemars"] }
 kenn-store = { path = "../kenn-store" }
+kenn-query = { path = "../kenn-query" }
 
 anyhow.workspace = true
 arc-swap.workspace = true

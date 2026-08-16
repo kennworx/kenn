@@ -6,15 +6,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kenn_mcp::snapshot_id_from_timestamp;
 use kenn_mcp::state::LifecycleState;
-use kenn_mcp::tools::{
+use kenn_mcp::tools::ServerState;
+use kenn_model::{FileRecord, Kind, Language, PackageRecord, SymbolRecord};
+use kenn_query::snapshot_id_from_timestamp;
+use kenn_query::{
     check_anchors, find_directives, find_predecessors, get_finding, merge_findings, record_anchor,
     search_findings, semantic_search, store_finding, CheckAnchorsArgs, FindDirectivesArgs,
     FindingDagArgs, GetFindingArgs, MergeFindingsArgs, RecordAnchorArgs, SearchFindingsArgs,
-    SearchScope, SemanticSearchArgs, ServerState, StoreFindingArgs,
+    SearchScope, SemanticSearchArgs, StoreFindingArgs,
 };
-use kenn_model::{FileRecord, Kind, Language, PackageRecord, SymbolRecord};
 use kenn_store::api::WriteBatch;
 use kenn_store::{open_writer, reader_from_writer, DbReader, DbWriter, Layout, WriterOptions};
 // `FindingsStore` is opened indirectly by `ServerState::open_findings`.
@@ -126,9 +127,11 @@ async fn store_finding_returns_id_and_is_retrievable() {
         reader_from_writer(&writer).await.expect("reader"),
     )
     .await;
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
 
     let resp = store_finding(
-        &state,
+        &ctx,
         &StoreFindingArgs {
             text: "the order handler retries twice".into(),
             parent_ids: None,
@@ -142,7 +145,7 @@ async fn store_finding_returns_id_and_is_retrievable() {
     assert!(resp.similar.is_empty(), "similar is reserved/empty for now");
 
     let got = get_finding(
-        &state,
+        &ctx,
         &GetFindingArgs {
             id: resp.id.clone(),
         },
@@ -167,9 +170,11 @@ async fn merge_findings_records_inputs_as_parents() {
         reader_from_writer(&writer).await.expect("reader"),
     )
     .await;
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
 
     let a = store_finding(
-        &state,
+        &ctx,
         &StoreFindingArgs {
             text: "fact a".into(),
             parent_ids: None,
@@ -181,7 +186,7 @@ async fn merge_findings_records_inputs_as_parents() {
     .expect("store a")
     .id;
     let b = store_finding(
-        &state,
+        &ctx,
         &StoreFindingArgs {
             text: "fact b".into(),
             parent_ids: None,
@@ -194,7 +199,7 @@ async fn merge_findings_records_inputs_as_parents() {
     .id;
 
     let merged = merge_findings(
-        &state,
+        &ctx,
         &MergeFindingsArgs {
             ids: vec![a.clone(), b.clone()],
             text: "synthesis of a and b".into(),
@@ -206,7 +211,7 @@ async fn merge_findings_records_inputs_as_parents() {
     assert!(merged.found);
     let merged_id = merged.item.unwrap();
 
-    let got = get_finding(&state, &GetFindingArgs { id: merged_id })
+    let got = get_finding(&ctx, &GetFindingArgs { id: merged_id })
         .await
         .expect("get_finding")
         .item
@@ -226,11 +231,13 @@ async fn find_predecessors_traces_to_code_node() {
         reader_from_writer(&writer).await.expect("reader"),
     )
     .await;
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
 
     // A code-node id in the unified space is `<lang>:<pub_id>`.
     let code_node = "csharp:cs:OrderHandler".to_string();
     let base = store_finding(
-        &state,
+        &ctx,
         &StoreFindingArgs {
             text: "OrderHandler does retries".into(),
             parent_ids: Some(vec![code_node.clone()]),
@@ -242,7 +249,7 @@ async fn find_predecessors_traces_to_code_node() {
     .expect("store base")
     .id;
     let derived = store_finding(
-        &state,
+        &ctx,
         &StoreFindingArgs {
             text: "derived from the base fact".into(),
             parent_ids: Some(vec![base.clone()]),
@@ -254,7 +261,7 @@ async fn find_predecessors_traces_to_code_node() {
     .expect("store derived")
     .id;
 
-    let preds = find_predecessors(&state, &FindingDagArgs { id: derived })
+    let preds = find_predecessors(&ctx, &FindingDagArgs { id: derived })
         .await
         .expect("find_predecessors");
     assert!(preds.items.contains(&base), "reaches the parent finding");
@@ -275,9 +282,11 @@ async fn search_findings_returns_ranked_hits() {
         reader_from_writer(&writer).await.expect("reader"),
     )
     .await;
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
 
     store_finding(
-        &state,
+        &ctx,
         &StoreFindingArgs {
             text: "the cache evicts on every write".into(),
             parent_ids: None,
@@ -289,7 +298,7 @@ async fn search_findings_returns_ranked_hits() {
     .expect("store");
 
     let resp = search_findings(
-        &state,
+        &ctx,
         &SearchFindingsArgs {
             query: "cache evicts".into(),
             pagination: None,
@@ -314,7 +323,7 @@ async fn search_findings_returns_ranked_hits() {
 /// the query.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_findings_paginates_to_cap() {
-    use kenn_mcp::Pagination;
+    use kenn_query::Pagination;
 
     let dir = TempDir::new().unwrap();
     let writer = build_corpus(dir.path()).await;
@@ -323,12 +332,14 @@ async fn search_findings_paginates_to_cap() {
         reader_from_writer(&writer).await.expect("reader"),
     )
     .await;
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
 
     // Store 12 findings that all match the query "cache" — enough to
     // exceed the default page_size of 10 and force pagination.
     for i in 0..12 {
         store_finding(
-            &state,
+            &ctx,
             &StoreFindingArgs {
                 text: format!("the cache item number {i}"),
                 parent_ids: None,
@@ -343,7 +354,7 @@ async fn search_findings_paginates_to_cap() {
     // Single-shot at page_size=30 (the materialize cap) returns the
     // full top-K window in one page.
     let single = search_findings(
-        &state,
+        &ctx,
         &SearchFindingsArgs {
             query: "cache".into(),
             pagination: Some(Pagination {
@@ -374,7 +385,7 @@ async fn search_findings_paginates_to_cap() {
     let mut pages = 0;
     loop {
         let resp = search_findings(
-            &state,
+            &ctx,
             &SearchFindingsArgs {
                 query: "cache".into(),
                 pagination: Some(Pagination {
@@ -414,9 +425,11 @@ async fn semantic_search_returns_both_groups() {
         reader_from_writer(&writer).await.expect("reader"),
     )
     .await;
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
 
     store_finding(
-        &state,
+        &ctx,
         &StoreFindingArgs {
             text: "the order pipeline batches writes".into(),
             parent_ids: None,
@@ -428,7 +441,7 @@ async fn semantic_search_returns_both_groups() {
     .expect("store");
 
     let resp = semantic_search(
-        &state,
+        &ctx,
         &SemanticSearchArgs {
             query: "order".into(),
             scope: Some(SearchScope::Both),
@@ -447,7 +460,7 @@ async fn semantic_search_returns_both_groups() {
 
     // Scoping to findings only drops the code group.
     let findings_only = semantic_search(
-        &state,
+        &ctx,
         &SemanticSearchArgs {
             query: "order".into(),
             scope: Some(SearchScope::Findings),
@@ -476,10 +489,12 @@ async fn directive_flow_find_record_check() {
         reader_from_writer(&writer).await.expect("reader"),
     )
     .await;
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
 
     // Store a directive anchored to a file — created and anchored in one call.
     let resp = store_finding(
-        &state,
+        &ctx,
         &StoreFindingArgs {
             text: "run the embedder in-foreground on macOS".into(),
             parent_ids: None,
@@ -493,7 +508,7 @@ async fn directive_flow_find_record_check() {
 
     // `find_directives` surfaces it by its anchored path (structural leg only).
     let found = find_directives(
-        &state,
+        &ctx,
         &FindDirectivesArgs {
             paths: vec!["src/Orders.cs".into()],
             query: None,
@@ -508,7 +523,7 @@ async fn directive_flow_find_record_check() {
 
     // An unrelated path does not surface it.
     let none = find_directives(
-        &state,
+        &ctx,
         &FindDirectivesArgs {
             paths: vec!["src/Unrelated.cs".into()],
             query: None,
@@ -520,7 +535,7 @@ async fn directive_flow_find_record_check() {
 
     // `record_anchor`: attach (re-confirm), rename, and an invalid op.
     record_anchor(
-        &state,
+        &ctx,
         &RecordAnchorArgs {
             finding_id: id.clone(),
             op: "attach".into(),
@@ -532,7 +547,7 @@ async fn directive_flow_find_record_check() {
     .await
     .expect("attach");
     record_anchor(
-        &state,
+        &ctx,
         &RecordAnchorArgs {
             finding_id: id.clone(),
             op: "rename".into(),
@@ -544,7 +559,7 @@ async fn directive_flow_find_record_check() {
     .await
     .expect("rename");
     let bad = record_anchor(
-        &state,
+        &ctx,
         &RecordAnchorArgs {
             finding_id: id.clone(),
             op: "bogus".into(),
@@ -558,7 +573,7 @@ async fn directive_flow_find_record_check() {
 
     // An unknown finding id is rejected (no orphan anchor log is created).
     let orphan = record_anchor(
-        &state,
+        &ctx,
         &RecordAnchorArgs {
             finding_id: "fnd_does-not-exist".into(),
             op: "attach".into(),
@@ -571,7 +586,7 @@ async fn directive_flow_find_record_check() {
     assert!(orphan.is_err(), "an unknown finding id is rejected");
 
     // None of the anchored paths exist on disk → reported as broken.
-    let report = check_anchors(&state, &CheckAnchorsArgs {})
+    let report = check_anchors(&ctx, &CheckAnchorsArgs {})
         .await
         .expect("check_anchors");
     assert!(
@@ -592,12 +607,14 @@ async fn directive_content_drift_detected() {
         reader_from_writer(&writer).await.expect("reader"),
     )
     .await;
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
 
     // A real file under the workspace, anchored at its current content.
     let file = dir.path().join("notes.md");
     std::fs::write(&file, "version one\n").unwrap();
     let id = store_finding(
-        &state,
+        &ctx,
         &StoreFindingArgs {
             text: "keep notes.md in sync with the schema".into(),
             parent_ids: None,
@@ -611,7 +628,7 @@ async fn directive_content_drift_detected() {
 
     // Unchanged file → not drifted.
     let before = find_directives(
-        &state,
+        &ctx,
         &FindDirectivesArgs {
             paths: vec!["notes.md".into()],
             query: None,
@@ -630,7 +647,7 @@ async fn directive_content_drift_detected() {
     std::fs::write(&file, "version two — changed\n").unwrap();
 
     let after = find_directives(
-        &state,
+        &ctx,
         &FindDirectivesArgs {
             paths: vec!["notes.md".into()],
             query: None,
@@ -646,7 +663,7 @@ async fn directive_content_drift_detected() {
     assert!(hit.finding.drifted, "edited anchor drifts");
 
     // check_anchors reports it drifted, not broken (the file still exists).
-    let report = check_anchors(&state, &CheckAnchorsArgs {})
+    let report = check_anchors(&ctx, &CheckAnchorsArgs {})
         .await
         .expect("check_anchors");
     assert!(

@@ -11,9 +11,9 @@ use rmcp::service::Peer;
 use rmcp::RoleServer;
 use tokio::sync::mpsc;
 
-use crate::cursor::snapshot_id_from_timestamp;
 use crate::state::{LifecycleState, ProgressSnapshot, ReaderBinding};
 use crate::tools::ServerState;
+use kenn_query::snapshot_id_from_timestamp;
 
 use super::{set_failed, start_staleness_backstop_task, startup_seed};
 
@@ -338,7 +338,7 @@ async fn run_reindex_and_install(
     {
         Ok(outcome) => install_ready_or_fail(state, store, &outcome.snapshot_path).await,
         // Store the raw pipeline error as the reason; the "indexing failed:"
-        // framing is added once, by `McpError::index_unavailable_failed`
+        // framing is added once, by `QueryError::index_unavailable_failed`
         // (and the `failed` lifecycle state in `get_index_status`).
         Err(e) => set_failed(state, e.to_string()),
     }
@@ -359,7 +359,7 @@ fn spawn_embed_job(
 ) {
     // Mark "building" synchronously so `get_index_status` reports `embedding`
     // the instant the graph is Ready, before the async task is even scheduled.
-    embed_stage.store(crate::state::EmbedStage::Building);
+    embed_stage.store(kenn_query::EmbedStage::Building);
     tokio::spawn(async move {
         let embedder = kenn_store::shared_embedder();
         match kenn_store::embed_pending(&layout, git_aware_skip, config_sig, &model_id, embedder)
@@ -370,9 +370,9 @@ fn spawn_embed_job(
                 // (vectors filled, or nothing was pending). Either way the
                 // embedder is healthy, so clear any prior degraded error.
                 embed_stage.store(if report.embedder_available {
-                    crate::state::EmbedStage::Ready
+                    kenn_query::EmbedStage::Ready
                 } else {
-                    crate::state::EmbedStage::Disabled
+                    kenn_query::EmbedStage::Disabled
                 });
                 embed_error.store(None);
                 if report.vectors > 0 {
@@ -392,7 +392,7 @@ fn spawn_embed_job(
                 // of claiming vectors exist. `embed_pending` also persisted the
                 // error for `kenn status` to read.
                 let cause = e.to_string();
-                embed_stage.store(crate::state::EmbedStage::Degraded);
+                embed_stage.store(kenn_query::EmbedStage::Degraded);
                 embed_error.store(Some(std::sync::Arc::new(cause.clone())));
                 tracing::warn!("kenn-mcp: embed job degraded: {cause}");
             }
@@ -406,7 +406,7 @@ fn spawn_embed_job(
 /// pin-then-open dance.
 pub(crate) struct ReadyParts {
     snapshot_path: std::path::PathBuf,
-    snapshot_id: crate::cursor::SnapshotId,
+    snapshot_id: kenn_query::SnapshotId,
     indexed_at: String,
     binding: Arc<ReaderBinding>,
     /// The served snapshot's persisted run metadata, parsed once here at
@@ -628,8 +628,7 @@ pub(crate) async fn swap_to_snapshot(
     // Drop every cached top-K result set — they were materialized against
     // the prior snapshot; cursors now surface STALE_CURSOR (result_cache
     // D12).
-    state.search_symbols_cache.clear();
-    state.search_findings_cache.clear();
+    state.caches.clear();
 
     // Notify the connected MCP client that the served snapshot changed —
     // converges every reindex source onto one "data is fresh" signal.

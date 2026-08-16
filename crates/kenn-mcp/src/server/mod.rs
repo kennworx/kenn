@@ -7,7 +7,7 @@
 //! function in [`crate::tools`] that:
 //! 1. Translates the rmcp `Parameters<T>` wrapper into typed Args.
 //! 2. `.await`s the tool function on the rmcp runtime.
-//! 3. Maps `crate::error::McpError` into rmcp's `ErrorData`.
+//! 3. Maps `kenn_query::QueryError` into rmcp's `ErrorData`.
 //!
 //! Tool descriptions are kept ≤ 200 tokens each per design budget.
 

@@ -1,2 +1,3 @@
 {"op":"attach","anchor":"crates/kenn-mcp/src/types.rs","ts":"2026-07-26T08:08:46.482312Z","sha":"633ffdee20bf0591"}
 {"op":"attach","anchor":"crates/kenn-indexer/src/aggregate.rs","ts":"2026-07-26T08:08:46.482312Z","sha":"a7f50debf5feb765"}
+{"op":"rename","from":"crates/kenn-mcp/src/types.rs","to":"crates/kenn-query/src/types.rs","ts":"2026-08-15T11:12:39.314178Z"}

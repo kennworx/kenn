@@ -3,3 +3,5 @@
 {"op":"attach","anchor":"crates/kenn-mcp/src/tools/state.rs","ts":"2026-06-09T09:59:56.731356Z"}
 {"op":"attach","anchor":"crates/kenn-mcp/src/indexing/orchestrate.rs","ts":"2026-06-09T13:42:54.148796Z"}
 {"op":"rename","from":"crates/kenn-mcp/src/tools/query.rs","to":"crates/kenn-mcp/src/tools/query/lookup.rs","ts":"2026-07-15T16:47:33.294394Z"}
+{"op":"rename","from":"crates/kenn-mcp/src/error.rs","to":"crates/kenn-query/src/error.rs","ts":"2026-08-15T11:12:39.455511Z"}
+{"op":"rename","from":"crates/kenn-mcp/src/tools/query/lookup.rs","to":"crates/kenn-query/src/symbols/lookup.rs","ts":"2026-08-15T11:12:39.52792Z"}

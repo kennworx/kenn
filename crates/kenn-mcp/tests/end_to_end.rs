@@ -8,12 +8,13 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use kenn_mcp::tools::{
-    find_at_location, find_predecessors, get_index_status, get_workspace_overview, list_callers,
-    merge_findings, search_symbols, store_finding, wait_for_index, ByIdArgs, FindAtLocationArgs,
-    FindingDagArgs, GetIndexStatusArgs, GetWorkspaceOverviewArgs, MergeFindingsArgs,
-    SearchSymbolsArgs, ServerState, StoreFindingArgs, WaitForIndexArgs,
+    get_index_status, wait_for_index, GetIndexStatusArgs, ServerState, WaitForIndexArgs,
 };
-use kenn_mcp::McpErrorCode;
+use kenn_query::QueryErrorCode;
+use kenn_query::{
+    find_predecessors, get_workspace_overview, merge_findings, store_finding, FindingDagArgs,
+    GetWorkspaceOverviewArgs, MergeFindingsArgs, StoreFindingArgs,
+};
 use tempfile::TempDir;
 
 fn run_cli(workspace: &Path, args: &[&str]) {
@@ -49,7 +50,9 @@ async fn published_empty_workspace_serves_status_and_overview() {
     assert!(!s.is_stale);
     assert!(!s.fallback_from_parent_worktree);
 
-    let overview = get_workspace_overview(&state, GetWorkspaceOverviewArgs::default())
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
+    let overview = get_workspace_overview(&ctx, GetWorkspaceOverviewArgs::default())
         .await
         .unwrap();
     assert!(overview.found);
@@ -65,7 +68,7 @@ async fn published_empty_workspace_serves_status_and_overview() {
         .expect("empty snapshot must carry config_hint");
     assert_eq!(
         hint.kind,
-        kenn_mcp::error::ConfigHintKind::ConfigDisabled,
+        kenn_query::error::ConfigHintKind::ConfigDisabled,
         "default config has every language disabled"
     );
     assert!(hint.enabled_languages.is_empty());
@@ -74,20 +77,11 @@ async fn published_empty_workspace_serves_status_and_overview() {
     // EMPTY_SNAPSHOT on an empty published snapshot — silent empty results
     // are no longer permitted (mcp-server: Empty-snapshot tools point at
     // config). The structured `data` payload classifies the cause.
-    let err = search_symbols(
-        &state,
-        &SearchSymbolsArgs {
-            query: "anything".into(),
-            filters: None,
-            pagination: None,
-        },
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.code, kenn_mcp::error::McpErrorCode::EmptySnapshot);
+    let err = state.open_query().await.err().expect("not ready");
+    assert_eq!(err.code, kenn_query::error::QueryErrorCode::EmptySnapshot);
     let data = err.data.expect("EMPTY_SNAPSHOT must carry data payload");
     // `kenn_subcode = "EMPTY_SNAPSHOT"` is added by the wire serializer;
-    // McpError::data carries only the classifier payload.
+    // QueryError::data carries only the classifier payload.
     assert_eq!(data["kind"], "config-disabled");
     assert!(err.message.contains("kenn.toml"));
     for lang in ["csharp", "rust", "typescript", "python"] {
@@ -143,8 +137,10 @@ async fn uninitialized_workspace_suggests_kenn_init() {
 
     let state = ServerState::new(dir.path());
     state.bootstrap().await;
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
 
-    let overview = get_workspace_overview(&state, GetWorkspaceOverviewArgs::default())
+    let overview = get_workspace_overview(&ctx, GetWorkspaceOverviewArgs::default())
         .await
         .unwrap();
     let hint = overview
@@ -152,7 +148,7 @@ async fn uninitialized_workspace_suggests_kenn_init() {
         .unwrap()
         .config_hint
         .expect("empty snapshot must carry config_hint");
-    assert_eq!(hint.kind, kenn_mcp::error::ConfigHintKind::NotInitialized);
+    assert_eq!(hint.kind, kenn_query::error::ConfigHintKind::NotInitialized);
     // The overview hint must carry the actionable suggestion inline — not
     // just the bare `kind` — so an agent orienting via get_workspace_overview
     // is told to run `kenn init` rather than inventing "index not built".
@@ -162,17 +158,8 @@ async fn uninitialized_workspace_suggests_kenn_init() {
         hint.suggestion
     );
 
-    let err = search_symbols(
-        &state,
-        &SearchSymbolsArgs {
-            query: "anything".into(),
-            filters: None,
-            pagination: None,
-        },
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::EmptySnapshot);
+    let err = state.open_query().await.err().expect("not ready");
+    assert_eq!(err.code, QueryErrorCode::EmptySnapshot);
     let data = err.data.expect("EMPTY_SNAPSHOT must carry data payload");
     assert_eq!(data["kind"], "not-initialized");
     assert!(
@@ -293,6 +280,15 @@ fn mcp_server_lists_all_tools_over_stdio() {
         "list_in_scope",
         "list_imports",
         "list_module_files",
+        // The five atlas axes. Required by the `mcp-server` spec
+        // ("Atlas axis read tools"), but unregistered until the
+        // `split-query-from-mcp` change: they were proven by the CLI and
+        // blocked only by the crate-boundary ambiguity that change removed.
+        "list_packages",
+        "list_domains",
+        "list_contracts",
+        "list_documents",
+        "list_tables",
         "get_workspace_overview",
         "get_index_status",
         "wait_for_index",
@@ -330,10 +326,6 @@ fn mcp_server_lists_all_tools_over_stdio() {
 /// against an empty code graph keep their `InvalidInput` behavior
 /// because `with_findings` does not gate on snapshot emptiness.
 #[tokio::test(flavor = "multi_thread")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear protocol-flow assertions for every reader and findings tool; splitting hurts readability"
-)]
 async fn tools_error_on_unknown_references() {
     let dir = TempDir::new().unwrap();
     std::fs::write(
@@ -347,73 +339,52 @@ async fn tools_error_on_unknown_references() {
     let state = ServerState::new(dir.path());
     state.bootstrap().await;
 
-    // Empty-string `file_path` is caught by pre-with_db input validation,
-    // so InvalidInput still fires before the empty-snapshot gate.
-    let err = find_at_location(
-        &state,
-        &FindAtLocationArgs {
-            file_path: String::new(),
-            line: 1,
-            kind: None,
-        },
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::InvalidInput);
+    // Since queries moved onto `QueryCtx`, the empty-snapshot gate fires when
+    // the snapshot is OPENED rather than inside each tool. Same error, one step
+    // earlier — and now it guards every migrated query at once instead of each
+    // one re-running the check. A caller cannot reach a query without it.
+    assert_eq!(
+        state
+            .open_query()
+            .await
+            .err()
+            .expect("empty snapshot is refused")
+            .code,
+        QueryErrorCode::EmptySnapshot,
+        "opening a query over an empty workspace is refused with the config hint"
+    );
 
-    // Code-graph readers go through `with_db` → empty-snapshot gate fires.
-    for (label, code) in [
-        (
-            "find_at_location (missing file)",
-            find_at_location(
-                &state,
-                &FindAtLocationArgs {
-                    file_path: "src/Nope.cs".into(),
-                    line: 1,
-                    kind: None,
-                },
-            )
-            .await
-            .unwrap_err()
-            .code,
-        ),
-        (
-            "list_callers",
-            list_callers(
-                &state,
-                &ByIdArgs {
-                    id: "cs:Nonexistent.Symbol".into(),
-                    filters: None,
-                    pagination: None,
-                },
-            )
-            .await
-            .unwrap_err()
-            .code,
-        ),
-    ] {
-        assert_eq!(
-            code,
-            McpErrorCode::EmptySnapshot,
-            "{label}: expected EMPTY_SNAPSHOT on an empty workspace"
-        );
-    }
+    // BEHAVIOR CHANGE, recorded here deliberately. This test used to assert
+    // that an empty `file_path` returned INVALID_INPUT even on an empty
+    // snapshot, because `find_at_location` validated its argument before
+    // reaching `with_db`. A migrated query cannot be called at all without a
+    // context, and obtaining one is what fails — so on an empty or not-yet-
+    // Ready snapshot the caller now sees EMPTY_SNAPSHOT / INDEX_UNAVAILABLE
+    // where it previously saw INVALID_INPUT.
+    //
+    // That ordering matches what `mcp-server` already requires ("tools other
+    // than get_index_status fail fast while not Ready") and it is the same
+    // ordering the CLI has always had. Argument validation is unchanged and
+    // still runs first once a snapshot is actually open — asserted in the
+    // symbol-search suite, which has one.
 
     // Findings-only tools go through `with_findings` (no empty-snapshot
     // gate, because findings are valid against an empty code graph), so
     // the InvalidInput contract for unknown ids still applies.
+    let view = state.open_query_allow_empty().expect("ready");
+    let ctx = state.query_ctx(&view);
     let err = find_predecessors(
-        &state,
+        &ctx,
         &FindingDagArgs {
             id: "fnd_does-not-exist".into(),
         },
     )
     .await
     .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::InvalidInput);
+    assert_eq!(err.code, QueryErrorCode::InvalidInput);
 
     let err = merge_findings(
-        &state,
+        &ctx,
         &MergeFindingsArgs {
             ids: vec!["fnd_aaa".into(), "fnd_bbb".into()],
             text: "synthesis".into(),
@@ -422,7 +393,7 @@ async fn tools_error_on_unknown_references() {
     )
     .await
     .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::InvalidInput);
+    assert_eq!(err.code, QueryErrorCode::InvalidInput);
     assert!(
         err.message.contains("fnd_aaa") && err.message.contains("fnd_bbb"),
         "both unknown ids reported: {}",
@@ -430,7 +401,7 @@ async fn tools_error_on_unknown_references() {
     );
 
     let err = store_finding(
-        &state,
+        &ctx,
         &StoreFindingArgs {
             text: "a claim".into(),
             parent_ids: Some(vec![
@@ -444,7 +415,7 @@ async fn tools_error_on_unknown_references() {
     )
     .await
     .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::InvalidInput);
+    assert_eq!(err.code, QueryErrorCode::InvalidInput);
     assert!(
         err.message.contains("fnd_missing") && err.message.contains("fnd_also-missing"),
         "both unknown finding parents reported: {}",

@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::cursor::{decode_cursor, DecodedCursor};
-use crate::error::{ConfigHint, McpError, McpErrorCode};
+use crate::error::{ConfigHint, QueryError, QueryErrorCode};
 use crate::types::{
     clamp_page, clamp_top_k_page, Filters, FoundSymbolRef, GraphSummary, LanguageGraph,
     LanguageStat, ListResponse, ManagerPackages, NotFoundHint, Pagination, RankedCodeHit,
@@ -13,39 +13,36 @@ use crate::types::{
 };
 use kenn_store::StatRow;
 
-use super::super::{
+use crate::ctx::QueryCtx;
+use crate::{
     db_to_mcp, defs_for_symbol, embed_query, found_to_ref, hit_to_ref, internal, parse_language,
-    split_public_id, symbol_row_to_ref, ServerState,
+    split_public_id, symbol_row_to_ref,
 };
 
 #[derive(Debug, Deserialize, Default, Serialize, JsonSchema)]
 pub struct GetWorkspaceOverviewArgs {}
 
 pub async fn get_workspace_overview(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     _: GetWorkspaceOverviewArgs,
-) -> Result<SingleResponse<WorkspaceInfo>, McpError> {
-    let config = state.config.clone();
-    let config_present = state.config_present();
-    state
-        .with_db_allow_empty(|h| async move {
-            // One read of the precomputed build-time stats; the overview only
-            // reshapes the rows — no DB aggregation (build-time-stats).
-            let rows = h.read.stats().await.map_err(internal)?;
-            let shaped = shape_stats(rows);
-            let config_hint = ConfigHint::classify(&config, shaped.symbol_count, config_present);
-            Ok(SingleResponse::found(WorkspaceInfo {
-                snapshot_id: h.snapshot_id.to_hex(),
-                indexed_at: h.indexed_at.clone(),
-                languages: shaped.languages,
-                packages_by_manager: shaped.packages_by_manager,
-                graph: shaped.graph,
-                file_count: shaped.file_count,
-                symbol_count: shaped.symbol_count,
-                config_hint,
-            }))
-        })
-        .await
+) -> Result<SingleResponse<WorkspaceInfo>, QueryError> {
+    let config = ctx.config.clone();
+    let config_present = ctx.config_present;
+    // One read of the precomputed build-time stats; the overview only
+    // reshapes the rows — no DB aggregation (build-time-stats).
+    let rows = ctx.read.stats().await.map_err(internal)?;
+    let shaped = shape_stats(rows);
+    let config_hint = ConfigHint::classify(&config, shaped.symbol_count, config_present);
+    Ok(SingleResponse::found(WorkspaceInfo {
+        snapshot_id: ctx.snapshot_id.to_hex(),
+        indexed_at: ctx.indexed_at.to_owned(),
+        languages: shaped.languages,
+        packages_by_manager: shaped.packages_by_manager,
+        graph: shaped.graph,
+        file_count: shaped.file_count,
+        symbol_count: shaped.symbol_count,
+        config_hint,
+    }))
 }
 
 /// Reshaped `stats` rows for [`WorkspaceInfo`]. Pure data-shuffling — the
@@ -168,56 +165,56 @@ pub struct GetSymbolArgs {
 }
 
 pub async fn get_symbol(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &GetSymbolArgs,
-) -> Result<SingleResponse<SymbolDetail>, McpError> {
+) -> Result<SingleResponse<SymbolDetail>, QueryError> {
     if args.id.is_empty() {
-        return Err(McpError::new(
-            McpErrorCode::InvalidInput,
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
             "get_symbol: empty id",
         ));
     }
     let (lang, native) = split_public_id(&args.id)?;
-    state
-        .with_db(|h| async move {
-            let row = h.read.fetch_symbol(lang, native).await.map_err(internal)?;
-            let Some(row) = row else {
-                return Ok(SingleResponse::missing(NotFoundHint::default()));
-            };
-            let docs = h
-                .read
-                .fetch_symbol_docs_row(row.id)
-                .await
-                .map_err(internal)?;
-            let parent = if row.enclosing_sym_id == 0 {
-                None
-            } else {
-                let p = h
-                    .read
-                    .fetch_symbol_by_short_id(row.enclosing_sym_id)
-                    .await
-                    .map_err(internal)?;
-                if let Some(p) = p {
-                    Some(symbol_row_to_ref(&h, &p, None, None).await)
-                } else {
-                    None
-                }
-            };
-            let defs = defs_for_symbol(&h, row.id).await;
-            let base = symbol_row_to_ref(&h, &row, None, None).await;
-            let docs = docs.unwrap_or(SymbolDocsRow {
-                sig: String::new(),
-                doc: String::new(),
-            });
-            Ok(SingleResponse::found(SymbolDetail {
-                base,
-                sig: docs.sig,
-                doc: docs.doc,
-                defined_in: parent,
-                defs,
-            }))
-        })
+    let row = ctx
+        .read
+        .fetch_symbol(lang, native)
         .await
+        .map_err(internal)?;
+    let Some(row) = row else {
+        return Ok(SingleResponse::missing(NotFoundHint::default()));
+    };
+    let docs = ctx
+        .read
+        .fetch_symbol_docs_row(row.id)
+        .await
+        .map_err(internal)?;
+    let parent = if row.enclosing_sym_id == 0 {
+        None
+    } else {
+        let p = ctx
+            .read
+            .fetch_symbol_by_short_id(row.enclosing_sym_id)
+            .await
+            .map_err(internal)?;
+        if let Some(p) = p {
+            Some(symbol_row_to_ref(ctx.read, &p, None, None).await)
+        } else {
+            None
+        }
+    };
+    let defs = defs_for_symbol(ctx.read, row.id).await;
+    let base = symbol_row_to_ref(ctx.read, &row, None, None).await;
+    let docs = docs.unwrap_or(SymbolDocsRow {
+        sig: String::new(),
+        doc: String::new(),
+    });
+    Ok(SingleResponse::found(SymbolDetail {
+        base,
+        sig: docs.sig,
+        doc: docs.doc,
+        defined_in: parent,
+        defs,
+    }))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -243,12 +240,12 @@ pub struct FindSimilarArgs {
 /// `EmbeddingUnavailable` when the symbol has no committed vector (vectors
 /// not built), so an agent does not mistake "not embedded" for "no matches."
 pub async fn find_similar(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &FindSimilarArgs,
-) -> Result<ListResponse<RankedCodeHit>, McpError> {
+) -> Result<ListResponse<RankedCodeHit>, QueryError> {
     if args.id.is_empty() {
-        return Err(McpError::new(
-            McpErrorCode::InvalidInput,
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
             "find_similar: empty id",
         ));
     }
@@ -258,54 +255,55 @@ pub async fn find_similar(
     let include_tests = args.include_tests.unwrap_or(false);
     // Captured (Copy) into the closure to make a missing vector transient while
     // the background embed pass is still building, terminal once it has settled.
-    let embed_stage = state.embed_stage.load();
-    state
-        .with_db(|h| async move {
-            let Some(source) = h.read.fetch_symbol(lang, native).await.map_err(internal)? else {
-                return Err(McpError::new(
-                    McpErrorCode::InvalidInput,
-                    format!("find_similar: no symbol with id `{native}` in the current index"),
-                ));
-            };
-            let Some(rows) = h
-                .read
-                .find_similar_symbols(source.id, limit, include_external, include_tests)
-                .await
-                .map_err(internal)?
-            else {
-                // No committed vector for this symbol — distinct from "no
-                // similar found." Transient while the embed pass is still
-                // building (retry), terminal once it has settled.
-                return Err(match embed_stage {
-                    crate::state::EmbedStage::Building => McpError::new(
-                        McpErrorCode::EmbedderStarting,
-                        format!(
-                            "find_similar: symbol `{native}` has no committed embedding yet — the \
+    let embed_stage = ctx.embed_stage;
+    let Some(source) = ctx
+        .read
+        .fetch_symbol(lang, native)
+        .await
+        .map_err(internal)?
+    else {
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
+            format!("find_similar: no symbol with id `{native}` in the current index"),
+        ));
+    };
+    let Some(rows) = ctx
+        .read
+        .find_similar_symbols(source.id, limit, include_external, include_tests)
+        .await
+        .map_err(internal)?
+    else {
+        // No committed vector for this symbol — distinct from "no
+        // similar found." Transient while the embed pass is still
+        // building (retry), terminal once it has settled.
+        return Err(match embed_stage {
+            crate::types::EmbedStage::Building => QueryError::new(
+                QueryErrorCode::EmbedderStarting,
+                format!(
+                    "find_similar: symbol `{native}` has no committed embedding yet — the \
                              embedding pass is still building (get_index_status: state=embedding); \
                              retry shortly"
-                        ),
-                    ),
-                    _ => McpError::new(
-                        McpErrorCode::EmbeddingUnavailable,
-                        format!(
-                            "find_similar: symbol `{native}` has no committed embedding — run \
+                ),
+            ),
+            _ => QueryError::new(
+                QueryErrorCode::EmbeddingUnavailable,
+                format!(
+                    "find_similar: symbol `{native}` has no committed embedding — run \
                              `kenn embed` to build vectors, or this symbol has no embeddable text"
-                        ),
-                    ),
-                });
-            };
-            let mut items: Vec<RankedCodeHit> = Vec::with_capacity(rows.len());
-            for r in rows {
-                let score = r.score;
-                let symbol: SymbolRow = r.into();
-                items.push(RankedCodeHit {
-                    symbol: symbol_row_to_ref(&h, &symbol, None, None).await,
-                    score,
-                });
-            }
-            Ok(ListResponse { items, next: None })
-        })
-        .await
+                ),
+            ),
+        });
+    };
+    let mut items: Vec<RankedCodeHit> = Vec::with_capacity(rows.len());
+    for r in rows {
+        let score = r.score;
+        let symbol: SymbolRow = r.into();
+        items.push(RankedCodeHit {
+            symbol: symbol_row_to_ref(ctx.read, &symbol, None, None).await,
+            score,
+        });
+    }
+    Ok(ListResponse { items, next: None })
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -324,9 +322,9 @@ pub struct SearchSymbolsArgs {
 /// when the agent has natural-language intent. For literal-name
 /// lookup use [`find_symbol`] instead.
 pub async fn search_symbols(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &SearchSymbolsArgs,
-) -> Result<ListResponse<SearchHitRef>, McpError> {
+) -> Result<ListResponse<SearchHitRef>, QueryError> {
     use crate::cursor::encode_topk_cursor;
     use crate::types::TOP_K_MATERIALIZE;
 
@@ -344,30 +342,26 @@ pub async fn search_symbols(
     // Continuation: serve from the cache, never touch the reader.
     // Cache stores already-converted RankedSymbolRef — no async hydration.
     if let Some(DecodedCursor::TopK { cache_id, offset }) = cursor {
-        return state
-            .with_db(|h| async move {
-                let (items, total) =
-                    state
-                        .search_symbols_cache
-                        .slice(cache_id, offset, page_size, h.snapshot_id)?;
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "items.len() ≤ page_size ≤ MAX_TOP_K_PAGE = 30"
-                )]
-                let new_offset = offset + items.len() as u32;
-                let next = if (new_offset as usize) < total {
-                    Some(encode_topk_cursor(cache_id, new_offset))
-                } else {
-                    None
-                };
-                Ok(ListResponse { items, next })
-            })
-            .await;
+        let (items, total) =
+            ctx.caches
+                .symbols
+                .slice(cache_id, offset, page_size, ctx.snapshot_id)?;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "items.len() ≤ page_size ≤ MAX_TOP_K_PAGE = 30"
+        )]
+        let new_offset = offset + items.len() as u32;
+        let next = if (new_offset as usize) < total {
+            Some(encode_topk_cursor(cache_id, new_offset))
+        } else {
+            None
+        };
+        return Ok(ListResponse { items, next });
     }
     // Any non-TopK cursor here is wrong shape for this tool.
     if cursor.is_some() {
-        return Err(McpError::new(
-            McpErrorCode::InvalidInput,
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
             "search_symbols: cursor is not a top-K cursor",
         ));
     }
@@ -375,49 +369,44 @@ pub async fn search_symbols(
     // Embed the query once, outside the reader closure — the store
     // accepts the resolved vector and stays free of `kenn_embed`.
     let query_vec = embed_query(&query).await?;
-    state
-        .with_db(|h| async move {
-            let rows = h
-                .read
-                .search_blended_hits(
-                    &query,
-                    query_vec.as_deref(),
-                    TOP_K_MATERIALIZE,
-                    include_external,
-                    include_tests,
-                )
-                .await
-                .map_err(db_to_mcp)?;
-            // Convert to the wire row type (does an async per-row hydration of refs).
-            let mut all_items: Vec<SearchHitRef> = Vec::with_capacity(rows.len());
-            for r in rows {
-                all_items.push(hit_to_ref(&h, r).await);
-            }
-            // Single-shot if everything fits in one response.
-            if all_items.len() <= page_size {
-                return Ok(ListResponse {
-                    items: all_items,
-                    next: None,
-                });
-            }
-            // Multi-page: stash, take first slice, emit cursor.
-            let (cache_id, first_page) = state.search_symbols_cache.put_and_take_first_page(
-                h.snapshot_id,
-                all_items,
-                page_size,
-            );
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "page_size ≤ MAX_TOP_K_PAGE = 30"
-            )]
-            let next_offset = page_size as u32;
-            let next = Some(encode_topk_cursor(cache_id, next_offset));
-            Ok(ListResponse {
-                items: first_page,
-                next,
-            })
-        })
+    let rows = ctx
+        .read
+        .search_blended_hits(
+            &query,
+            query_vec.as_deref(),
+            TOP_K_MATERIALIZE,
+            include_external,
+            include_tests,
+        )
         .await
+        .map_err(db_to_mcp)?;
+    // Convert to the wire row type (does an async per-row hydration of refs).
+    let mut all_items: Vec<SearchHitRef> = Vec::with_capacity(rows.len());
+    for r in rows {
+        all_items.push(hit_to_ref(ctx.read, r).await);
+    }
+    // Single-shot if everything fits in one response.
+    if all_items.len() <= page_size {
+        return Ok(ListResponse {
+            items: all_items,
+            next: None,
+        });
+    }
+    // Multi-page: stash, take first slice, emit cursor.
+    let (cache_id, first_page) =
+        ctx.caches
+            .symbols
+            .put_and_take_first_page(ctx.snapshot_id, all_items, page_size);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "page_size ≤ MAX_TOP_K_PAGE = 30"
+    )]
+    let next_offset = page_size as u32;
+    let next = Some(encode_topk_cursor(cache_id, next_offset));
+    Ok(ListResponse {
+        items: first_page,
+        next,
+    })
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -443,12 +432,12 @@ pub struct FindSymbolArgs {
 /// has a literal name; for natural-language search use
 /// [`search_symbols`].
 pub async fn find_symbol(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &FindSymbolArgs,
-) -> Result<ListResponse<FoundSymbolRef>, McpError> {
+) -> Result<ListResponse<FoundSymbolRef>, QueryError> {
     if args.name.is_empty() {
-        return Err(McpError::new(
-            McpErrorCode::InvalidInput,
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
             "find_symbol: empty name",
         ));
     }
@@ -457,24 +446,20 @@ pub async fn find_symbol(
     let include_tests = args.include_tests.unwrap_or(false);
     let name = args.name.clone();
     let kind_filter = args.kind.clone();
-    state
-        .with_db(|h| async move {
-            let mut hits = h
-                .read
-                .find_symbol_tiered(&name, limit, include_external, include_tests)
-                .await
-                .map_err(internal)?;
-            if let Some(kinds) = kind_filter {
-                let allowed: Vec<&'static str> = kinds.iter().map(|k| k.db_name()).collect();
-                hits.retain(|h| allowed.iter().any(|k| *k == h.symbol.kind));
-            }
-            let mut items: Vec<FoundSymbolRef> = Vec::with_capacity(hits.len());
-            for h_row in hits {
-                items.push(found_to_ref(&h, h_row).await);
-            }
-            Ok(ListResponse { items, next: None })
-        })
+    let mut hits = ctx
+        .read
+        .find_symbol_tiered(&name, limit, include_external, include_tests)
         .await
+        .map_err(internal)?;
+    if let Some(kinds) = kind_filter {
+        let allowed: Vec<&'static str> = kinds.iter().map(|k| k.db_name()).collect();
+        hits.retain(|ctx| allowed.iter().any(|k| *k == ctx.symbol.kind));
+    }
+    let mut items: Vec<FoundSymbolRef> = Vec::with_capacity(hits.len());
+    for h_row in hits {
+        items.push(found_to_ref(ctx.read, h_row).await);
+    }
+    Ok(ListResponse { items, next: None })
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -489,50 +474,46 @@ pub struct FindAtLocationArgs {
 }
 
 pub async fn find_at_location(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &FindAtLocationArgs,
-) -> Result<ListResponse<SymbolRef>, McpError> {
+) -> Result<ListResponse<SymbolRef>, QueryError> {
     if args.file_path.is_empty() {
-        return Err(McpError::new(
-            McpErrorCode::InvalidInput,
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
             "find_at_location: empty file_path",
         ));
     }
     let file_path = args.file_path.clone();
     let line = args.line;
     let kind = args.kind.clone();
-    state
-        .with_db(|h| async move {
-            // The named file must be in the current index — a path the
-            // agent gave but the index cannot see is a mistake worth
-            // surfacing, not a silently empty result.
-            let Some(file_id) = h
-                .read
-                .fetch_file_short_id(&file_path)
-                .await
-                .map_err(internal)?
-            else {
-                return Err(McpError::new(
-                    McpErrorCode::InvalidInput,
-                    format!("find_at_location: file not in the current index: {file_path}"),
-                ));
-            };
-            let mut rows = h
-                .read
-                .find_at_location(file_id, line)
-                .await
-                .map_err(internal)?;
-            if let Some(kinds) = &kind {
-                let allowed: Vec<&'static str> = kinds.iter().map(|k| k.db_name()).collect();
-                rows.retain(|r| allowed.iter().any(|k| *k == r.kind));
-            }
-            let mut items: Vec<SymbolRef> = Vec::with_capacity(rows.len());
-            for r in rows {
-                items.push(symbol_row_to_ref(&h, &r, None, None).await);
-            }
-            Ok(ListResponse { items, next: None })
-        })
+    // The named file must be in the current index — a path the
+    // agent gave but the index cannot see is a mistake worth
+    // surfacing, not a silently empty result.
+    let Some(file_id) = ctx
+        .read
+        .fetch_file_short_id(&file_path)
         .await
+        .map_err(internal)?
+    else {
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
+            format!("find_at_location: file not in the current index: {file_path}"),
+        ));
+    };
+    let mut rows = ctx
+        .read
+        .find_at_location(file_id, line)
+        .await
+        .map_err(internal)?;
+    if let Some(kinds) = &kind {
+        let allowed: Vec<&'static str> = kinds.iter().map(|k| k.db_name()).collect();
+        rows.retain(|r| allowed.iter().any(|k| *k == r.kind));
+    }
+    let mut items: Vec<SymbolRef> = Vec::with_capacity(rows.len());
+    for r in rows {
+        items.push(symbol_row_to_ref(ctx.read, &r, None, None).await);
+    }
+    Ok(ListResponse { items, next: None })
 }
 
 #[cfg(test)]

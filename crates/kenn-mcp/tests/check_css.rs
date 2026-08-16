@@ -7,12 +7,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kenn_mcp::snapshot_id_from_timestamp;
 use kenn_mcp::state::LifecycleState;
-use kenn_mcp::tools::{check_css, CheckCssArgs, ServerState};
+use kenn_mcp::tools::ServerState;
 use kenn_model::{
     DefRecord, EdgeProperties, EdgeRecord, FileRecord, Kind, Language, LinkGrade, SymbolRecord,
 };
+use kenn_query::snapshot_id_from_timestamp;
+use kenn_query::{check_css, CheckCssArgs};
 use kenn_store::api::WriteBatch;
 use kenn_store::{open_writer, reader_from_writer, DbReader, DbWriter, WriterOptions};
 use tempfile::TempDir;
@@ -195,8 +196,10 @@ async fn check_css_lists_orphans_with_mining_on() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = check_css(&state, &CheckCssArgs::default())
+    let resp = check_css(&ctx, &CheckCssArgs::default())
         .await
         .expect("check_css");
 
@@ -225,7 +228,7 @@ async fn check_css_lists_orphans_with_mining_on() {
 
     // category filter narrows to just stylesheets.
     let only_sheets = check_css(
-        &state,
+        &ctx,
         &CheckCssArgs {
             category: Some(vec!["orphan_stylesheet".into()]),
             limit: None,
@@ -241,7 +244,7 @@ async fn check_css_lists_orphans_with_mining_on() {
 
     // limit caps rows but total reports the full count.
     let capped = check_css(
-        &state,
+        &ctx,
         &CheckCssArgs {
             category: None,
             limit: Some(1),
@@ -255,7 +258,7 @@ async fn check_css_lists_orphans_with_mining_on() {
 
     // an unknown category is a loud error.
     check_css(
-        &state,
+        &ctx,
         &CheckCssArgs {
             category: Some(vec!["bogus".into()]),
             limit: None,
@@ -273,8 +276,10 @@ async fn check_css_skips_orphan_class_when_mining_off() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = check_css(&state, &CheckCssArgs::default())
+    let resp = check_css(&ctx, &CheckCssArgs::default())
         .await
         .expect("check_css");
 

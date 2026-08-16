@@ -1,9 +1,13 @@
-use super::*;
+//! The gate, and the lifecycle tools that read it.
+//!
+//! The helper tests that used to live here (`split_public_id`, `parse_kind`,
+//! `slice_lines`) moved to `kenn-query` with the helpers themselves.
 
-use kenn_model::Kind;
+use super::{get_index_status, wait_for_index, GetIndexStatusArgs, ServerState, WaitForIndexArgs};
+
 use kenn_store::Store;
 
-use crate::error::McpErrorCode;
+use kenn_query::QueryErrorCode;
 
 use tempfile::TempDir;
 
@@ -19,117 +23,27 @@ fn status_reports_indexing_when_no_live() {
     assert!(s.snapshot_id.is_none());
 }
 
+/// Both gates refuse a not-yet-`Ready` server, and both say
+/// `INDEX_UNAVAILABLE` rather than anything about the snapshot.
+///
+/// This replaces four tests that named four different tools
+/// (`get_symbol_rejects_empty_id`, …) but, once the gate moved onto
+/// `open_query`, all ran the identical two lines and called no tool at all —
+/// four names for one assertion. The argument validation those names described
+/// is now covered where it happens, against a `Ready` server, in
+/// `tests/symbol_search.rs`.
+///
+/// Ordering matters here: a caller who cannot be served at all must not first
+/// be told something about a snapshot it was never going to read.
 #[tokio::test(flavor = "multi_thread")]
-async fn other_tools_index_unavailable_when_no_live() {
+async fn both_gates_report_index_unavailable_when_no_live() {
     let dir = TempDir::new().unwrap();
     let _ = Store::open_default(dir.path()).unwrap();
     let state = ServerState::new(dir.path());
-    let err = get_workspace_overview(&state, GetWorkspaceOverviewArgs::default())
-        .await
-        .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::IndexUnavailable);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn get_symbol_rejects_empty_id() {
-    let dir = TempDir::new().unwrap();
-    let state = ServerState::new(dir.path());
-    let err = get_symbol(&state, &GetSymbolArgs { id: String::new() })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::InvalidInput);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn get_symbol_rejects_id_without_language_prefix() {
-    let dir = TempDir::new().unwrap();
-    let state = ServerState::new(dir.path());
-    let err = get_symbol(&state, &GetSymbolArgs { id: "Foo".into() })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::InvalidInput);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn find_symbol_rejects_empty_name() {
-    let dir = TempDir::new().unwrap();
-    let state = ServerState::new(dir.path());
-    let err = find_symbol(
-        &state,
-        &FindSymbolArgs {
-            name: String::new(),
-            kind: None,
-            page_size: None,
-            include_tests: None,
-            include_external: None,
-        },
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.code, McpErrorCode::InvalidInput);
-}
-
-#[test]
-fn split_public_id_returns_db_language_and_full_id() {
-    assert_eq!(
-        split_public_id("rs:foo::bar").unwrap(),
-        ("rust", "rs:foo::bar")
-    );
-    assert_eq!(
-        split_public_id("cs:Models.Order").unwrap(),
-        ("csharp", "cs:Models.Order")
-    );
-    split_public_id(":empty-lang").unwrap_err();
-    split_public_id("no-colon").unwrap_err();
-    split_public_id("xx:unknown").unwrap_err();
-}
-
-/// `parse_kind` is the tool-argument decoder used by every tool
-/// that takes a `kind` filter (`find_symbol`, `search_symbols`, etc.).
-/// Round-trip every `Kind` variant through `db_name → parse_kind`
-/// and cover the `None` arm with unknown strings.
-#[test]
-fn parse_kind_decodes_every_variant() {
-    for k in [
-        Kind::Package,
-        Kind::Module,
-        Kind::Namespace,
-        Kind::Class,
-        Kind::Struct,
-        Kind::Interface,
-        Kind::Trait,
-        Kind::Enum,
-        Kind::EnumMember,
-        Kind::TypeAlias,
-        Kind::Method,
-        Kind::Function,
-        Kind::Constructor,
-        Kind::Destructor,
-        Kind::Operator,
-        Kind::Field,
-        Kind::Property,
-        Kind::Constant,
-        Kind::Variable,
-        Kind::Parameter,
-        Kind::TypeParameter,
-        Kind::Macro,
-    ] {
-        assert_eq!(parse_kind(k.db_name()), Some(k), "decode {k:?}");
-    }
-    for unknown in ["", "Class", "klass", "package_", " package"] {
-        assert!(parse_kind(unknown).is_none(), "{unknown:?} must not decode");
-    }
-}
-
-/// `slice_lines` consumes 1-based input per `source-data-model` D1.
-/// A symbol whose `def_range.start_line = 1` MUST yield the file's
-/// first line — not `""` and not the line above (impossible anyway).
-#[test]
-fn slice_lines_returns_first_line_for_start_line_1() {
-    let content = "first line\nsecond line\nthird line\n";
-    assert_eq!(super::slice_lines(content, 1, 1), "first line");
-    assert_eq!(super::slice_lines(content, 1, 2), "first line\nsecond line");
-    assert_eq!(super::slice_lines(content, 2, 3), "second line\nthird line");
+    let err = state.open_query_allow_empty().err().expect("not ready");
+    assert_eq!(err.code, QueryErrorCode::IndexUnavailable);
+    let err = state.open_query().await.err().expect("not ready");
+    assert_eq!(err.code, QueryErrorCode::IndexUnavailable);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -4,15 +4,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::cursor::{decode_cursor, encode_list_cursor, DecodedCursor};
-use crate::error::{McpError, McpErrorCode};
+use crate::error::{QueryError, QueryErrorCode};
 use crate::types::{
     clamp_page, FileRef, Filters, ImportDirection, ListResponse, Pagination, SymbolRef,
 };
 
-use super::super::{
-    ensure_cursor_matches, internal, parse_language, split_public_id, symbol_row_to_ref,
-    ServerState,
-};
+use crate::ctx::QueryCtx;
+use crate::{ensure_cursor_matches, internal, parse_language, split_public_id, symbol_row_to_ref};
 
 // ── NAVIGATE / SCOPE  (uniform args + dispatch) ─────────────────────────────
 
@@ -26,11 +24,11 @@ pub struct ByIdArgs {
 }
 
 async fn list_relation(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ByIdArgs,
     relation: &'static str,
     direction: RelationDirection,
-) -> Result<ListResponse<SymbolRef>, McpError> {
+) -> Result<ListResponse<SymbolRef>, QueryError> {
     let limit = clamp_page(args.pagination.as_ref().and_then(|p| p.page_size));
     let filters = args.filters.clone().unwrap_or_default();
     // Universal default: exclude test and external symbols unless the caller
@@ -60,51 +58,52 @@ async fn list_relation(
     };
     let (lang, native) = split_public_id(&args.id)?;
     let native = native.to_string();
-    state
-        .with_db(|h| async move {
-            if let Some(c) = cursor.as_ref() {
-                ensure_cursor_matches(&h, c)?;
-            }
-            let row = h.read.fetch_symbol(lang, &native).await.map_err(internal)?;
-            let Some(target) = row else {
-                return Err(McpError::new(
-                    McpErrorCode::InvalidInput,
-                    format!(
-                        "no symbol with id `{native}` in the current index — \
-                         use find_symbol or search_symbols to locate it"
-                    ),
-                ));
-            };
-            let cursor_after = match cursor {
-                Some(DecodedCursor::List { last_short_id, .. }) => Some(last_short_id),
-                _ => None,
-            };
-            let (rows, total) = match direction {
-                RelationDirection::Inbound => {
-                    h.read
-                        .list_inbound(target.id, relation, limit, cursor_after, &narrow)
-                        .await
-                }
-                RelationDirection::Outbound => {
-                    h.read
-                        .list_outbound(target.id, relation, limit, cursor_after, &narrow)
-                        .await
-                }
-            }
-            .map_err(internal)?;
-            let returned = u32::try_from(rows.len()).unwrap_or(u32::MAX);
-            let next = if returned == limit && u64::from(returned) < total {
-                rows.last().map(|r| encode_list_cursor(h.snapshot_id, r.id))
-            } else {
-                None
-            };
-            let mut items: Vec<SymbolRef> = Vec::with_capacity(rows.len());
-            for r in rows {
-                items.push(symbol_row_to_ref(&h, &r, None, None).await);
-            }
-            Ok(ListResponse { items, next })
-        })
+    if let Some(c) = cursor.as_ref() {
+        ensure_cursor_matches(ctx.snapshot_id, c)?;
+    }
+    let row = ctx
+        .read
+        .fetch_symbol(lang, &native)
         .await
+        .map_err(internal)?;
+    let Some(target) = row else {
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
+            format!(
+                "no symbol with id `{native}` in the current index — \
+                         use find_symbol or search_symbols to locate it"
+            ),
+        ));
+    };
+    let cursor_after = match cursor {
+        Some(DecodedCursor::List { last_short_id, .. }) => Some(last_short_id),
+        _ => None,
+    };
+    let (rows, total) = match direction {
+        RelationDirection::Inbound => {
+            ctx.read
+                .list_inbound(target.id, relation, limit, cursor_after, &narrow)
+                .await
+        }
+        RelationDirection::Outbound => {
+            ctx.read
+                .list_outbound(target.id, relation, limit, cursor_after, &narrow)
+                .await
+        }
+    }
+    .map_err(internal)?;
+    let returned = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    let next = if returned == limit && u64::from(returned) < total {
+        rows.last()
+            .map(|r| encode_list_cursor(ctx.snapshot_id, r.id))
+    } else {
+        None
+    };
+    let mut items: Vec<SymbolRef> = Vec::with_capacity(rows.len());
+    for r in rows {
+        items.push(symbol_row_to_ref(ctx.read, &r, None, None).await);
+    }
+    Ok(ListResponse { items, next })
 }
 
 #[derive(Copy, Clone)]
@@ -114,28 +113,28 @@ enum RelationDirection {
 }
 
 pub async fn list_callers(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ByIdArgs,
-) -> Result<ListResponse<SymbolRef>, McpError> {
-    list_relation(state, args, "calls", RelationDirection::Inbound).await
+) -> Result<ListResponse<SymbolRef>, QueryError> {
+    list_relation(ctx, args, "calls", RelationDirection::Inbound).await
 }
 pub async fn list_callees(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ByIdArgs,
-) -> Result<ListResponse<SymbolRef>, McpError> {
-    list_relation(state, args, "calls", RelationDirection::Outbound).await
+) -> Result<ListResponse<SymbolRef>, QueryError> {
+    list_relation(ctx, args, "calls", RelationDirection::Outbound).await
 }
 pub async fn list_implementers(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ByIdArgs,
-) -> Result<ListResponse<SymbolRef>, McpError> {
-    list_relation(state, args, "implements", RelationDirection::Inbound).await
+) -> Result<ListResponse<SymbolRef>, QueryError> {
+    list_relation(ctx, args, "implements", RelationDirection::Inbound).await
 }
 pub async fn list_overrides(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ByIdArgs,
-) -> Result<ListResponse<SymbolRef>, McpError> {
-    list_relation(state, args, "overrides", RelationDirection::Inbound).await
+) -> Result<ListResponse<SymbolRef>, QueryError> {
+    list_relation(ctx, args, "overrides", RelationDirection::Inbound).await
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -152,9 +151,9 @@ pub struct ListUsagesArgs {
 }
 
 pub async fn list_usages(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ListUsagesArgs,
-) -> Result<ListResponse<SymbolRef>, McpError> {
+) -> Result<ListResponse<SymbolRef>, QueryError> {
     let kinds = args.edge_kinds.clone().unwrap_or_else(|| {
         vec![
             EdgeKind::Calls,
@@ -178,7 +177,7 @@ pub async fn list_usages(
             filters: args.filters.clone(),
             pagination: None,
         };
-        let resp = list_relation(state, &by_id, k.db_name(), RelationDirection::Inbound).await?;
+        let resp = list_relation(ctx, &by_id, k.db_name(), RelationDirection::Inbound).await?;
         for mut item in resp.items {
             if k != EdgeKind::FieldAccess && args.op_filter.is_some() {
                 // ignore op_filter for non-field_access kinds
@@ -198,22 +197,21 @@ pub async fn list_usages(
 }
 
 pub async fn list_correspondences(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ByIdArgs,
-) -> Result<ListResponse<SymbolRef>, McpError> {
-    let inbound = list_relation(state, args, "corresponds_to", RelationDirection::Inbound).await?;
-    let outbound =
-        list_relation(state, args, "corresponds_to", RelationDirection::Outbound).await?;
+) -> Result<ListResponse<SymbolRef>, QueryError> {
+    let inbound = list_relation(ctx, args, "corresponds_to", RelationDirection::Inbound).await?;
+    let outbound = list_relation(ctx, args, "corresponds_to", RelationDirection::Outbound).await?;
     let mut items = inbound.items;
     items.extend(outbound.items);
     Ok(ListResponse { items, next: None })
 }
 
 pub async fn list_in_scope(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ByIdArgs,
-) -> Result<ListResponse<SymbolRef>, McpError> {
-    list_relation(state, args, "defined_in", RelationDirection::Inbound).await
+) -> Result<ListResponse<SymbolRef>, QueryError> {
+    list_relation(ctx, args, "defined_in", RelationDirection::Inbound).await
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -237,9 +235,9 @@ pub enum ImportDirectionArg {
 }
 
 pub async fn list_imports(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ListImportsArgs,
-) -> Result<ListResponse<SymbolRef>, McpError> {
+) -> Result<ListResponse<SymbolRef>, QueryError> {
     let by_id = ByIdArgs {
         id: args.id.clone(),
         filters: args.filters.clone(),
@@ -247,15 +245,14 @@ pub async fn list_imports(
     };
     match args.direction {
         ImportDirectionArg::Outbound => {
-            list_relation(state, &by_id, "imports", RelationDirection::Outbound).await
+            list_relation(ctx, &by_id, "imports", RelationDirection::Outbound).await
         }
         ImportDirectionArg::Inbound => {
-            list_relation(state, &by_id, "imports", RelationDirection::Inbound).await
+            list_relation(ctx, &by_id, "imports", RelationDirection::Inbound).await
         }
         ImportDirectionArg::Both => {
-            let mut o =
-                list_relation(state, &by_id, "imports", RelationDirection::Outbound).await?;
-            let mut i = list_relation(state, &by_id, "imports", RelationDirection::Inbound).await?;
+            let mut o = list_relation(ctx, &by_id, "imports", RelationDirection::Outbound).await?;
+            let mut i = list_relation(ctx, &by_id, "imports", RelationDirection::Inbound).await?;
             for item in &mut o.items {
                 item.direction = Some(ImportDirection::Outbound);
             }
@@ -272,9 +269,9 @@ pub async fn list_imports(
 }
 
 pub async fn list_module_files(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ByIdArgs,
-) -> Result<ListResponse<FileRef>, McpError> {
+) -> Result<ListResponse<FileRef>, QueryError> {
     let limit = clamp_page(args.pagination.as_ref().and_then(|p| p.page_size));
     let cursor = if let Some(c) = args.pagination.as_ref().and_then(|p| p.cursor.as_ref()) {
         Some(decode_cursor(c)?)
@@ -283,42 +280,44 @@ pub async fn list_module_files(
     };
     let (lang, native) = split_public_id(&args.id)?;
     let native = native.to_string();
-    state
-        .with_db(|h| async move {
-            if let Some(c) = cursor.as_ref() {
-                ensure_cursor_matches(&h, c)?;
-            }
-            let Some(module) = h.read.fetch_symbol(lang, &native).await.map_err(internal)? else {
-                return Err(McpError::new(
-                    McpErrorCode::InvalidInput,
-                    format!("no module/package with id `{native}` in the current index"),
-                ));
-            };
-            let cursor_after = match cursor {
-                Some(DecodedCursor::List { last_short_id, .. }) => Some(last_short_id),
-                _ => None,
-            };
-            let (rows, total) = h
-                .read
-                .list_module_files(module.id, limit, cursor_after)
-                .await
-                .map_err(internal)?;
-            let returned = u32::try_from(rows.len()).unwrap_or(u32::MAX);
-            let next = if returned == limit && u64::from(returned) < total {
-                rows.last().map(|r| encode_list_cursor(h.snapshot_id, r.id))
-            } else {
-                None
-            };
-            let items: Vec<FileRef> = rows
-                .into_iter()
-                .map(|r| FileRef {
-                    path: r.path,
-                    language: parse_language(&r.language).unwrap_or(Language::Rust),
-                    test: r.test,
-                    external: r.external,
-                })
-                .collect();
-            Ok(ListResponse { items, next })
-        })
+    if let Some(c) = cursor.as_ref() {
+        ensure_cursor_matches(ctx.snapshot_id, c)?;
+    }
+    let Some(module) = ctx
+        .read
+        .fetch_symbol(lang, &native)
         .await
+        .map_err(internal)?
+    else {
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
+            format!("no module/package with id `{native}` in the current index"),
+        ));
+    };
+    let cursor_after = match cursor {
+        Some(DecodedCursor::List { last_short_id, .. }) => Some(last_short_id),
+        _ => None,
+    };
+    let (rows, total) = ctx
+        .read
+        .list_module_files(module.id, limit, cursor_after)
+        .await
+        .map_err(internal)?;
+    let returned = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    let next = if returned == limit && u64::from(returned) < total {
+        rows.last()
+            .map(|r| encode_list_cursor(ctx.snapshot_id, r.id))
+    } else {
+        None
+    };
+    let items: Vec<FileRef> = rows
+        .into_iter()
+        .map(|r| FileRef {
+            path: r.path,
+            language: parse_language(&r.language).unwrap_or(Language::Rust),
+            test: r.test,
+            external: r.external,
+        })
+        .collect();
+    Ok(ListResponse { items, next })
 }

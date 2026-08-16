@@ -9,3 +9,4 @@
 {"op":"attach","anchor":"crates/kenn-analyze/src/lib.rs","ts":"2026-06-11T11:24:19.962464Z"}
 {"op":"rename","from":"crates/kenn-mcp/src/tools/query.rs","to":"crates/kenn-mcp/src/tools/query/lookup.rs","ts":"2026-07-15T16:47:33.17244Z"}
 {"op":"attach","anchor":"crates/kenn-indexer/src/aggregate.rs","ts":"2026-07-26T08:08:32.722543Z","sha":"a7f50debf5feb765"}
+{"op":"rename","from":"crates/kenn-mcp/src/tools/query/lookup.rs","to":"crates/kenn-query/src/symbols/lookup.rs","ts":"2026-08-15T11:12:38.930757Z"}

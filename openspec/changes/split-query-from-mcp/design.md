@@ -79,17 +79,28 @@ from `ReadyView` to `QueryCtx`. `with_db_allow_empty` maps to `open_allow_empty`
 the same way.
 
 `QueryCtx` carries the reader, the snapshot id, and only what queries actually
-reach for on `ServerState` today — counted, not guessed:
+reach for on `ServerState` — counted by name, because most calls wrap as
+`state\n    .with_db(` and a receiver-anchored regex undercounts them badly (it
+reported 1 `with_db` where there are 21):
 
 | field | sites in `tools/` (minus `lifecycle.rs`) |
 |---|---|
+| findings store (`with_findings_read`/`_write`) | 24 |
 | `source_root` | 6 |
-| `embed_stage` / `embed_error` | 5 |
-| `config` | 2 |
-| `is_stale` | 2 |
+| `search_symbols_cache` / `search_findings_cache` | 2 / 2 |
+| `embed_stage` | 2 |
+| `config` / `config_present` | 2 |
+| `layout` | 1 |
+| `embed_error`, `is_stale` | **0** — the first estimate was wrong |
+
+The embedder needs no field: it is process-global, reached through
+`tools/support.rs`.
 
 Everything else on `ServerState` — `lifecycle`, `watcher`, `watcher_state`,
-`peer`, `layout`, `model_id` — has no query reader and stays.
+`peer`, `model_id` — has **zero** query readers, in production code. The only
+appearances outside `lifecycle.rs` are module docs and `tests.rs` setup. That is
+the measurement the whole split rests on, so it is worth stating as a count
+rather than as a claim.
 
 The payoff is that a query test becomes:
 
@@ -128,12 +139,17 @@ first, in place, while everything is still one crate and the compiler can
 enumerate call sites:
 
 ```
-1. peer → indexing/            small, isolates the one rmcp field on ServerState
-2. QueryCtx, in place          27 with_db sites; queries stop seeing ServerState
-3. McpError → QueryError       rename in place; json_rpc_code → server/errors.rs
-4. move files to kenn-query    now a mechanical move; nothing left points back
-5. register the 4 axis tools   the payoff — atlas-tables 3.5
+1. QueryCtx, in place          21 with_db sites; queries stop seeing ServerState
+2. McpError → QueryError       rename in place; json_rpc_code → server/errors.rs
+3. move files to kenn-query    now a mechanical move; nothing left points back
+4. register the 4 axis tools   the payoff — atlas-tables 3.5
 ```
+
+An earlier draft opened with "move `peer` off `ServerState`". That step was dropped
+once the inventory was taken: it assumed `ServerState` moves to `kenn-query` and
+would drag its one rmcp-typed field along. `ServerState` does not move. After
+step 1 its only users are `server/`, `indexing/`, and `tools/lifecycle.rs` — all of
+which stay in `kenn-mcp` — so `peer` stays too, and no query ever sees it.
 
 Steps 1–3 leave a working tree at every commit and are individually revertible.
 Step 4 cannot compile halfway, which is why it is last and why it is nothing but

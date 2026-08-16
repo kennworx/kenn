@@ -12,9 +12,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{McpError, McpErrorCode};
-use crate::tools::support::internal;
-use crate::tools::ServerState;
+use crate::ctx::QueryCtx;
+use crate::error::{QueryError, QueryErrorCode};
+use crate::support::internal;
 
 /// Default / maximum number of findings returned in one call.
 const DEFAULT_LIMIT: u32 = 100;
@@ -60,7 +60,7 @@ pub struct CheckCssResponse {
 }
 
 /// Validate a category name, erroring on an unknown one so a typo fails loudly.
-fn want(categories: Option<&Vec<String>>) -> Result<(bool, bool), McpError> {
+fn want(categories: Option<&Vec<String>>) -> Result<(bool, bool), QueryError> {
     let Some(names) = categories else {
         return Ok((true, true));
     };
@@ -70,8 +70,8 @@ fn want(categories: Option<&Vec<String>>) -> Result<(bool, bool), McpError> {
             "orphan_class" => classes = true,
             "orphan_stylesheet" => sheets = true,
             other => {
-                return Err(McpError::new(
-                    McpErrorCode::InvalidInput,
+                return Err(QueryError::new(
+                    QueryErrorCode::InvalidInput,
                     format!(
                         "check_css: unknown category `{other}` — use orphan_class|orphan_stylesheet"
                     ),
@@ -84,40 +84,36 @@ fn want(categories: Option<&Vec<String>>) -> Result<(bool, bool), McpError> {
 
 /// List dead CSS in the current index, bounded + category-filtered.
 pub async fn check_css(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &CheckCssArgs,
-) -> Result<CheckCssResponse, McpError> {
+) -> Result<CheckCssResponse, QueryError> {
     let limit = args.limit.map_or(DEFAULT_LIMIT, |l| l.clamp(1, MAX_LIMIT));
     let (want_classes, want_sheets) = want(args.category.as_ref())?;
-    state
-        .with_db(|h| async move {
-            let (rows, counts) = h
-                .read
-                .scan_css_health(want_classes, want_sheets, limit)
-                .await
-                .map_err(internal)?;
-            let total = counts.orphan_classes + counts.orphan_stylesheets;
-            let returned = rows.len();
-            let note = (want_classes && !counts.usage_mining_on).then(|| {
-                "orphan_class skipped: no class-usage mining ran — set [language.css] \
-                 usage_sources to map where classes are used"
-                    .to_string()
-            });
-            let findings = rows
-                .into_iter()
-                .map(|r| CssDiagnostic {
-                    category: r.category,
-                    pub_id: r.pub_id,
-                    location: r.location,
-                })
-                .collect();
-            Ok(CheckCssResponse {
-                total,
-                returned,
-                truncated: total > returned as u64,
-                note,
-                findings,
-            })
-        })
+    let (rows, counts) = ctx
+        .read
+        .scan_css_health(want_classes, want_sheets, limit)
         .await
+        .map_err(internal)?;
+    let total = counts.orphan_classes + counts.orphan_stylesheets;
+    let returned = rows.len();
+    let note = (want_classes && !counts.usage_mining_on).then(|| {
+        "orphan_class skipped: no class-usage mining ran — set [language.css] \
+                 usage_sources to map where classes are used"
+            .to_string()
+    });
+    let findings = rows
+        .into_iter()
+        .map(|r| CssDiagnostic {
+            category: r.category,
+            pub_id: r.pub_id,
+            location: r.location,
+        })
+        .collect();
+    Ok(CheckCssResponse {
+        total,
+        returned,
+        truncated: total > returned as u64,
+        note,
+        findings,
+    })
 }

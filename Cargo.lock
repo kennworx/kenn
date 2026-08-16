@@ -2645,6 +2645,7 @@ dependencies = [
  "kenn-indexer",
  "kenn-mcp",
  "kenn-model",
+ "kenn-query",
  "kenn-server",
  "kenn-store",
  "rusqlite",
@@ -2770,6 +2771,7 @@ dependencies = [
  "kenn-config",
  "kenn-indexer",
  "kenn-model",
+ "kenn-query",
  "kenn-store",
  "lru",
  "metrics",
@@ -2795,6 +2797,25 @@ dependencies = [
  "strum",
  "thiserror 2.0.18",
  "toml",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "kenn-query"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "kenn-config",
+ "kenn-indexer",
+ "kenn-model",
+ "kenn-store",
+ "lru",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
  "xxhash-rust",
 ]
 

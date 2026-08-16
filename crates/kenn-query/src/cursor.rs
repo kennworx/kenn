@@ -41,7 +41,7 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use xxhash_rust::xxh64::xxh64;
 
-use crate::error::{McpError, McpErrorCode};
+use crate::error::{QueryError, QueryErrorCode};
 
 pub const SNAPSHOT_ID_BYTES: usize = 6;
 pub const LIST_CURSOR_BYTES: usize = SNAPSHOT_ID_BYTES + 4;
@@ -139,10 +139,10 @@ pub fn encode_topk_cursor(cache_id: CacheId, offset: u32) -> String {
     URL_SAFE_NO_PAD.encode(buf)
 }
 
-pub fn decode_cursor(s: &str) -> Result<DecodedCursor, McpError> {
+pub fn decode_cursor(s: &str) -> Result<DecodedCursor, QueryError> {
     let bytes = URL_SAFE_NO_PAD.decode(s.as_bytes()).map_err(|e| {
-        McpError::new(
-            McpErrorCode::InvalidInput,
+        QueryError::new(
+            QueryErrorCode::InvalidInput,
             format!("cursor: not valid base64: {e}"),
         )
     })?;
@@ -179,8 +179,8 @@ pub fn decode_cursor(s: &str) -> Result<DecodedCursor, McpError> {
                 last_short_id: u32::from_le_bytes(id),
             })
         }
-        other => Err(McpError::new(
-            McpErrorCode::InvalidInput,
+        other => Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
             format!(
                 "cursor: wrong length {other}, expected \
                  {LIST_CURSOR_BYTES}, {USAGES_CURSOR_BYTES}, or {TOPK_CURSOR_BYTES}"
@@ -265,19 +265,19 @@ mod tests {
     fn old_14_byte_search_blob_no_longer_decodes() {
         let s = URL_SAFE_NO_PAD.encode([0u8; 14]);
         let err = decode_cursor(&s).unwrap_err();
-        assert_eq!(err.code, McpErrorCode::InvalidInput);
+        assert_eq!(err.code, QueryErrorCode::InvalidInput);
     }
 
     #[test]
     fn invalid_base64_returns_invalid_input() {
         let err = decode_cursor("!!!not-base64!!!").unwrap_err();
-        assert_eq!(err.code, McpErrorCode::InvalidInput);
+        assert_eq!(err.code, QueryErrorCode::InvalidInput);
     }
 
     #[test]
     fn wrong_length_returns_invalid_input() {
         let s = URL_SAFE_NO_PAD.encode([0u8; 5]);
         let err = decode_cursor(&s).unwrap_err();
-        assert_eq!(err.code, McpErrorCode::InvalidInput);
+        assert_eq!(err.code, QueryErrorCode::InvalidInput);
     }
 }

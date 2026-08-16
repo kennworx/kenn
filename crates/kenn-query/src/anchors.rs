@@ -6,10 +6,11 @@ use kenn_store::{AnchorEvent, Outcome, Timestamp};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{McpError, McpErrorCode};
+use crate::error::{QueryError, QueryErrorCode};
 use crate::types::{ListResponse, RankedFindingView, TOP_K_MATERIALIZE};
 
-use super::{db_to_mcp, embed_query, finding_to_view, internal, ServerState};
+use crate::ctx::QueryCtx;
+use crate::{db_to_mcp, embed_query, finding_to_view, internal};
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct FindDirectivesArgs {
@@ -30,12 +31,12 @@ pub struct FindDirectivesArgs {
 /// hit carries a `stale` flag. Degrades to anchor-only when the embedder is
 /// cold — directives work before the index is built.
 pub async fn find_directives(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &FindDirectivesArgs,
-) -> Result<ListResponse<RankedFindingView>, McpError> {
+) -> Result<ListResponse<RankedFindingView>, QueryError> {
     if args.paths.is_empty() {
-        return Err(McpError::new(
-            McpErrorCode::InvalidInput,
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
             "find_directives: empty paths",
         ));
     }
@@ -45,39 +46,34 @@ pub async fn find_directives(
     let query_vec = match args.query.as_deref() {
         Some(q) if !q.is_empty() => match embed_query(q).await {
             Ok(v) => v,
-            Err(e) if e.code == McpErrorCode::EmbedderStarting => None,
+            Err(e) if e.code == QueryErrorCode::EmbedderStarting => None,
             Err(e) => return Err(e),
         },
         _ => None,
     };
     let now = Timestamp::now();
-    state
-        .with_findings_read(|h, store| {
-            Box::pin(async move {
-                let resolver = h.read.code_node_resolver().await.map_err(internal)?;
-                let hits = store
-                    .find_directives(
-                        &paths,
-                        query_vec.as_deref(),
-                        now,
-                        TOP_K_MATERIALIZE as usize,
-                        &resolver,
-                    )
-                    .await
-                    .map_err(db_to_mcp)?;
-                Ok(ListResponse {
-                    items: hits
-                        .into_iter()
-                        .map(|hit| RankedFindingView {
-                            finding: finding_to_view(hit.finding, hit.stale, hit.drifted),
-                            score: f64::from(hit.score),
-                        })
-                        .collect(),
-                    next: None,
-                })
-            })
-        })
+    let store = ctx.findings_read().await?;
+    let resolver = ctx.read.code_node_resolver().await.map_err(internal)?;
+    let hits = store
+        .find_directives(
+            &paths,
+            query_vec.as_deref(),
+            now,
+            TOP_K_MATERIALIZE as usize,
+            &resolver,
+        )
         .await
+        .map_err(db_to_mcp)?;
+    Ok(ListResponse {
+        items: hits
+            .into_iter()
+            .map(|hit| RankedFindingView {
+                finding: finding_to_view(hit.finding, hit.stale, hit.drifted),
+                score: f64::from(hit.score),
+            })
+            .collect(),
+        next: None,
+    })
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -121,42 +117,37 @@ pub struct CheckAnchorsResponse {
 /// `rename`/`detach` can repair them before a commit. v1 anchors are file/dir
 /// paths, checked against the workspace — no index needed.
 pub async fn check_anchors(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     _args: &CheckAnchorsArgs,
-) -> Result<CheckAnchorsResponse, McpError> {
-    state
-        .with_findings_read(|_h, store| {
-            Box::pin(async move {
-                let health = store.check_anchors().await.map_err(db_to_mcp)?;
-                Ok(CheckAnchorsResponse {
-                    broken: health
-                        .broken
-                        .into_iter()
-                        .map(|b| AnchorEntry {
-                            finding_id: b.finding_id,
-                            anchors: b.anchors,
-                        })
-                        .collect(),
-                    drifted: health
-                        .drifted
-                        .into_iter()
-                        .map(|d| AnchorEntry {
-                            finding_id: d.finding_id,
-                            anchors: d.anchors,
-                        })
-                        .collect(),
-                    unverified: health
-                        .unverified
-                        .into_iter()
-                        .map(|u| AnchorEntry {
-                            finding_id: u.finding_id,
-                            anchors: u.anchors,
-                        })
-                        .collect(),
-                })
+) -> Result<CheckAnchorsResponse, QueryError> {
+    let store = ctx.findings_read().await?;
+    let health = store.check_anchors().await.map_err(db_to_mcp)?;
+    Ok(CheckAnchorsResponse {
+        broken: health
+            .broken
+            .into_iter()
+            .map(|b| AnchorEntry {
+                finding_id: b.finding_id,
+                anchors: b.anchors,
             })
-        })
-        .await
+            .collect(),
+        drifted: health
+            .drifted
+            .into_iter()
+            .map(|d| AnchorEntry {
+                finding_id: d.finding_id,
+                anchors: d.anchors,
+            })
+            .collect(),
+        unverified: health
+            .unverified
+            .into_iter()
+            .map(|u| AnchorEntry {
+                finding_id: u.finding_id,
+                anchors: u.anchors,
+            })
+            .collect(),
+    })
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -185,30 +176,46 @@ pub struct RecordAnchorResponse {
 /// Append an anchor event to a finding's `<id>.anchor.jsonl` log. A repeat
 /// `attach` to a path already in the set is the liveness signal.
 pub async fn record_anchor(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &RecordAnchorArgs,
-) -> Result<RecordAnchorResponse, McpError> {
+) -> Result<RecordAnchorResponse, QueryError> {
     if args.finding_id.is_empty() {
-        return Err(McpError::new(
-            McpErrorCode::InvalidInput,
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
             "record_anchor: empty finding_id",
         ));
     }
-    let ts = Timestamp::now();
-    let need = |field: &str, v: &Option<String>| -> Result<String, McpError> {
+    let event = anchor_event(args, Timestamp::now(), &ctx.source_root)?;
+    let finding_id = args.finding_id.clone();
+    let store = ctx.findings_write().await?;
+    record_event(&store, &finding_id, event).await
+}
+
+/// Build the anchor event named by `args.op`.
+///
+/// Split from `record_anchor` for the CRAP gate: the op match is six arms and
+/// three of them validate their own required field, which is most of the
+/// function's branches. Lifting it out leaves `record_anchor` as validate,
+/// build, write.
+fn anchor_event(
+    args: &RecordAnchorArgs,
+    ts: Timestamp,
+    source_root: &std::path::Path,
+) -> Result<AnchorEvent, QueryError> {
+    let need = |field: &str, v: &Option<String>| -> Result<String, QueryError> {
         v.clone().filter(|s| !s.is_empty()).ok_or_else(|| {
-            McpError::new(
-                McpErrorCode::InvalidInput,
+            QueryError::new(
+                QueryErrorCode::InvalidInput,
                 format!("record_anchor: `{}` op needs `{field}`", args.op),
             )
         })
     };
-    let event = match args.op.as_str() {
+    Ok(match args.op.as_str() {
         "attach" => {
             let anchor = need("anchor", &args.anchor)?;
             // Hash the live file at attach time so later drift can be detected;
             // a directory or unreadable path records no sha (→ live).
-            let sha = kenn_store::file_content_sha(&state.source_root().join(&anchor));
+            let sha = kenn_store::file_content_sha(&source_root.join(&anchor));
             AnchorEvent::Attach { anchor, ts, sha }
         }
         "detach" => AnchorEvent::Detach {
@@ -226,7 +233,7 @@ pub async fn record_anchor(
         // worth of claims re-read without anyone reading one.
         "verified" | "stale" | "partial" => {
             let anchor = need("anchor", &args.anchor)?;
-            let sha = kenn_store::file_content_sha(&state.source_root().join(&anchor));
+            let sha = kenn_store::file_content_sha(&source_root.join(&anchor));
             let outcome = match args.op.as_str() {
                 "verified" => Outcome::StillTrue,
                 "stale" => Outcome::NoLongerTrue,
@@ -240,38 +247,39 @@ pub async fn record_anchor(
             }
         }
         other => {
-            return Err(McpError::new(
-                McpErrorCode::InvalidInput,
+            return Err(QueryError::new(
+                QueryErrorCode::InvalidInput,
                 format!(
                     "record_anchor: unknown op `{other}` \
                      (attach|rename|detach|verified|stale|partial)"
                 ),
             ))
         }
-    };
-    let finding_id = args.finding_id.clone();
-    state
-        .with_findings_write(|_h, store| {
-            Box::pin(async move {
-                // Reject an unknown finding id rather than create an orphan
-                // `<id>.anchor.jsonl` for a finding that does not exist.
-                if store
-                    .get_finding(&finding_id)
-                    .await
-                    .map_err(internal)?
-                    .is_none()
-                {
-                    return Err(McpError::new(
-                        McpErrorCode::InvalidInput,
-                        format!("record_anchor: no finding with id `{finding_id}`"),
-                    ));
-                }
-                store
-                    .record_anchor_event(&finding_id, &event)
-                    .await
-                    .map_err(internal)?;
-                Ok(RecordAnchorResponse { recorded: true })
-            })
-        })
+    })
+}
+
+/// Append the event to the finding's log, refusing an unknown finding id.
+async fn record_event(
+    store: &kenn_store::FindingsStore,
+    finding_id: &str,
+    event: AnchorEvent,
+) -> Result<RecordAnchorResponse, QueryError> {
+    // Reject an unknown finding id rather than create an orphan
+    // `<id>.anchor.jsonl` for a finding that does not exist.
+    if store
+        .get_finding(finding_id)
         .await
+        .map_err(internal)?
+        .is_none()
+    {
+        return Err(QueryError::new(
+            QueryErrorCode::InvalidInput,
+            format!("record_anchor: no finding with id `{finding_id}`"),
+        ));
+    }
+    store
+        .record_anchor_event(finding_id, &event)
+        .await
+        .map_err(internal)?;
+    Ok(RecordAnchorResponse { recorded: true })
 }

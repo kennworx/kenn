@@ -1,19 +1,23 @@
-//! Per-server lifecycle state: `ServerState`, the `ReadyView` snapshot
-//! handed to tool closures, and the watcher-start result type.
+//! Per-server lifecycle state: `ServerState`, the `ReadyView` it pins for the
+//! duration of a query, and the watcher-start result type.
+//!
+//! This is the host side of the split with `kenn-query`: everything here is a
+//! fact about a *running server* — which lifecycle phase it is in, whether a
+//! watcher is attached, which MCP peer it answers. A query never sees any of
+//! it; [`ServerState::query_ctx`] hands out a
+//! [`QueryCtx`](kenn_query::QueryCtx) carrying only what a read needs.
 
-use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use kenn_store::api::Reader;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::cursor::SnapshotId;
-use crate::error::{ConfigHint, McpError, McpErrorCode};
-use crate::state::{LifecycleState, SharedLifecycle};
-use crate::types::{RankedFindingView, SearchHitRef};
+use kenn_query::{
+    internal, ConfigHint, QueryCaches, QueryCtx, QueryError, QueryErrorCode, SnapshotId,
+};
 
-use super::internal;
+use crate::state::{LifecycleState, SharedLifecycle};
 
 /// Per-server state.
 pub struct ServerState {
@@ -123,14 +127,12 @@ pub struct ServerState {
     /// Test-only observation point; not read by production code.
     #[doc(hidden)]
     pub watcher_triggers: std::sync::atomic::AtomicU64,
-    /// Cache of materialized top-K `search_symbols` result sets,
-    /// keyed by the `cache_id` that rides in `TopK` cursors. Bounded
-    /// LRU; cleared on snapshot rotation (`spawn_snapshot_swap_task` in
-    /// `indexing.rs`). See `result_cache.rs` and design D12.
-    pub(crate) search_symbols_cache: crate::result_cache::ResultCache<SearchHitRef>,
-    /// Cache of materialized top-K `search_findings` result sets.
-    /// Mirrors `search_symbols_cache` for the findings tool.
-    pub(crate) search_findings_cache: crate::result_cache::ResultCache<RankedFindingView>,
+    /// The top-K page caches the query layer reads through a
+    /// [`QueryCtx`]. Bounded LRU; cleared on snapshot rotation
+    /// (`spawn_snapshot_swap_task` in `indexing.rs`). Owned here because they
+    /// outlive any one query — a cursor issued by one call is redeemed by the
+    /// next. See design D12.
+    pub(crate) caches: QueryCaches,
 }
 
 /// Result of the `watch_start` tool. See design.md §D6.
@@ -149,7 +151,7 @@ pub struct WatchStartResult {
 /// connection, so blocking `SQLite` never runs on a runtime worker and concurrent
 /// tool reads parallelize. The `_pin` keeps the snapshot's GC pin alive for the
 /// call's duration — held only for its drop side-effect.
-pub(crate) struct ReadyView {
+pub struct ReadyView {
     pub snapshot_id: SnapshotId,
     pub indexed_at: String,
     /// One connection for this whole query.
@@ -213,7 +215,7 @@ impl ServerState {
             watcher: std::sync::Mutex::new(None),
             watcher_state: crate::state::AtomicWatcherState::new(crate::state::WatcherState::Off),
             embed_stage: Arc::new(crate::state::AtomicEmbedStage::new(
-                crate::state::EmbedStage::Ready,
+                kenn_query::EmbedStage::Ready,
             )),
             embed_error: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             watcher_triggers: std::sync::atomic::AtomicU64::new(0),
@@ -227,8 +229,7 @@ impl ServerState {
             client_supports_roots: std::sync::atomic::AtomicBool::new(false),
             client_supports_roots_list_changed: std::sync::atomic::AtomicBool::new(false),
             rebind_lock: tokio::sync::Mutex::new(()),
-            search_symbols_cache: crate::result_cache::ResultCache::new(),
-            search_findings_cache: crate::result_cache::ResultCache::new(),
+            caches: QueryCaches::new(),
         }
     }
 
@@ -367,37 +368,52 @@ impl ServerState {
     /// can drive the rotation effect (cache miss → `STALE_CURSOR`)
     /// without standing up a full reindex.
     pub fn clear_result_caches(&self) {
-        self.search_symbols_cache.clear();
-        self.search_findings_cache.clear();
+        self.caches.clear();
     }
 
-    /// Run `f` against the open `Reader` if the lifecycle is `Ready`.
-    /// Otherwise return `INDEX_UNAVAILABLE` describing the current
-    /// state.
+    /// Open a snapshot for querying: the lifecycle gate, then the
+    /// empty-snapshot gate, then a pinned view the caller holds for the
+    /// duration of the call.
     ///
-    /// The lifecycle's `RwLock` guard is held only for the synchronous
-    /// match — its read guard is dropped before the closure's future is
-    /// awaited. We re-acquire the read lock to borrow the `Reader`
-    /// inside the closure body; concurrent tool dispatch shares the
-    /// lock.
-    pub(crate) async fn with_db<R, F, Fut>(&self, f: F) -> Result<R, McpError>
-    where
-        F: FnOnce(ReadyView) -> Fut,
-        Fut: Future<Output = Result<R, McpError>>,
-    {
+    /// Replaces the old `with_db` closure with a plain value, so a
+    /// query can be an ordinary `async fn` over a [`QueryCtx`] instead of a
+    /// closure body. That is not only tidier: passing a *borrowed* context into
+    /// a closure runs straight into the same HRTB limitation `cmd_query.rs`
+    /// already documents for `Fn(&_, &_) -> Fut`.
+    ///
+    /// **Gate order is load-bearing.** `INDEX_UNAVAILABLE` is checked first and
+    /// wins over `EMPTY_SNAPSHOT`: a caller who cannot be served at all must not
+    /// first be told something about a snapshot it was never going to read.
+    pub async fn open_query(&self) -> Result<ReadyView, QueryError> {
         let view = self.ready_view_or_err()?;
-        // Empty-snapshot config-hint gate. Surfaces config-disabled vs.
-        // configured-but-empty as a structured error (EMPTY_SNAPSHOT)
-        // instead of letting data-returning tools return a silent
-        // empty result. `get_workspace_overview` bypasses this gate via
-        // `with_db_allow_empty` because it should always succeed and
-        // carry the hint in its response.
         let symbol_count = view.read.count_table("symbols").await.map_err(internal)?;
         if let Some(hint) = ConfigHint::classify(&self.config, symbol_count, self.config_present())
         {
-            return Err(McpError::empty_snapshot(&hint));
+            return Err(QueryError::empty_snapshot(&hint));
         }
-        f(view).await
+        Ok(view)
+    }
+
+    /// [`open_query`](Self::open_query) without the empty-snapshot gate, for
+    /// `get_workspace_overview` — which must always answer and carry the config
+    /// hint in its response rather than erroring.
+    pub fn open_query_allow_empty(&self) -> Result<ReadyView, QueryError> {
+        self.ready_view_or_err()
+    }
+
+    /// Build the borrowed query context over an open view.
+    pub fn query_ctx<'a>(&'a self, view: &'a ReadyView) -> QueryCtx<'a> {
+        QueryCtx {
+            read: &view.read,
+            indexed_at: &view.indexed_at,
+            snapshot_id: view.snapshot_id,
+            source_root: self.source_root(),
+            config: &self.config,
+            config_present: self.config_present(),
+            embed_stage: self.embed_stage.load(),
+            findings: &self.findings,
+            caches: &self.caches,
+        }
     }
 
     /// Whether a `kenn.toml` exists at the current workspace root.
@@ -410,28 +426,21 @@ impl ServerState {
         self.layout_guard().source_root().join("kenn.toml").exists()
     }
 
-    /// Variant of [`with_db`] that does NOT apply the empty-snapshot
-    /// gate. Reserved for `get_workspace_overview`, which must always
-    /// succeed and emit the `config_hint` in its response body.
-    pub(crate) async fn with_db_allow_empty<R, F, Fut>(&self, f: F) -> Result<R, McpError>
-    where
-        F: FnOnce(ReadyView) -> Fut,
-        Fut: Future<Output = Result<R, McpError>>,
-    {
-        let view = self.ready_view_or_err()?;
-        f(view).await
-    }
-
-    fn ready_view_or_err(&self) -> Result<ReadyView, McpError> {
+    /// The lifecycle gate: a pinned view of the live snapshot, or the reason
+    /// there isn't one. The `RwLock` guard is held only for the synchronous
+    /// match — the returned view carries its own GC pin.
+    fn ready_view_or_err(&self) -> Result<ReadyView, QueryError> {
         let guard = self.lifecycle.read().map_err(|e| {
-            McpError::new(
-                McpErrorCode::InternalError,
+            QueryError::new(
+                QueryErrorCode::InternalError,
                 format!("lifecycle lock poisoned: {e}"),
             )
         })?;
         match &*guard {
-            LifecycleState::Indexing { .. } => Err(McpError::index_unavailable_indexing()),
-            LifecycleState::Failed { error, .. } => Err(McpError::index_unavailable_failed(error)),
+            LifecycleState::Indexing { .. } => Err(QueryError::index_unavailable_indexing()),
+            LifecycleState::Failed { error, .. } => {
+                Err(QueryError::index_unavailable_failed(error))
+            }
             LifecycleState::Ready {
                 snapshot_id,
                 indexed_at,
@@ -448,58 +457,6 @@ impl ServerState {
                 })
             }
         }
-    }
-
-    /// Run `f` against the open findings store with a **shared read
-    /// lock**, gated on `Ready` exactly as [`with_db`](Self::with_db) —
-    /// `search_findings` staleness needs the live code graph, so all
-    /// findings tools require it. Concurrent readers proceed in parallel;
-    /// read-only tools (search, get, directives, anchor-checks, DAG
-    /// walks) MUST use this rather than the exclusive write lock, so one
-    /// slow read never serializes the others. `INTERNAL_ERROR` if the
-    /// store failed to open at bootstrap.
-    pub(crate) async fn with_findings_read<R, F>(&self, f: F) -> Result<R, McpError>
-    where
-        F: for<'s> FnOnce(
-            ReadyView,
-            &'s kenn_store::FindingsStore,
-        ) -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, McpError>> + Send + 's>,
-        >,
-    {
-        let view = self.ready_view_or_err()?;
-        let guard = self.findings.read().await;
-        let store = guard.as_ref().ok_or_else(|| {
-            McpError::new(
-                McpErrorCode::InternalError,
-                "findings store unavailable — failed to open at startup",
-            )
-        })?;
-        f(view, store).await
-    }
-
-    /// Like [`with_findings_read`](Self::with_findings_read) but takes the
-    /// **exclusive write lock** and hands `&mut`. Only mutating tools
-    /// (`store_finding`, `merge_findings`, `record_anchor`) use it; they
-    /// serialize against each other and against readers.
-    pub(crate) async fn with_findings_write<R, F>(&self, f: F) -> Result<R, McpError>
-    where
-        F: for<'s> FnOnce(
-            ReadyView,
-            &'s mut kenn_store::FindingsStore,
-        ) -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, McpError>> + Send + 's>,
-        >,
-    {
-        let view = self.ready_view_or_err()?;
-        let mut guard = self.findings.write().await;
-        let store = guard.as_mut().ok_or_else(|| {
-            McpError::new(
-                McpErrorCode::InternalError,
-                "findings store unavailable — failed to open at startup",
-            )
-        })?;
-        f(view, store).await
     }
 }
 

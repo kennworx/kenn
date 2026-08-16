@@ -18,10 +18,11 @@ use kenn_store::api::Reader;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::error::McpError;
+use crate::error::QueryError;
 use crate::types::ListResponse;
 
-use super::{internal, ServerState};
+use crate::ctx::QueryCtx;
+use crate::internal;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListContractsArgs {
@@ -138,76 +139,102 @@ pub fn contract_selections(
         .collect()
 }
 
+/// Resolve a named contract's implementers to addressable rows, grouped by the
+/// package each lives in.
+///
+/// Split out for the same reason as `domains::fill_domain_detail`: it is the
+/// branchy half, it runs only for a named contract, and while the body sat in
+/// an `async move` closure its branches scored against the closure rather than
+/// the enclosing function. Un-nesting revealed that, it did not cause it.
+async fn resolve_implementers(
+    ctx: &QueryCtx<'_>,
+    by_package: &[(String, Vec<u32>)],
+) -> Result<Vec<ImplementerView>, QueryError> {
+    let mut out = Vec::new();
+    for (pkg, ids) in by_package {
+        for &id in ids {
+            if let Some(s) = ctx
+                .read
+                .fetch_symbol_by_short_id(id)
+                .await
+                .map_err(internal)?
+            {
+                out.push(ImplementerView {
+                    id: s.pub_id,
+                    name: s.name,
+                    package: pkg.clone(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Build one contract's row, or `None` when it is not addressable or does not
+/// match a name argument. Mirrors `domains::domain_row` — every branch that
+/// decides whether a row exists belongs to the row, not to the loop.
+async fn contract_row(
+    ctx: &QueryCtx<'_>,
+    c: ContractSelection,
+    want: Option<&str>,
+) -> Result<Option<ContractView>, QueryError> {
+    // The contract's own pub_id is its handle; one that resolves to no symbol
+    // is not addressable, so skip it.
+    let Some(sym) = ctx
+        .read
+        .fetch_symbol_by_short_id(c.node)
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    // A name argument is a QUERY: it matches the pub_id OR the title, and a
+    // title that matches several keeps them all.
+    if let Some(w) = want {
+        if sym.pub_id != w && c.name != w {
+            return Ok(None);
+        }
+    }
+    let implementers = if want.is_some() {
+        resolve_implementers(ctx, &c.by_package).await?
+    } else {
+        Vec::new()
+    };
+    Ok(Some(ContractView {
+        symbol: sym.pub_id,
+        title: c.name,
+        kind: c.kind,
+        defined_in: c.defined_in,
+        implementers_count: c.total_implementers,
+        package_span: c.package_span,
+        implementers,
+    }))
+}
+
 /// List the workspace's cross-package contracts, or one contract with its
 /// implementers grouped by package.
 ///
 /// An empty result is a real answer, not a failure: Rust and Go keep
 /// abstractions package-local, so their contracts axis is legitimately empty.
 pub async fn list_contracts(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ListContractsArgs,
-) -> Result<ListResponse<ContractView>, McpError> {
+) -> Result<ListResponse<ContractView>, QueryError> {
     let want = args.contract.clone();
     let args_pagination = args.pagination.clone();
-    state
-        .with_db(|h| async move {
-            let nodes = h.read.scan_aggregate_nodes().await.map_err(internal)?;
-            let edges = h.read.scan_aggregate_edges().await.map_err(internal)?;
+    let nodes = ctx.read.scan_aggregate_nodes().await.map_err(internal)?;
+    let edges = ctx.read.scan_aggregate_edges().await.map_err(internal)?;
 
-            let mut items: Vec<ContractView> = Vec::new();
-            for c in contract_selections(&nodes, &edges) {
-                // The contract's own pub_id is its handle; one that resolves to
-                // no symbol is not addressable, so skip it.
-                let Some(sym) = h
-                    .read
-                    .fetch_symbol_by_short_id(c.node)
-                    .await
-                    .map_err(internal)?
-                else {
-                    continue;
-                };
-                // A name argument is a QUERY: it matches the pub_id OR the
-                // title, and a title that matches several keeps them all.
-                if let Some(w) = want.as_deref() {
-                    if sym.pub_id != w && c.name != w {
-                        continue;
-                    }
-                }
-                let mut implementers = Vec::new();
-                if want.is_some() {
-                    for (pkg, ids) in &c.by_package {
-                        for &id in ids {
-                            if let Some(s) = h
-                                .read
-                                .fetch_symbol_by_short_id(id)
-                                .await
-                                .map_err(internal)?
-                            {
-                                implementers.push(ImplementerView {
-                                    id: s.pub_id,
-                                    name: s.name,
-                                    package: pkg.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-                items.push(ContractView {
-                    symbol: sym.pub_id,
-                    title: c.name,
-                    kind: c.kind,
-                    defined_in: c.defined_in,
-                    implementers_count: c.total_implementers,
-                    package_span: c.package_span,
-                    implementers,
-                });
-            }
+    let mut items: Vec<ContractView> = Vec::new();
+    for c in contract_selections(&nodes, &edges) {
+        if let Some(row) = contract_row(ctx, c, want.as_deref()).await? {
+            items.push(row);
+        }
+    }
 
-            let (items, next) =
-                super::support::page_axis_items(items, args_pagination.as_ref(), h.snapshot_id)?;
-            Ok(ListResponse { items, next })
-        })
-        .await
+    let (items, next) =
+        crate::support::page_axis_items(items, args_pagination.as_ref(), ctx.snapshot_id)?;
+    Ok(ListResponse { items, next })
 }
 
 #[cfg(test)]

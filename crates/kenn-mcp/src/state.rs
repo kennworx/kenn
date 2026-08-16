@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 
 use kenn_indexer::pipeline::ProgressEvent;
 
-use crate::cursor::SnapshotId;
+use kenn_query::{EmbedStage, SnapshotId};
 
 /// Per-server lifecycle state machine. See module docs.
 pub enum LifecycleState {
@@ -219,31 +219,6 @@ impl AtomicWatcherState {
             _ => WatcherState::Off,
         }
     }
-}
-
-/// Stage of the background embedding pass, folded with the lifecycle state
-/// by `get_index_status` to report `state: "embedding" | "ready" | "disabled"`
-/// once the code graph is `Ready`. The graph is queryable in every embed
-/// stage — only vector tools (`find_similar`, `semantic_search`) wait for
-/// `Ready`. Serialized as `snake_case` (unused on the wire today, but kept
-/// consistent with `WatcherState`).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-#[repr(u8)]
-pub enum EmbedStage {
-    /// The embed pass is running (or about to) — vectors still filling.
-    Building = 0,
-    /// The embed pass completed (vectors filled, or nothing was pending).
-    Ready = 1,
-    /// No embedder is configured — vectors will not be built (lexical-only).
-    Disabled = 2,
-    /// A model is configured but the embed pass failed with a backend error
-    /// (e.g. the macOS fork+Metal bug). Vectors are incomplete and search
-    /// silently degraded to lexical-only until it is fixed — distinct from
-    /// both `Ready` and `Disabled`.
-    Degraded = 3,
 }
 
 /// Atomic cell holding an [`EmbedStage`], mirroring [`AtomicWatcherState`].

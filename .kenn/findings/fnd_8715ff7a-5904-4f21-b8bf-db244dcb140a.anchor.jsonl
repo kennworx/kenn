@@ -4,3 +4,4 @@
 {"op":"attach","anchor":"crates/kenn-indexer/src/transform/document/walk.rs","ts":"2026-08-13T13:15:25.265676Z","sha":"531fd2171d3e750b"}
 {"op":"attach","anchor":"crates/kenn-indexer/src/aggregate.rs","ts":"2026-08-13T13:15:25.265676Z","sha":"181138461f9dbb24"}
 {"op":"attach","anchor":"crates/kenn-indexer/src/pipeline/api.rs","ts":"2026-08-13T19:32:48.385165Z","sha":"44bc22edd7a15d7e"}
+{"op":"rename","from":"crates/kenn-mcp/src/tools/support.rs","to":"crates/kenn-query/src/support.rs","ts":"2026-08-15T11:12:39.601654Z"}

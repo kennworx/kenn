@@ -16,10 +16,11 @@ use kenn_indexer::atlas::producer;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::error::McpError;
+use crate::error::QueryError;
 use crate::types::ListResponse;
 
-use super::{internal, ServerState};
+use crate::ctx::QueryCtx;
+use crate::internal;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListPackagesArgs {
@@ -470,14 +471,14 @@ pub fn fill_package_metadata(
 
 /// Fetch the three scans [`fill_package_metadata`] needs. I/O only.
 async fn attach_package_metadata(
-    h: &super::state::ReadyView,
+    ctx: &QueryCtx<'_>,
     nodes: &[kenn_store::AggregateNodeRow],
     items: &mut [PackageView],
     detail: bool,
-) -> Result<(), McpError> {
-    let files = h.read.scan_files().await.map_err(internal)?;
-    let def_files = h.read.scan_def_files().await.map_err(internal)?;
-    let file_docs = h.read.scan_file_docs().await.map_err(internal)?;
+) -> Result<(), QueryError> {
+    let files = ctx.read.scan_files().await.map_err(internal)?;
+    let def_files = ctx.read.scan_def_files().await.map_err(internal)?;
+    let file_docs = ctx.read.scan_file_docs().await.map_err(internal)?;
     fill_package_metadata(&files, &def_files, &file_docs, nodes, items, detail);
     Ok(())
 }
@@ -489,122 +490,144 @@ async fn attach_package_metadata(
 /// per-symbol edges: that graph is already rolled up and weighted, and it is
 /// the same input the atlas builds from.
 pub async fn list_packages(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ListPackagesArgs,
-) -> Result<ListResponse<PackageView>, McpError> {
+) -> Result<ListResponse<PackageView>, QueryError> {
     let want = args.package.clone();
     let args_pagination = args.pagination.clone();
-    state
-        .with_db(|h| async move {
-            let nodes = h.read.scan_aggregate_nodes().await.map_err(internal)?;
-            let edges = h.read.scan_aggregate_edges().await.map_err(internal)?;
+    let nodes = ctx.read.scan_aggregate_nodes().await.map_err(internal)?;
+    let edges = ctx.read.scan_aggregate_edges().await.map_err(internal)?;
 
-            // Anchor per node id, internal + anchored only. External nodes
-            // are vendored dependencies, not packages of this workspace.
-            let mut items = package_views(&nodes, &edges, want.as_deref());
+    // Anchor per node id, internal + anchored only. External nodes
+    // are vendored dependencies, not packages of this workspace.
+    let mut items = package_views(&nodes, &edges, want.as_deref());
 
-            // Page BEFORE the per-item enrichment below. Each row costs a
-            // `fetch_symbol` to verify its root pub_id, plus a possible symbols
-            // scan for the C# namespace fallback and a def/doc scan for metadata;
-            // doing that for 125 packages to return 20 is waste the caller never
-            // asked for. `package_views` already orders deterministically
-            // (most-depended-on first), which is what makes an offset walk sound.
-            let (mut items, next) = super::support::page_axis_items(
-                std::mem::take(&mut items),
-                args_pagination.as_ref(),
-                h.snapshot_id,
-            )?;
+    // Page BEFORE the per-item enrichment below. Each row costs a
+    // `fetch_symbol` to verify its root pub_id, plus a possible symbols
+    // scan for the C# namespace fallback and a def/doc scan for metadata;
+    // doing that for 125 packages to return 20 is waste the caller never
+    // asked for. `package_views` already orders deterministically
+    // (most-depended-on first), which is what makes an offset walk sound.
+    let (mut items, next) = crate::support::page_axis_items(
+        std::mem::take(&mut items),
+        args_pagination.as_ref(),
+        ctx.snapshot_id,
+    )?;
 
-            // Every row carries `symbol` — the package's own root symbol's pub_id
-            // — so the bare overview is actionable (`kenn get <symbol>`) without a
-            // second command. Constructed from language + anchor, then verified
-            // against the symbols table so we never print an id that won't resolve.
-            for pv in &mut items {
-                if let Some(cand) = candidate_root_pub_id(&pv.language, &pv.name) {
-                    if h.read
-                        .fetch_symbol(&pv.language, &cand)
-                        .await
-                        .map_err(internal)?
-                        .is_some()
-                    {
-                        pv.symbol = cand;
-                    }
-                }
-            }
+    resolve_root_symbols(ctx, &nodes, &mut items).await?;
+    attach_package_metadata(ctx, &nodes, &mut items, want.is_some()).await?;
 
-            // C# fallback: a project often declares into a namespace whose name
-            // differs from the assembly (`Acme.Billing.Data` the *.csproj vs the
-            // `Acme.Billing` namespace its types live in), and that namespace is
-            // NOT constructible from the anchor. Derive the project's DEFAULT
-            // namespace from where its types actually live — the common namespace
-            // of its members — and use it when it resolves. One symbols scan,
-            // taken only when a C# package still lacks a symbol.
-            if items
-                .iter()
-                .any(|p| p.symbol.is_empty() && p.language == "csharp")
+    if let Some(w) = want.as_deref() {
+        attach_central_symbols(ctx, &nodes, &edges, &mut items, w).await?;
+    }
+
+    Ok(ListResponse { items, next })
+}
+
+/// Give every row a resolvable `symbol` — the package's own root symbol —
+/// so the bare overview is actionable (`kenn get <symbol>`) without a second
+/// command.
+///
+/// Two passes. The first constructs a candidate from language + anchor and
+/// verifies it against the symbols table, so an id that would not resolve is
+/// never printed. The second is the C# fallback: a project often declares into
+/// a namespace whose name differs from the assembly (`Acme.Billing.Data` the
+/// `*.csproj` versus the `Acme.Billing` namespace its types live in), and that
+/// namespace is NOT constructible from the anchor. Derive it from where the
+/// project's types actually live — the common namespace of its members — and
+/// use it when it resolves. One symbols scan, taken only when a C# package
+/// still lacks a symbol after the first pass.
+async fn resolve_root_symbols(
+    ctx: &QueryCtx<'_>,
+    nodes: &[kenn_store::AggregateNodeRow],
+    items: &mut [PackageView],
+) -> Result<(), QueryError> {
+    for pv in items.iter_mut() {
+        if let Some(cand) = candidate_root_pub_id(&pv.language, &pv.name) {
+            if ctx
+                .read
+                .fetch_symbol(&pv.language, &cand)
+                .await
+                .map_err(internal)?
+                .is_some()
             {
-                let syms = h.read.scan_symbols().await.map_err(internal)?;
-                let native_of: std::collections::HashMap<u32, &str> = syms
-                    .iter()
-                    .filter_map(|s| s.pub_id.split_once(':').map(|(_, n)| (s.id, n)))
-                    .collect();
-                let namespaces: std::collections::HashSet<&str> = syms
-                    .iter()
-                    .filter(|s| s.kind == "namespace")
-                    .map(|s| s.pub_id.as_str())
-                    .collect();
-                for pv in items
-                    .iter_mut()
-                    .filter(|p| p.symbol.is_empty() && p.language == "csharp")
-                {
-                    let member_natives: Vec<&str> = nodes
-                        .iter()
-                        .filter(|n| {
-                            !n.external
-                                && n.anchor_name == pv.name
-                                && !matches!(n.kind.as_str(), "module" | "namespace" | "package")
-                        })
-                        .filter_map(|n| native_of.get(&n.id).copied())
-                        .collect();
-                    if let Some(ns) = namespace_common_prefix(&member_natives) {
-                        let cand = format!("cs:{ns}");
-                        if namespaces.contains(cand.as_str()) {
-                            pv.symbol = cand;
-                        }
-                    }
-                }
+                pv.symbol = cand;
             }
+        }
+    }
 
-            attach_package_metadata(&h, &nodes, &mut items, want.is_some()).await?;
-
-            // For a single named package, attach its full central-symbol list with
-            // resolvable ids — the reader turns each ranked node into a pub_id so
-            // the caller can `kenn get` / `kenn list` it straight away.
-            if let Some(w) = want.as_deref() {
-                let ids = central_node_ids(&nodes, &edges, w, MAX_CENTRAL);
-                let mut central = Vec::with_capacity(ids.len());
-                for id in ids {
-                    if let Some(sym) = h
-                        .read
-                        .fetch_symbol_by_short_id(id)
-                        .await
-                        .map_err(internal)?
-                    {
-                        central.push(CentralSymbolView {
-                            id: sym.pub_id,
-                            name: sym.name,
-                            kind: sym.kind,
-                        });
-                    }
-                }
-                if let Some(pv) = items.iter_mut().find(|p| p.name == w) {
-                    pv.central = central;
-                }
+    if !items
+        .iter()
+        .any(|p| p.symbol.is_empty() && p.language == "csharp")
+    {
+        return Ok(());
+    }
+    let syms = ctx.read.scan_symbols().await.map_err(internal)?;
+    let native_of: std::collections::HashMap<u32, &str> = syms
+        .iter()
+        .filter_map(|s| s.pub_id.split_once(':').map(|(_, n)| (s.id, n)))
+        .collect();
+    let namespaces: std::collections::HashSet<&str> = syms
+        .iter()
+        .filter(|s| s.kind == "namespace")
+        .map(|s| s.pub_id.as_str())
+        .collect();
+    for pv in items
+        .iter_mut()
+        .filter(|p| p.symbol.is_empty() && p.language == "csharp")
+    {
+        let member_natives: Vec<&str> = nodes
+            .iter()
+            .filter(|n| {
+                !n.external
+                    && n.anchor_name == pv.name
+                    && !matches!(n.kind.as_str(), "module" | "namespace" | "package")
+            })
+            .filter_map(|n| native_of.get(&n.id).copied())
+            .collect();
+        if let Some(ns) = namespace_common_prefix(&member_natives) {
+            let cand = format!("cs:{ns}");
+            if namespaces.contains(cand.as_str()) {
+                pv.symbol = cand;
             }
+        }
+    }
+    Ok(())
+}
 
-            Ok(ListResponse { items, next })
-        })
-        .await
+/// For a single named package, attach its central-symbol list with resolvable
+/// ids, so the caller can `kenn get` / `kenn list` each one straight away.
+///
+/// Split out with the C# namespace fallback for the CRAP gate: un-nesting the
+/// `async move` closure moved its branches onto the enclosing function, which
+/// had been scoring as though it had none. The complexity was always there.
+async fn attach_central_symbols(
+    ctx: &QueryCtx<'_>,
+    nodes: &[kenn_store::AggregateNodeRow],
+    edges: &[kenn_store::AggregateEdgeRow],
+    items: &mut [PackageView],
+    want: &str,
+) -> Result<(), QueryError> {
+    let ids = central_node_ids(nodes, edges, want, MAX_CENTRAL);
+    let mut central = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(sym) = ctx
+            .read
+            .fetch_symbol_by_short_id(id)
+            .await
+            .map_err(internal)?
+        {
+            central.push(CentralSymbolView {
+                id: sym.pub_id,
+                name: sym.name,
+                kind: sym.kind,
+            });
+        }
+    }
+    if let Some(pv) = items.iter_mut().find(|p| p.name == want) {
+        pv.central = central;
+    }
+    Ok(())
 }
 
 /// Central symbols shown for a single named package — matches the atlas cap.

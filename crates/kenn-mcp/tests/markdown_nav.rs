@@ -8,13 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kenn_mcp::state::LifecycleState;
-use kenn_mcp::tools::{
-    find_at_location, find_symbol, list_in_scope, search_symbols, ByIdArgs, FindAtLocationArgs,
-    FindSymbolArgs, SearchSymbolsArgs, ServerState,
-};
-use kenn_mcp::types::SearchHitRef;
-use kenn_mcp::{snapshot_id_from_timestamp, Pagination};
+use kenn_mcp::tools::ServerState;
 use kenn_model::{DefRecord, EdgeProperties, EdgeRecord, FileRecord, Kind, Language, SymbolRecord};
+use kenn_query::types::SearchHitRef;
+use kenn_query::{
+    find_at_location, find_symbol, list_in_scope, search_symbols, ByIdArgs, FindAtLocationArgs,
+    FindSymbolArgs, SearchSymbolsArgs,
+};
+use kenn_query::{snapshot_id_from_timestamp, Pagination};
 use kenn_store::api::WriteBatch;
 use kenn_store::{open_writer, reader_from_writer, DbReader, DbWriter, WriterOptions};
 use tempfile::TempDir;
@@ -129,8 +130,10 @@ async fn state_with_corpus(dir: &TempDir) -> ServerState {
 async fn find_symbol_returns_md_section() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
     let resp = find_symbol(
-        &state,
+        &ctx,
         &FindSymbolArgs {
             name: "Flow".into(),
             kind: None,
@@ -155,8 +158,10 @@ async fn find_symbol_returns_md_section() {
 async fn search_symbols_returns_md_section() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
     let resp = search_symbols(
-        &state,
+        &ctx,
         &SearchSymbolsArgs {
             query: "tokens".into(),
             filters: None,
@@ -179,8 +184,10 @@ async fn search_symbols_returns_md_section() {
 async fn list_in_scope_returns_document_sections() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
     let resp = list_in_scope(
-        &state,
+        &ctx,
         &ByIdArgs {
             id: DOC_ID.into(),
             filters: None,
@@ -198,8 +205,10 @@ async fn list_in_scope_returns_document_sections() {
 async fn find_at_location_returns_enclosing_section() {
     let dir = TempDir::new().unwrap();
     let state = state_with_corpus(&dir).await;
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
     let resp = find_at_location(
-        &state,
+        &ctx,
         &FindAtLocationArgs {
             file_path: "docs/auth.md".into(),
             line: 3, // inside the Flow section (lines 2–5)

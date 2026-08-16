@@ -21,10 +21,11 @@ use kenn_store::api::Reader;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::error::McpError;
+use crate::error::QueryError;
 use crate::types::ListResponse;
 
-use super::{internal, ServerState};
+use crate::ctx::QueryCtx;
+use crate::internal;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListDomainsArgs {
@@ -200,96 +201,120 @@ pub fn domain_selections(
     .collect()
 }
 
+/// Fill in a named domain's detail: its spanned packages and its most central
+/// members.
+///
+/// Split out because it is the branchy half of the listing and runs for exactly
+/// one row. Inlining it was free while the body lived in an `async move`
+/// closure — the closure carried the branches and the enclosing function scored
+/// as if it had none. Un-nesting made that complexity visible rather than
+/// creating it, and the honest response is to reduce it, not to re-baseline.
+async fn fill_domain_detail(
+    ctx: &QueryCtx<'_>,
+    row: &mut DomainView,
+    packages: &[(String, u64, u64)],
+    ranked: &[u32],
+) -> Result<(), QueryError> {
+    row.packages = packages
+        .iter()
+        .map(|(p, m, l)| SpannedPackageView {
+            package: p.clone(),
+            members: *m,
+            links: *l,
+        })
+        .collect();
+    for &id in ranked.iter().take(CENTRAL_CAP) {
+        if let Some(s) = ctx
+            .read
+            .fetch_symbol_by_short_id(id)
+            .await
+            .map_err(internal)?
+        {
+            row.central.push(DomainMemberView {
+                id: s.pub_id,
+                name: s.name,
+                kind: s.kind,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Build one domain's row, or `None` when it is not addressable or does not
+/// match a name argument.
+///
+/// "Build one row" is the natural unit here: the listing is a loop over
+/// selections, and every branch that decides whether a row exists and how much
+/// detail it carries belongs to the row, not to the loop.
+async fn domain_row(
+    ctx: &QueryCtx<'_>,
+    sel: &DomainSelection,
+    want: Option<&str>,
+) -> Result<Option<DomainView>, QueryError> {
+    // The hub's pub_id is the domain's handle; a domain whose hub has no
+    // resolvable symbol is not addressable, so skip it.
+    let Some(hub_sym) = ctx
+        .read
+        .fetch_symbol_by_short_id(sel.hub)
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    let links = sel.packages.iter().map(|&(_, _, l)| l).sum::<u64>() / 2;
+    let mut row = DomainView {
+        symbol: hub_sym.pub_id,
+        title: hub_sym.name,
+        size: sel.ranked.len() as u64,
+        packages_count: sel.packages.len() as u64,
+        links,
+        packages: Vec::new(),
+        central: Vec::new(),
+    };
+    // Detail only for a named domain; a bare listing stays flat.
+    if let Some(w) = want {
+        if row.symbol != w && row.title != w {
+            return Ok(None);
+        }
+        fill_domain_detail(ctx, &mut row, &sel.packages, &sel.ranked).await?;
+    }
+    Ok(Some(row))
+}
+
 /// List the workspace's cross-package domains, or one domain with its spanned
 /// packages and central members.
 pub async fn list_domains(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ListDomainsArgs,
-) -> Result<ListResponse<DomainView>, McpError> {
+) -> Result<ListResponse<DomainView>, QueryError> {
     let want = args.domain.clone();
     let args_pagination = args.pagination.clone();
-    state
-        .with_db(|h| async move {
-            let nodes = h.read.scan_aggregate_nodes().await.map_err(internal)?;
-            let edges = h.read.scan_aggregate_edges().await.map_err(internal)?;
-            let flat = h
-                .read
-                .scan_analysis_flat_communities()
-                .await
-                .map_err(internal)?;
-            let membership = h
-                .read
-                .scan_analysis_node_membership()
-                .await
-                .map_err(internal)?;
-
-            let selected = domain_selections(&nodes, &edges, &flat, &membership);
-            let mut items: Vec<DomainView> = Vec::with_capacity(selected.len());
-            for DomainSelection {
-                hub,
-                ranked,
-                packages,
-            } in selected
-            {
-                // The hub's pub_id is the domain's handle; a domain whose hub has
-                // no resolvable symbol is not addressable, so skip it.
-                let Some(hub_sym) = h
-                    .read
-                    .fetch_symbol_by_short_id(hub)
-                    .await
-                    .map_err(internal)?
-                else {
-                    continue;
-                };
-                let links = packages.iter().map(|&(_, _, l)| l).sum::<u64>() / 2;
-                items.push(DomainView {
-                    symbol: hub_sym.pub_id,
-                    title: hub_sym.name,
-                    size: ranked.len() as u64,
-                    packages_count: packages.len() as u64,
-                    links,
-                    packages: Vec::new(),
-                    central: Vec::new(),
-                });
-                // Detail only for a named domain; a bare listing stays flat.
-                if let Some(w) = want.as_deref() {
-                    let row = items.last_mut().expect("just pushed");
-                    if row.symbol != w && row.title != w {
-                        items.pop();
-                        continue;
-                    }
-                    row.packages = packages
-                        .iter()
-                        .map(|(p, m, l)| SpannedPackageView {
-                            package: p.clone(),
-                            members: *m,
-                            links: *l,
-                        })
-                        .collect();
-                    for &id in ranked.iter().take(CENTRAL_CAP) {
-                        if let Some(s) = h
-                            .read
-                            .fetch_symbol_by_short_id(id)
-                            .await
-                            .map_err(internal)?
-                        {
-                            row.central.push(DomainMemberView {
-                                id: s.pub_id,
-                                name: s.name,
-                                kind: s.kind,
-                            });
-                        }
-                    }
-                }
-            }
-
-            // Heaviest first, ties by title — the same order the atlas renders.
-            items.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.title.cmp(&b.title)));
-            let (items, next) =
-                super::support::page_axis_items(items, args_pagination.as_ref(), h.snapshot_id)?;
-            Ok(ListResponse { items, next })
-        })
+    let nodes = ctx.read.scan_aggregate_nodes().await.map_err(internal)?;
+    let edges = ctx.read.scan_aggregate_edges().await.map_err(internal)?;
+    let flat = ctx
+        .read
+        .scan_analysis_flat_communities()
         .await
+        .map_err(internal)?;
+    let membership = ctx
+        .read
+        .scan_analysis_node_membership()
+        .await
+        .map_err(internal)?;
+
+    let selected = domain_selections(&nodes, &edges, &flat, &membership);
+    let mut items: Vec<DomainView> = Vec::with_capacity(selected.len());
+    for sel in selected {
+        if let Some(row) = domain_row(ctx, &sel, want.as_deref()).await? {
+            items.push(row);
+        }
+    }
+
+    // Heaviest first, ties by title — the same order the atlas renders.
+    items.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.title.cmp(&b.title)));
+    let (items, next) =
+        crate::support::page_axis_items(items, args_pagination.as_ref(), ctx.snapshot_id)?;
+    Ok(ListResponse { items, next })
 }
 
 #[cfg(test)]

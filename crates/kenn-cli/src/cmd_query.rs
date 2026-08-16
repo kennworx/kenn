@@ -1,11 +1,12 @@
-//! The query + knowledge CLI surface — verb-grouped mirrors of the kenn-mcp
-//! read/knowledge tools (`overview`, `find`, `list`, `check`, `findings`,
-//! `get`). Each leaf is a thin wrapper: parse argv → build a `ServerState` →
-//! call the same `kenn_mcp::tools::*` function the MCP server calls → render
-//! the typed result as TOON (default) or JSON (`--json`).
+//! The query + knowledge CLI surface — verb-grouped views onto the shared read
+//! layer (`overview`, `find`, `list`, `check`, `findings`, `get`). Each leaf is
+//! a thin wrapper: parse argv → open a snapshot → call the same
+//! [`kenn_query`] function the MCP tool of that name calls → render the typed
+//! result as TOON (default) or JSON (`--json`).
 //!
-//! See the `cli-query-surface` capability. The MCP server is not touched; this
-//! only *calls* the tool functions.
+//! See the `cli-query-surface` capability. This is a *front end*, not a client
+//! of the server: it borrows `kenn-mcp`'s `ServerState` for the snapshot
+//! lifecycle, then queries `kenn-query` directly.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -16,16 +17,43 @@ use serde::Serialize;
 use serde_json::Value;
 
 use kenn_config::Config;
-use kenn_mcp::tools::{self, ServerState};
-use kenn_mcp::{
-    Filters, FindUsagesResponse, ListResponse, McpError, McpErrorCode, Pagination, UsageRef,
-    WorkspaceSource,
-};
+use kenn_mcp::tools::ServerState;
+use kenn_mcp::WorkspaceSource;
 use kenn_model::{EdgeKind, FieldOp, Kind, Language};
+// The argument shapes come in by name; the query functions stay
+// path-qualified at their call sites (`kenn_query::find_symbol`), so which
+// layer answers a verb is visible where the verb is dispatched. Mirrors what
+// `kenn-mcp`'s `server/core.rs` does with the same two sets.
+use kenn_query::{
+    ByIdArgs, CheckAnchorsArgs, CheckCssArgs, CheckLinksArgs, Filters, FindAtLocationArgs,
+    FindDirectivesArgs, FindSimilarArgs, FindSymbolArgs, FindUsagesArgs, FindUsagesResponse,
+    FindingDagArgs, GetFindingArgs, GetSourceArgs, GetSymbolArgs, GetWorkspaceOverviewArgs,
+    ListContractsArgs, ListDocumentsArgs, ListDomainsArgs, ListImportsArgs, ListPackagesArgs,
+    ListResponse, ListTablesArgs, ListUsagesArgs, MergeFindingsArgs, Pagination, QueryError,
+    QueryErrorCode, RecordAnchorArgs, SearchFindingsArgs, SearchSymbolsArgs, SemanticSearchArgs,
+    StoreFindingArgs, UsageRef,
+};
 use kenn_store::Layout;
 
 use crate::exit::ExitCodes;
 use crate::render::{emit, Format};
+
+/// Run a query against an open snapshot and hand the result to `emit_result`.
+///
+/// The CLI mirror of `kenn-mcp`'s `query_result!`: gate, borrow, call. A macro
+/// rather than a helper because the context is borrowed from the view, and the
+/// call sites sit inside `emit_result(…)` where a `let` statement cannot go.
+/// Findings variant: no empty-snapshot gate, because a directive is worth
+/// reading before the first index exists.
+macro_rules! qf {
+    ($state:ident, $tool:path, $args:expr $(,)?) => {
+        async {
+            let view = $state.open_query_allow_empty()?;
+            $tool(&$state.query_ctx(&view), $args).await
+        }
+        .await
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Shared flag blocks
@@ -487,7 +515,15 @@ pub fn run_overview(ctx: Ctx, json: bool) -> Result<ExitCodes> {
     let fmt = Format::from_json_flag(json);
     run_on_state(ctx, false, |state| async move {
         emit_result(
-            tools::get_workspace_overview(&state, tools::GetWorkspaceOverviewArgs::default()).await,
+            async {
+                let view = state.open_query_allow_empty()?;
+                kenn_query::get_workspace_overview(
+                    &state.query_ctx(&view),
+                    GetWorkspaceOverviewArgs::default(),
+                )
+                .await
+            }
+            .await,
             fmt,
         )
     })
@@ -503,9 +539,10 @@ pub fn run_packages(
     run_on_state(ctx, false, |state| async move {
         emit_result(
             run_listing(page.all, &page, |pg| async {
-                tools::list_packages(
-                    &state,
-                    &tools::ListPackagesArgs {
+                let view = state.open_query().await?;
+                kenn_query::list_packages(
+                    &state.query_ctx(&view),
+                    &ListPackagesArgs {
                         package: package.clone(),
                         pagination: pg,
                     },
@@ -528,9 +565,10 @@ pub fn run_domains(
     run_on_state(ctx, false, |state| async move {
         emit_result(
             run_listing(page.all, &page, |pg| async {
-                tools::list_domains(
-                    &state,
-                    &tools::ListDomainsArgs {
+                let view = state.open_query().await?;
+                kenn_query::list_domains(
+                    &state.query_ctx(&view),
+                    &ListDomainsArgs {
                         domain: domain.clone(),
                         pagination: pg,
                     },
@@ -553,9 +591,10 @@ pub fn run_contracts(
     run_on_state(ctx, false, |state| async move {
         emit_result(
             run_listing(page.all, &page, |pg| async {
-                tools::list_contracts(
-                    &state,
-                    &tools::ListContractsArgs {
+                let view = state.open_query().await?;
+                kenn_query::list_contracts(
+                    &state.query_ctx(&view),
+                    &ListContractsArgs {
                         contract: contract.clone(),
                         pagination: pg,
                     },
@@ -578,9 +617,13 @@ pub fn run_tables(
     run_on_state(ctx, false, |state| async move {
         emit_result(
             run_listing(page.all, &page, |pg| async {
-                tools::list_tables(
-                    &state,
-                    &tools::ListTablesArgs {
+                // The query is a plain function over an open snapshot: the
+                // lifecycle and empty-snapshot gates run here, in the host, and
+                // hand back a context that carries no server at all.
+                let view = state.open_query().await?;
+                kenn_query::list_tables(
+                    &state.query_ctx(&view),
+                    &ListTablesArgs {
                         table: table.clone(),
                         pagination: pg,
                     },
@@ -598,9 +641,10 @@ pub fn run_documents(ctx: Ctx, g: DocumentsGroup) -> Result<ExitCodes> {
     run_on_state(ctx, false, |state| async move {
         emit_result(
             run_listing(g.page.all, &g.page, |pg| async {
-                tools::list_documents(
-                    &state,
-                    &tools::ListDocumentsArgs {
+                let view = state.open_query().await?;
+                kenn_query::list_documents(
+                    &state.query_ctx(&view),
+                    &ListDocumentsArgs {
                         document: g.document.clone(),
                         pagination: pg,
                     },
@@ -661,11 +705,19 @@ pub fn run_get(ctx: Ctx, g: GetGroup) -> Result<ExitCodes> {
     run_on_state(ctx, false, |state| async move {
         match g.sub {
             GetSub::Symbol { id } => emit_result(
-                tools::get_symbol(&state, &tools::GetSymbolArgs { id }).await,
+                async {
+                    let view = state.open_query().await?;
+                    kenn_query::get_symbol(&state.query_ctx(&view), &GetSymbolArgs { id }).await
+                }
+                .await,
                 fmt,
             ),
             GetSub::Source { id } => emit_result(
-                tools::get_source(&state, &tools::GetSourceArgs { id }).await,
+                async {
+                    let view = state.open_query().await?;
+                    kenn_query::get_source(&state.query_ctx(&view), &GetSourceArgs { id }).await
+                }
+                .await,
                 fmt,
             ),
         }
@@ -676,12 +728,39 @@ pub fn run_get(ctx: Ctx, g: GetGroup) -> Result<ExitCodes> {
 // Per-group dispatch → JSON value
 // ---------------------------------------------------------------------------
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "flat dispatch: one arm per `find` subcommand, each a distinct \
-              tool call. Splitting into per-arm helpers would scatter the \
-              subcommand→tool mapping without reducing real complexity."
-)]
+/// Bare `find <query>` → semantic search. The embedder is pre-warmed in
+/// `run_on_state` (this subcommand's `embeds` flag is set).
+///
+/// Split out with the other arms so `find_action` stays routing rather than
+/// work: every arm now opens a query, and six of those in one function is what
+/// put the dispatcher over the CRAP gate.
+async fn find_semantic_action(
+    state: &ServerState,
+    fmt: Format,
+    facets: Facets,
+    g: FindGroup,
+) -> anyhow::Result<()> {
+    let query = g.query.join(" ");
+    emit_result(
+        async {
+            let view = state.open_query().await?;
+            kenn_query::semantic_search(
+                &state.query_ctx(&view),
+                &SemanticSearchArgs {
+                    query,
+                    scope: Some(parse_enum(&g.scope, "scope")?),
+                    page_size: g.page_size,
+                    include_tests: Some(facets.include_tests),
+                    include_external: Some(facets.include_external),
+                },
+            )
+            .await
+        }
+        .await,
+        fmt,
+    )
+}
+
 async fn find_action(
     state: &ServerState,
     fmt: Format,
@@ -689,40 +768,26 @@ async fn find_action(
     g: FindGroup,
 ) -> anyhow::Result<()> {
     match g.sub {
-        None => {
-            // Bare `find <query>` → semantic search. The embedder is pre-warmed
-            // in `run_on_state` (this subcommand's `embeds` flag is set).
-            let query = g.query.join(" ");
-            emit_result(
-                tools::semantic_search(
-                    state,
-                    &tools::SemanticSearchArgs {
-                        query,
-                        scope: Some(parse_enum(&g.scope, "scope")?),
-                        page_size: g.page_size,
-                        include_tests: Some(facets.include_tests),
-                        include_external: Some(facets.include_external),
-                    },
-                )
-                .await,
-                fmt,
-            )
-        }
+        None => find_semantic_action(state, fmt, facets, g).await,
         Some(FindSub::Symbol {
             name,
             kind,
             page_size,
         }) => emit_result(
-            tools::find_symbol(
-                state,
-                &tools::FindSymbolArgs {
-                    name,
-                    kind: parse_enums(&kind, "kind")?,
-                    page_size,
-                    include_tests: Some(facets.include_tests),
-                    include_external: Some(facets.include_external),
-                },
-            )
+            async {
+                let view = state.open_query().await?;
+                kenn_query::find_symbol(
+                    &state.query_ctx(&view),
+                    &FindSymbolArgs {
+                        name,
+                        kind: parse_enums(&kind, "kind")?,
+                        page_size,
+                        include_tests: Some(facets.include_tests),
+                        include_external: Some(facets.include_external),
+                    },
+                )
+                .await
+            }
             .await,
             fmt,
         ),
@@ -732,9 +797,10 @@ async fn find_action(
             page,
         }) => emit_result(
             run_listing(page.all, &page, |pg| async {
-                tools::search_symbols(
-                    state,
-                    &tools::SearchSymbolsArgs {
+                let view = state.open_query().await?;
+                kenn_query::search_symbols(
+                    &state.query_ctx(&view),
+                    &SearchSymbolsArgs {
                         query: query.clone(),
                         filters: to_filters(&filters, facets)?,
                         pagination: pg,
@@ -745,32 +811,87 @@ async fn find_action(
             .await,
             fmt,
         ),
-        Some(FindSub::AtLocation { file, line, kind }) => emit_result(
-            tools::find_at_location(
-                state,
-                &tools::FindAtLocationArgs {
-                    file_path: file,
-                    line,
-                    kind: parse_enums(&kind, "kind")?,
-                },
-            )
+        Some(sub @ (FindSub::AtLocation { .. } | FindSub::Similar { .. })) => {
+            find_single_action(state, fmt, facets, sub).await
+        }
+        Some(sub) => find_usages_action(state, fmt, facets, sub).await,
+    }
+}
+
+/// The two single-result `find` arms — `at-location` and `similar`.
+///
+/// Split from `find_action` for the CRAP gate: every arm now opens a query, so
+/// the dispatcher's branch count grew. Grouping the two arms that return one
+/// shot each keeps the subcommand→tool mapping visible while halving the
+/// dispatcher's branches.
+#[expect(
+    clippy::unreachable,
+    reason = "`find_action` routes only these two variants here; the arm names that \
+              invariant rather than letting a future variant fall through"
+)]
+async fn find_single_action(
+    state: &ServerState,
+    fmt: Format,
+    facets: Facets,
+    sub: FindSub,
+) -> anyhow::Result<()> {
+    match sub {
+        FindSub::AtLocation { file, line, kind } => emit_result(
+            async {
+                let view = state.open_query().await?;
+                kenn_query::find_at_location(
+                    &state.query_ctx(&view),
+                    &FindAtLocationArgs {
+                        file_path: file,
+                        line,
+                        kind: parse_enums(&kind, "kind")?,
+                    },
+                )
+                .await
+            }
             .await,
             fmt,
         ),
-        Some(FindSub::Similar { id, page_size }) => emit_result(
-            tools::find_similar(
-                state,
-                &tools::FindSimilarArgs {
-                    id,
-                    page_size,
-                    include_tests: Some(facets.include_tests),
-                    include_external: Some(facets.include_external),
-                },
-            )
+        FindSub::Similar { id, page_size } => emit_result(
+            async {
+                let view = state.open_query().await?;
+                kenn_query::find_similar(
+                    &state.query_ctx(&view),
+                    &FindSimilarArgs {
+                        id,
+                        page_size,
+                        include_tests: Some(facets.include_tests),
+                        include_external: Some(facets.include_external),
+                    },
+                )
+                .await
+            }
             .await,
             fmt,
         ),
-        Some(FindSub::Usages {
+        _ => unreachable!("find_action routes only at-location and similar here"),
+    }
+}
+
+/// The `find usages` arm, split out on its own.
+///
+/// `find_action` is a match over six subcommands and each arm now opens a
+/// query, so the branch count grew past the CRAP gate. This arm is the
+/// largest — it carries six repeatable filters — and lifting it out drops the
+/// dispatcher back under without touching what any arm does.
+#[expect(
+    clippy::unreachable,
+    reason = "`find_action` routes only the usages variant here; the arm names that \
+              invariant rather than letting a future variant fall through"
+)]
+async fn find_usages_action(
+    state: &ServerState,
+    fmt: Format,
+    facets: Facets,
+    sub: FindSub,
+) -> anyhow::Result<()> {
+    match sub {
+        FindSub::Usages {
             query,
             kind,
             path,
@@ -778,15 +899,16 @@ async fn find_action(
             language,
             edge_kinds,
             page,
-        }) => {
+        } => {
             let kind = parse_enums::<Kind>(&kind, "kind")?;
             let language = parse_enums::<Language>(&language, "language")?;
             let edge_kinds = parse_enums::<EdgeKind>(&edge_kinds, "edge-kinds")?;
             emit_result(
                 run_listing(page.all, &page, |pg| async {
-                    tools::find_usages(
-                        state,
-                        &tools::FindUsagesArgs {
+                    let view = state.open_query().await?;
+                    kenn_query::find_usages(
+                        &state.query_ctx(&view),
+                        &FindUsagesArgs {
                             query: query.clone(),
                             kind: kind.clone(),
                             path: opt_vec(&path),
@@ -805,6 +927,7 @@ async fn find_action(
                 fmt,
             )
         }
+        _ => unreachable!("find_action routes only the usages arm here"),
     }
 }
 
@@ -822,9 +945,10 @@ async fn list_action(
             let c = $c;
             emit_result(
                 run_listing(c.page.all, &c.page, |pg| async {
+                    let view = state.open_query().await?;
                     $tool(
-                        state,
-                        &tools::ByIdArgs {
+                        &state.query_ctx(&view),
+                        &ByIdArgs {
                             id: c.id.clone(),
                             filters: to_filters(&c.filters, facets)?,
                             pagination: pg,
@@ -838,13 +962,13 @@ async fn list_action(
         }};
     }
     match sub {
-        ListSub::Callers(c) => by_id!(tools::list_callers, c),
-        ListSub::Callees(c) => by_id!(tools::list_callees, c),
-        ListSub::Implementers(c) => by_id!(tools::list_implementers, c),
-        ListSub::Overrides(c) => by_id!(tools::list_overrides, c),
-        ListSub::Correspondences(c) => by_id!(tools::list_correspondences, c),
-        ListSub::InScope(c) => by_id!(tools::list_in_scope, c),
-        ListSub::ModuleFiles(c) => by_id!(tools::list_module_files, c),
+        ListSub::Callers(c) => by_id!(kenn_query::list_callers, c),
+        ListSub::Callees(c) => by_id!(kenn_query::list_callees, c),
+        ListSub::Implementers(c) => by_id!(kenn_query::list_implementers, c),
+        ListSub::Overrides(c) => by_id!(kenn_query::list_overrides, c),
+        ListSub::Correspondences(c) => by_id!(kenn_query::list_correspondences, c),
+        ListSub::InScope(c) => by_id!(kenn_query::list_in_scope, c),
+        ListSub::ModuleFiles(c) => by_id!(kenn_query::list_module_files, c),
         ListSub::Usages {
             id,
             edge_kinds,
@@ -859,9 +983,10 @@ async fn list_action(
                 .transpose()?;
             emit_result(
                 run_listing(page.all, &page, |pg| async {
-                    tools::list_usages(
-                        state,
-                        &tools::ListUsagesArgs {
+                    let view = state.open_query().await?;
+                    kenn_query::list_usages(
+                        &state.query_ctx(&view),
+                        &ListUsagesArgs {
                             id: id.clone(),
                             edge_kinds: edge_kinds.clone(),
                             op_filter,
@@ -885,9 +1010,10 @@ async fn list_action(
             let direction = parse_enum(&direction, "direction")?;
             emit_result(
                 run_listing(page.all, &page, |pg| async {
-                    tools::list_imports(
-                        state,
-                        &tools::ListImportsArgs {
+                    let view = state.open_query().await?;
+                    kenn_query::list_imports(
+                        &state.query_ctx(&view),
+                        &ListImportsArgs {
                             id: id.clone(),
                             direction,
                             kind: opt_vec(&import_kind),
@@ -907,29 +1033,37 @@ async fn list_action(
 async fn check_action(state: &ServerState, fmt: Format, sub: CheckSub) -> anyhow::Result<()> {
     match sub {
         CheckSub::Links { grade, limit } => emit_result(
-            tools::check_links(
-                state,
-                &tools::CheckLinksArgs {
-                    grade: opt_vec(&grade),
-                    limit,
-                },
-            )
+            async {
+                let view = state.open_query().await?;
+                kenn_query::check_links(
+                    &state.query_ctx(&view),
+                    &CheckLinksArgs {
+                        grade: opt_vec(&grade),
+                        limit,
+                    },
+                )
+                .await
+            }
             .await,
             fmt,
         ),
         CheckSub::Css { category, limit } => emit_result(
-            tools::check_css(
-                state,
-                &tools::CheckCssArgs {
-                    category: opt_vec(&category),
-                    limit,
-                },
-            )
+            async {
+                let view = state.open_query().await?;
+                kenn_query::check_css(
+                    &state.query_ctx(&view),
+                    &CheckCssArgs {
+                        category: opt_vec(&category),
+                        limit,
+                    },
+                )
+                .await
+            }
             .await,
             fmt,
         ),
         CheckSub::Findings => emit_result(
-            tools::check_anchors(state, &tools::CheckAnchorsArgs {}).await,
+            qf!(state, kenn_query::check_anchors, &CheckAnchorsArgs {}),
             fmt,
         ),
     }
@@ -938,14 +1072,15 @@ async fn check_action(state: &ServerState, fmt: Format, sub: CheckSub) -> anyhow
 async fn findings_action(state: &ServerState, fmt: Format, sub: FindingsSub) -> anyhow::Result<()> {
     match sub {
         FindingsSub::Get { id } => emit_result(
-            tools::get_finding(state, &tools::GetFindingArgs { id }).await,
+            qf!(state, kenn_query::get_finding, &GetFindingArgs { id }),
             fmt,
         ),
         FindingsSub::Search { query, page } => emit_result(
             run_listing(page.all, &page, |pg| async {
-                tools::search_findings(
-                    state,
-                    &tools::SearchFindingsArgs {
+                let view = state.open_query_allow_empty()?;
+                kenn_query::search_findings(
+                    &state.query_ctx(&view),
+                    &SearchFindingsArgs {
                         query: query.clone(),
                         pagination: pg,
                     },
@@ -961,41 +1096,45 @@ async fn findings_action(state: &ServerState, fmt: Format, sub: FindingsSub) -> 
             tag,
             anchor,
         } => emit_result(
-            tools::store_finding(
+            qf!(
                 state,
-                &tools::StoreFindingArgs {
+                kenn_query::store_finding,
+                &StoreFindingArgs {
                     text,
                     parent_ids: opt_vec(&parent),
                     tags: opt_vec(&tag),
                     anchors: opt_vec(&anchor),
                 },
-            )
-            .await,
+            ),
             fmt,
         ),
         FindingsSub::Merge { ids, text, tag } => emit_result(
-            tools::merge_findings(
+            qf!(
                 state,
-                &tools::MergeFindingsArgs {
+                kenn_query::merge_findings,
+                &MergeFindingsArgs {
                     ids,
                     text,
                     tags: opt_vec(&tag),
                 },
-            )
-            .await,
+            ),
             fmt,
         ),
         FindingsSub::Directives { paths, query } => emit_result(
             // Embedder pre-warmed in `run_on_state` when `--query` is present.
-            tools::find_directives(state, &tools::FindDirectivesArgs { paths, query }).await,
+            qf!(
+                state,
+                kenn_query::find_directives,
+                &FindDirectivesArgs { paths, query }
+            ),
             fmt,
         ),
         FindingsSub::Predecessors { id } => emit_result(
-            tools::find_predecessors(state, &tools::FindingDagArgs { id }).await,
+            qf!(state, kenn_query::find_predecessors, &FindingDagArgs { id }),
             fmt,
         ),
         FindingsSub::Successors { id } => emit_result(
-            tools::find_successors(state, &tools::FindingDagArgs { id }).await,
+            qf!(state, kenn_query::find_successors, &FindingDagArgs { id }),
             fmt,
         ),
         FindingsSub::Touch {
@@ -1005,17 +1144,17 @@ async fn findings_action(state: &ServerState, fmt: Format, sub: FindingsSub) -> 
             from,
             to,
         } => emit_result(
-            tools::record_anchor(
+            qf!(
                 state,
-                &tools::RecordAnchorArgs {
+                kenn_query::record_anchor,
+                &RecordAnchorArgs {
                     finding_id,
                     op,
                     anchor,
                     from,
                     to,
                 },
-            )
-            .await,
+            ),
             fmt,
         ),
     }
@@ -1094,11 +1233,11 @@ impl Page for FindUsagesResponse {
 /// to exhaustion and return one response: all pages' `items` merged, `next`
 /// cleared, and the last page's other meta fields kept. Typed all the way —
 /// no `Value` round-trip, so the emitted columns still follow struct order.
-async fn run_listing<P, F, Fut>(all: bool, page: &PageArgs, mut call: F) -> Result<P, McpError>
+async fn run_listing<P, F, Fut>(all: bool, page: &PageArgs, mut call: F) -> Result<P, QueryError>
 where
     P: Page,
     F: FnMut(Option<Pagination>) -> Fut,
-    Fut: Future<Output = Result<P, McpError>>,
+    Fut: Future<Output = Result<P, QueryError>>,
 {
     if !all {
         return call(to_pagination(page)).await;
@@ -1135,7 +1274,7 @@ async fn prewarm_embedder() {
 
 /// Serialize a tool result to stdout in the chosen format, or propagate its
 /// error. Keeps the per-subcommand arms a single expression.
-fn emit_result<T: Serialize>(result: Result<T, McpError>, fmt: Format) -> anyhow::Result<()> {
+fn emit_result<T: Serialize>(result: Result<T, QueryError>, fmt: Format) -> anyhow::Result<()> {
     emit(&result?, fmt)
 }
 
@@ -1153,7 +1292,7 @@ fn to_pagination(p: &PageArgs) -> Option<Pagination> {
 /// Build the tool `Filters` from the repeatable narrowing flags plus the
 /// universal test/external facets. The facets are sent explicitly (always
 /// `Some`) so the CLI's universal default wins over each tool's own default.
-fn to_filters(f: &FilterArgs, facets: Facets) -> Result<Option<Filters>, McpError> {
+fn to_filters(f: &FilterArgs, facets: Facets) -> Result<Option<Filters>, QueryError> {
     Ok(Some(Filters {
         language: parse_enums::<Language>(&f.language, "language")?,
         kind: parse_enums::<Kind>(&f.kind, "kind")?,
@@ -1172,10 +1311,10 @@ fn opt_vec(v: &[String]) -> Option<Vec<String>> {
     }
 }
 
-fn parse_enum<T: serde::de::DeserializeOwned>(s: &str, what: &str) -> Result<T, McpError> {
+fn parse_enum<T: serde::de::DeserializeOwned>(s: &str, what: &str) -> Result<T, QueryError> {
     serde_json::from_value(Value::String(s.to_owned())).map_err(|e| {
-        McpError::new(
-            McpErrorCode::InvalidInput,
+        QueryError::new(
+            QueryErrorCode::InvalidInput,
             format!("invalid {what} '{s}': {e}"),
         )
     })
@@ -1184,7 +1323,7 @@ fn parse_enum<T: serde::de::DeserializeOwned>(s: &str, what: &str) -> Result<T, 
 fn parse_enums<T: serde::de::DeserializeOwned>(
     v: &[String],
     what: &str,
-) -> Result<Option<Vec<T>>, McpError> {
+) -> Result<Option<Vec<T>>, QueryError> {
     if v.is_empty() {
         return Ok(None);
     }

@@ -1,30 +1,23 @@
 //! `kenn-mcp` — MCP read-server for kenn snapshots.
 //!
-//! 24 tools over the `kenn-store` reader snapshot and the durable
-//! findings store — code-graph reads, unified search, and the
-//! findings knowledge layer. Surface, envelopes, cursor format, and
-//! error model are defined by the `mcp-server` and `findings-mcp`
-//! `OpenSpec` proposals.
+//! The transport half of kenn's read path. It owns the JSON-RPC surface, the
+//! server lifecycle (indexing → embedding → ready), the file watcher, and the
+//! reindex orchestration; the questions themselves live in [`kenn_query`],
+//! which this crate wraps and the CLI calls directly.
+//!
+//! Concretely, a `#[tool]` wrapper here does three things and no more: gate the
+//! snapshot, build a [`kenn_query::QueryCtx`], and render the result — see
+//! `server/core.rs`. Surface, envelopes, cursor format, and error model are
+//! defined by the `mcp-server` and `findings-mcp` `OpenSpec` proposals; the
+//! mapping from a [`kenn_query::QueryError`] onto JSON-RPC's numeric space is
+//! this crate's business alone (`server/errors.rs`).
 
-pub mod cursor;
-pub mod error;
+pub mod index_status;
 pub mod indexing;
-pub mod result_cache;
 pub mod server;
 pub mod state;
 pub mod tools;
-pub mod types;
 pub mod watcher;
 
-pub use cursor::{
-    decode_cursor, encode_list_cursor, encode_topk_cursor, encode_usages_cursor,
-    snapshot_id_from_timestamp, CacheId, DecodedCursor, SnapshotId,
-};
-pub use error::{McpError, McpErrorCode};
+pub use index_status::{IndexStatus, IndexStatusProgress};
 pub use state::{WorkspaceSource, WORKSPACE_DISCOVERY_TARGET};
-pub use types::{
-    FileRef, Filters, FindUsagesResponse, FindingView, IndexStatus, IndexStatusProgress,
-    ListResponse, Pagination, RankedCodeHit, RankedFindingView, SemanticSearchResponse,
-    SingleResponse, SourceView, StoreFindingResponse, SymbolDetail, SymbolRef, UsageRef,
-    WorkspaceInfo,
-};

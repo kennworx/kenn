@@ -20,10 +20,11 @@ use kenn_store::api::Reader;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::error::McpError;
+use crate::error::QueryError;
 use crate::types::ListResponse;
 
-use super::{internal, ServerState};
+use crate::ctx::QueryCtx;
+use crate::internal;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListTablesArgs {
@@ -90,99 +91,94 @@ const TABLE_EDGES: [(EdgeKind, RefKind); 3] = [
 /// # Errors
 /// Returns a store error only when a read fails.
 pub async fn list_tables(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ListTablesArgs,
-) -> Result<ListResponse<TableView>, McpError> {
-    let want = args.table.clone();
-    let args_pagination = args.pagination.clone();
-    state
-        .with_db(|h| async move {
-            let symbols = h.read.scan_symbols().await.map_err(internal)?;
-            let table_kind = Kind::SqlTable.db_name();
+) -> Result<ListResponse<TableView>, QueryError> {
+    let want = args.table.as_deref();
+    let symbols = ctx.read.scan_symbols().await.map_err(internal)?;
+    let table_kind = Kind::SqlTable.db_name();
 
-            let sites = gather_sites(&h, &symbols).await?;
+    let sites = gather_sites(ctx, &symbols).await?;
 
-            let table_rows: Vec<(u32, String, String)> = symbols
-                .iter()
-                .filter(|s| s.kind == table_kind)
-                .map(|s| (s.id, s.pub_id.clone(), s.name.clone()))
-                .collect();
+    let table_rows: Vec<(u32, String, String)> = symbols
+        .iter()
+        .filter(|s| s.kind == table_kind)
+        .map(|s| (s.id, s.pub_id.clone(), s.name.clone()))
+        .collect();
 
-            // Borrowed views for the shared selection.
-            let tables_in: Vec<(u32, &str)> = table_rows
-                .iter()
-                .map(|(id, _, name)| (*id, name.as_str()))
-                .collect();
-            let refs_in: Vec<(u32, RefSite<'_>)> = sites
-                .iter()
-                .map(|(t, s)| {
-                    (
-                        *t,
-                        RefSite {
-                            symbol: s.symbol,
-                            name: &s.name,
-                            file: &s.file,
-                            language: &s.language,
-                            kind: s.kind,
-                        },
-                    )
-                })
-                .collect();
-
-            let pub_id_of: std::collections::HashMap<u32, &str> = table_rows
-                .iter()
-                .map(|(id, pid, _)| (*id, pid.as_str()))
-                .collect();
-            let site_id_of: std::collections::HashMap<u32, &str> = sites
-                .iter()
-                .map(|(_, s)| (s.symbol, s.id.as_str()))
-                .collect();
-
-            let mut items: Vec<TableView> = Vec::new();
-            for t in tables::select_tables(&tables_in, &refs_in) {
-                let Some(pub_id) = pub_id_of.get(&t.node).copied() else {
-                    continue;
-                };
-                // A name argument is a QUERY: it matches the pub_id OR the
-                // display name, and a name matching several keeps them all.
-                if let Some(w) = want.as_deref() {
-                    if pub_id != w && t.name != w {
-                        continue;
-                    }
-                }
-                let mut views = Vec::new();
-                if want.is_some() {
-                    for (file, group) in &t.by_file {
-                        for s in group {
-                            views.push(TableRefView {
-                                id: site_id_of
-                                    .get(&s.symbol)
-                                    .copied()
-                                    .unwrap_or_default()
-                                    .to_owned(),
-                                name: s.name.to_owned(),
-                                file: (*file).to_owned(),
-                                language: s.language.to_owned(),
-                                kind: s.kind.as_str().to_owned(),
-                            });
-                        }
-                    }
-                }
-                items.push(TableView {
-                    symbol: pub_id.to_owned(),
-                    name: t.name.to_owned(),
-                    internal: t.internal,
-                    file_span: t.file_span,
-                    language_span: t.language_span,
-                    references: t.total_refs,
-                    sites: views,
-                });
-            }
-            let (items, next) =
-                super::support::page_axis_items(items, args_pagination.as_ref(), h.snapshot_id)?;
-            Ok(ListResponse { items, next })
+    // Borrowed views for the shared selection.
+    let tables_in: Vec<(u32, &str)> = table_rows
+        .iter()
+        .map(|(id, _, name)| (*id, name.as_str()))
+        .collect();
+    let refs_in: Vec<(u32, RefSite<'_>)> = sites
+        .iter()
+        .map(|(t, s)| {
+            (
+                *t,
+                RefSite {
+                    symbol: s.symbol,
+                    name: &s.name,
+                    file: &s.file,
+                    language: &s.language,
+                    kind: s.kind,
+                },
+            )
         })
-        .await
+        .collect();
+
+    let pub_id_of: std::collections::HashMap<u32, &str> = table_rows
+        .iter()
+        .map(|(id, pid, _)| (*id, pid.as_str()))
+        .collect();
+    let site_id_of: std::collections::HashMap<u32, &str> = sites
+        .iter()
+        .map(|(_, s)| (s.symbol, s.id.as_str()))
+        .collect();
+
+    let mut items: Vec<TableView> = Vec::new();
+    for t in tables::select_tables(&tables_in, &refs_in) {
+        let Some(pub_id) = pub_id_of.get(&t.node).copied() else {
+            continue;
+        };
+        // A name argument is a QUERY: it matches the pub_id OR the display
+        // name, and a name matching several keeps them all.
+        if let Some(w) = want {
+            if pub_id != w && t.name != w {
+                continue;
+            }
+        }
+        let mut views = Vec::new();
+        if want.is_some() {
+            for (file, group) in &t.by_file {
+                for s in group {
+                    views.push(TableRefView {
+                        id: site_id_of
+                            .get(&s.symbol)
+                            .copied()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        name: s.name.to_owned(),
+                        file: (*file).to_owned(),
+                        language: s.language.to_owned(),
+                        kind: s.kind.as_str().to_owned(),
+                    });
+                }
+            }
+        }
+        items.push(TableView {
+            symbol: pub_id.to_owned(),
+            name: t.name.to_owned(),
+            internal: t.internal,
+            file_span: t.file_span,
+            language_span: t.language_span,
+            references: t.total_refs,
+            sites: views,
+        });
+    }
+    let (items, next) =
+        crate::support::page_axis_items(items, args.pagination.as_ref(), ctx.snapshot_id)?;
+    Ok(ListResponse { items, next })
 }
 
 /// Every table reference in the workspace, as owned rows.
@@ -193,9 +189,9 @@ pub async fn list_tables(
 /// the workspace, and a round-trip each is the shape that made the code→table
 /// pass unviable before it was rewritten.
 async fn gather_sites(
-    h: &super::state::ReadyView,
+    ctx: &QueryCtx<'_>,
     symbols: &[kenn_store::SymbolRow],
-) -> Result<Vec<(u32, RefSiteOwned)>, McpError> {
+) -> Result<Vec<(u32, RefSiteOwned)>, QueryError> {
     // Per-site edges, not the rolled-up aggregate ones the contracts
     // axis reads: which FILE made the reference is the answer here, and
     // an aggregate has already collapsed that.
@@ -203,10 +199,10 @@ async fn gather_sites(
     // Bulk scans, not per-symbol fetches: the reference set is every
     // table edge in the workspace, and a round-trip each would be the
     // shape that made the code→table pass unviable.
-    let files = h.read.scan_files().await.map_err(internal)?;
+    let files = ctx.read.scan_files().await.map_err(internal)?;
     let path_of: std::collections::HashMap<u32, &str> =
         files.iter().map(|f| (f.id, f.path.as_str())).collect();
-    let file_of: std::collections::HashMap<u32, u32> = h
+    let file_of: std::collections::HashMap<u32, u32> = ctx
         .read
         .scan_def_files()
         .await
@@ -218,7 +214,12 @@ async fn gather_sites(
 
     let mut sites: Vec<(u32, RefSiteOwned)> = Vec::new();
     for (kind, rk) in TABLE_EDGES {
-        for (src, target) in h.read.scan_edges(kind.db_name()).await.map_err(internal)? {
+        for (src, target) in ctx
+            .read
+            .scan_edges(kind.db_name())
+            .await
+            .map_err(internal)?
+        {
             let Some(s) = sym_of.get(&src) else { continue };
             let file = file_of
                 .get(&src)

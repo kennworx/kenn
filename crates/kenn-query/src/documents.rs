@@ -16,10 +16,11 @@ use kenn_store::api::Reader;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::error::McpError;
+use crate::error::QueryError;
 use crate::types::ListResponse;
 
-use super::{internal, ServerState};
+use crate::ctx::QueryCtx;
+use crate::internal;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListDocumentsArgs {
@@ -83,20 +84,16 @@ pub fn document_views(files: &[kenn_store::FileRow], want: Option<&str>) -> Vec<
 
 /// List the workspace's first-party non-code directories.
 pub async fn list_documents(
-    state: &ServerState,
+    ctx: &QueryCtx<'_>,
     args: &ListDocumentsArgs,
-) -> Result<ListResponse<DocumentView>, McpError> {
+) -> Result<ListResponse<DocumentView>, QueryError> {
     let want = args.document.clone();
     let args_pagination = args.pagination.clone();
-    state
-        .with_db(|h| async move {
-            let files = h.read.scan_files().await.map_err(internal)?;
-            let items = document_views(&files, want.as_deref());
-            let (items, next) =
-                super::support::page_axis_items(items, args_pagination.as_ref(), h.snapshot_id)?;
-            Ok(ListResponse { items, next })
-        })
-        .await
+    let files = ctx.read.scan_files().await.map_err(internal)?;
+    let items = document_views(&files, want.as_deref());
+    let (items, next) =
+        crate::support::page_axis_items(items, args_pagination.as_ref(), ctx.snapshot_id)?;
+    Ok(ListResponse { items, next })
 }
 
 #[cfg(test)]

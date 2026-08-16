@@ -6,12 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kenn_mcp::state::LifecycleState;
-use kenn_mcp::tools::{
-    find_symbol, search_symbols, FindSymbolArgs, SearchSymbolsArgs, ServerState,
-};
-use kenn_mcp::types::{RankedSymbolRef, SearchHitRef};
-use kenn_mcp::{snapshot_id_from_timestamp, McpErrorCode, Pagination};
+use kenn_mcp::tools::ServerState;
 use kenn_model::{FileDocsRecord, FileRecord, Kind, Language, PackageRecord, SymbolRecord};
+use kenn_query::types::{RankedSymbolRef, SearchHitRef};
+use kenn_query::{
+    find_similar, find_symbol, get_symbol, search_symbols, FindSimilarArgs, FindSymbolArgs,
+    GetSymbolArgs, SearchSymbolsArgs,
+};
+use kenn_query::{snapshot_id_from_timestamp, Pagination, QueryErrorCode};
 use kenn_store::api::WriteBatch;
 use kenn_store::{open_writer, reader_from_writer, DbReader, DbWriter, WriterOptions};
 use tempfile::TempDir;
@@ -129,9 +131,11 @@ async fn find_symbol_ranks_exact_then_substring() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     let resp = find_symbol(
-        &state,
+        &ctx,
         &FindSymbolArgs {
             name: "OrderHandler".into(),
             kind: None,
@@ -162,8 +166,10 @@ async fn search_symbols_returns_blended_ranking() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = search_symbols(&state, &search_args(50, None))
+    let resp = search_symbols(&ctx, &search_args(50, None))
         .await
         .expect("search_symbols");
     assert!(
@@ -189,8 +195,10 @@ async fn search_symbols_paginates_without_gaps() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let full = search_symbols(&state, &search_args(50, None))
+    let full = search_symbols(&ctx, &search_args(50, None))
         .await
         .expect("full page");
     let full_ids: Vec<String> = full.items.iter().map(|r| hit_sym(r).id.clone()).collect();
@@ -198,7 +206,7 @@ async fn search_symbols_paginates_without_gaps() {
     let mut paged: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
-        let resp = search_symbols(&state, &search_args(2, cursor.clone()))
+        let resp = search_symbols(&ctx, &search_args(2, cursor.clone()))
             .await
             .expect("page");
         paged.extend(resp.items.iter().map(|r| hit_sym(r).id.clone()));
@@ -221,23 +229,26 @@ async fn search_symbols_paginates_without_gaps() {
 /// is JSON-RPC `-32602` with `data.kenn_subcode = "STALE_CURSOR"`.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_symbols_rejects_a_stale_cursor() {
-    use kenn_mcp::encode_topk_cursor;
+    use kenn_query::encode_topk_cursor;
     let dir = TempDir::new().unwrap();
     let writer = build_corpus(dir.path()).await;
     let state = ready_state(
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     // A TopK cursor with a cache_id that was never put. Cache miss
     // surfaces as STALE_CURSOR.
     let stale_cursor = encode_topk_cursor([0xFE; 16], 0);
-    let err = search_symbols(&state, &search_args(2, Some(stale_cursor)))
+    let err = search_symbols(&ctx, &search_args(2, Some(stale_cursor)))
         .await
         .expect_err("stale cursor must be rejected");
-    assert_eq!(err.code, McpErrorCode::StaleCursor);
-    // Both stale and malformed cursors map to the same JSON-RPC code.
-    assert_eq!(err.code.json_rpc_code(), -32602);
+    // The string code is the query-layer fact; both stale and malformed
+    // cursors share one JSON-RPC number, and that mapping is asserted in the
+    // transport (`server/errors.rs`) where it now lives.
+    assert_eq!(err.code, QueryErrorCode::StaleCursor);
 }
 
 /// Per the MCP pagination spec, a length-mutated cursor decodes-fails
@@ -251,13 +262,14 @@ async fn search_symbols_rejects_a_malformed_cursor() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     // Truncated — wrong byte count after base64 decode.
-    let err = search_symbols(&state, &search_args(2, Some("abc".to_string())))
+    let err = search_symbols(&ctx, &search_args(2, Some("abc".to_string())))
         .await
         .expect_err("malformed cursor must be rejected");
-    assert_eq!(err.code, McpErrorCode::InvalidInput);
-    assert_eq!(err.code.json_rpc_code(), -32602);
+    assert_eq!(err.code, QueryErrorCode::InvalidInput);
 }
 
 /// The final page of a paginated walk explicitly carries no
@@ -273,10 +285,12 @@ async fn search_symbols_final_page_emits_no_cursor() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     let mut cursor: Option<String> = None;
     for _ in 0..100 {
-        let resp = search_symbols(&state, &search_args(2, cursor.clone()))
+        let resp = search_symbols(&ctx, &search_args(2, cursor.clone()))
             .await
             .expect("page");
         if let Some(c) = resp.next {
@@ -309,8 +323,10 @@ async fn search_symbols_caches_first_call() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let single = search_symbols(&state, &search_args(30, None))
+    let single = search_symbols(&ctx, &search_args(30, None))
         .await
         .expect("single-shot");
     let single_ids: Vec<String> = single.items.iter().map(|r| hit_sym(r).id.clone()).collect();
@@ -324,7 +340,7 @@ async fn search_symbols_caches_first_call() {
     let mut cursor: Option<String> = None;
     let mut pages = 0;
     loop {
-        let resp = search_symbols(&state, &search_args(2, cursor.clone()))
+        let resp = search_symbols(&ctx, &search_args(2, cursor.clone()))
             .await
             .expect("page");
         paged_ids.extend(resp.items.iter().map(|r| hit_sym(r).id.clone()));
@@ -359,8 +375,10 @@ async fn search_symbols_cursor_stale_after_clear() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let page1 = search_symbols(&state, &search_args(2, None))
+    let page1 = search_symbols(&ctx, &search_args(2, None))
         .await
         .expect("first page");
     let cursor = page1
@@ -370,10 +388,10 @@ async fn search_symbols_cursor_stale_after_clear() {
     // Simulate snapshot rotation by clearing the cache.
     state.clear_result_caches();
 
-    let err = search_symbols(&state, &search_args(2, Some(cursor)))
+    let err = search_symbols(&ctx, &search_args(2, Some(cursor)))
         .await
         .expect_err("continuation after cache clear must fail");
-    assert_eq!(err.code, McpErrorCode::StaleCursor);
+    assert_eq!(err.code, QueryErrorCode::StaleCursor);
 }
 
 /// Task 5.4: a C# file header (no owning symbol) is BM25-searchable and
@@ -417,9 +435,11 @@ async fn search_symbols_returns_file_hit_for_header_token() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     let resp = search_symbols(
-        &state,
+        &ctx,
         &SearchSymbolsArgs {
             query: "zqxsettlementtoken".into(),
             filters: None,
@@ -442,4 +462,203 @@ async fn search_symbols_returns_file_hit_for_header_token() {
         .expect("the file-header token must surface as a file hit");
     assert_eq!(file_hit.kind, "file");
     assert_eq!(file_hit.path, "src/Payments.cs");
+}
+
+/// `get_symbol` resolves a `pub_id` to its detail, and rejects a malformed id.
+///
+/// Restores coverage the `QueryCtx` migration removed: the only test touching
+/// `get_symbol` asserted its `INVALID_INPUT` contract against a server with no
+/// snapshot, and that assertion moved onto the readiness gate — which does not
+/// exercise `get_symbol` at all. The gate is checked elsewhere; this checks the
+/// query, against a snapshot that actually has symbols in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_symbol_resolves_a_pub_id_and_rejects_a_bad_one() {
+    let dir = TempDir::new().unwrap();
+    let writer = build_corpus(dir.path()).await;
+    let state = ready_state(
+        dir.path(),
+        reader_from_writer(&writer).await.expect("reader"),
+    );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
+
+    let resp = get_symbol(
+        &ctx,
+        &GetSymbolArgs {
+            id: "cs:OrderHandler".into(),
+        },
+    )
+    .await
+    .expect("get_symbol");
+    let item = resp.item.expect("OrderHandler resolves");
+    assert_eq!(item.base.name, "OrderHandler");
+
+    // An id with no language prefix cannot be split, and that is an error
+    // rather than a miss — argument validation still runs first, now that a
+    // snapshot is genuinely open.
+    let err = get_symbol(
+        &ctx,
+        &GetSymbolArgs {
+            id: "OrderHandler".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, kenn_query::QueryErrorCode::InvalidInput);
+
+    // A well-formed id for a symbol that does not exist is a miss, not an error.
+    let resp = get_symbol(
+        &ctx,
+        &GetSymbolArgs {
+            id: "cs:NoSuchSymbol".into(),
+        },
+    )
+    .await
+    .expect("get_symbol miss");
+    assert!(!resp.found);
+}
+
+/// `find_similar` distinguishes "no vector yet" from "no such symbol".
+///
+/// Same restoration as `get_symbol` above. The corpus carries no embeddings, so
+/// this exercises the missing-vector path — which is the interesting one: it
+/// must report a symbol with no vector differently from one that does not
+/// exist, and whether that is transient depends on the embed stage the context
+/// carries.
+#[tokio::test(flavor = "multi_thread")]
+async fn find_similar_separates_a_missing_vector_from_a_missing_symbol() {
+    let dir = TempDir::new().unwrap();
+    let writer = build_corpus(dir.path()).await;
+    let state = ready_state(
+        dir.path(),
+        reader_from_writer(&writer).await.expect("reader"),
+    );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
+
+    // A real symbol with no committed vector: not an error, just no neighbours.
+    let resp = find_similar(
+        &ctx,
+        &FindSimilarArgs {
+            id: "cs:OrderHandler".into(),
+            page_size: None,
+            include_tests: None,
+            include_external: None,
+        },
+    )
+    .await;
+    match resp {
+        Ok(r) => assert!(
+            r.items.is_empty(),
+            "no vectors committed, so no neighbours: {:?}",
+            r.items
+        ),
+        // Acceptable too: the embed stage may make a missing vector transient.
+        Err(e) => assert_eq!(e.code, kenn_query::QueryErrorCode::EmbeddingUnavailable),
+    }
+
+    // A malformed id is rejected before any vector lookup.
+    let err = find_similar(
+        &ctx,
+        &FindSimilarArgs {
+            id: "OrderHandler".into(),
+            page_size: None,
+            include_tests: None,
+            include_external: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, kenn_query::QueryErrorCode::InvalidInput);
+}
+/// `get_source` slices a symbol's definition out of the file on disk.
+///
+/// Builds its own corpus rather than reusing `build_corpus`: this is the one
+/// query that reads the working tree instead of the snapshot, so it needs a
+/// real file AND a def row pointing into it. A fixture that only writes rows
+/// cannot reach the code under test.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_source_slices_the_definition_from_disk() {
+    use kenn_model::DefRecord;
+    use kenn_query::{get_source, GetSourceArgs};
+
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
+    std::fs::write(
+        dir.path().join("src/Orders.cs"),
+        "using System;\nclass OrderHandler {\n    void Handle() {}\n}\n",
+    )
+    .expect("write source");
+
+    let writer = open_writer(dir.path(), WriterOptions::default())
+        .await
+        .expect("open_writer");
+    writer
+        .write_batch(&WriteBatch {
+            packages: vec![PackageRecord {
+                id: PKG,
+                name: "search-test".into(),
+                version: "0.0.0".into(),
+                manager: "cargo".into(),
+                external: false,
+            }],
+            files: vec![FileRecord {
+                id: FILE,
+                path: "src/Orders.cs".into(),
+                language: Language::Csharp,
+                test: false,
+                external: false,
+                content_hash: 0,
+            }],
+            symbols: vec![sym(101, "OrderHandler"), sym(104, "OrderRepository")],
+            symbol_docs: Vec::new(),
+            file_docs: Vec::new(),
+            defs: vec![DefRecord {
+                sym_id: 101,
+                file_id: FILE,
+                start_line: 2,
+                start_col: 0,
+                end_line: 4,
+                end_col: 0,
+                body_start_line: 0,
+                body_end_line: 0,
+            }],
+            edges: Vec::new(),
+        })
+        .await
+        .expect("write_batch");
+    writer.finalize().await.expect("finalize");
+
+    let state = ready_state(
+        dir.path(),
+        reader_from_writer(&writer).await.expect("reader"),
+    );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
+
+    let resp = get_source(
+        &ctx,
+        &GetSourceArgs {
+            id: "cs:OrderHandler".into(),
+        },
+    )
+    .await
+    .expect("get_source");
+    let item = resp.item.expect("OrderHandler has a definition on disk");
+    assert!(
+        item.text.contains("class OrderHandler"),
+        "sliced the definition, not the whole file: {:?}",
+        item.text
+    );
+
+    // A symbol with no def row is a miss, not an error.
+    let resp = get_source(
+        &ctx,
+        &GetSourceArgs {
+            id: "cs:OrderRepository".into(),
+        },
+    )
+    .await
+    .expect("get_source miss");
+    assert!(!resp.found);
 }

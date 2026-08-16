@@ -59,14 +59,18 @@
   same shared input type the producer projects its records into. → verify: producer and
   query agree on identities, ownership, and ordering for one snapshot (spec scenario);
   a workspace with more tables than the render cap still reaches every table by query.
-- [ ] 3.5 Expose the axis through the MCP surface alongside the other axes. → verify:
-  the tool returns the same rows as the CLI for one snapshot. **Deferred to
-  `split-query-from-mcp` §6.1, with the reason corrected.** The blocker was never this
-  axis: NO atlas axis is registered as an MCP tool, though `list_packages`,
-  `list_domains`, `list_contracts`, and `list_tables` all exist in `kenn-mcp/src/tools/`
-  and are proven by their CLI verbs. Registering tables alone would put it where no
-  sibling lives; registering all four is a decision about the MCP surface, which that
-  change makes cheap by turning a query into a pure function over a snapshot.
+- [x] 3.5 Expose the axis through the MCP surface alongside the other axes. → verify:
+  the tool returns the same rows as the CLI for one snapshot. **Done in
+  `split-query-from-mcp` §6.1**, where it was deferred with the reason corrected. The
+  blocker was never this axis: NO atlas axis was registered as an MCP tool, though
+  `list_packages`, `list_domains`, `list_contracts`, and `list_tables` all existed in
+  `kenn-mcp/src/tools/` and were proven by their CLI verbs. Registering tables alone
+  would have put it where no sibling lived; registering the whole set was a decision
+  about the MCP surface, which that change made cheap by turning a query into a pure
+  function over a snapshot. Verified by driving JSON-RPC over stdio against this
+  repo's snapshot: `list_tables` (and each sibling) is byte-identical to its
+  `--json` CLI verb. The set turned out to be **five**, not four — `list_documents`
+  was required by the `mcp-server` spec and missing from both lists.
 
 ## 4. Verification
 
@@ -171,6 +175,20 @@ exercised daily by their CLI verbs. Only the `#[tool]` wrapper is missing. What
 made that feel like a layering question is that the crate holding them is 87%
 not MCP, which is what `split-query-from-mcp` addresses; 3.5 moves there as
 §6.1.
+
+**Closed by `split-query-from-mcp` §6.1.** All *five* axes are now registered —
+the count was five, not four: `list_documents` was missing from this note and
+from §6.1's own list, though `openspec/specs/mcp-server/spec.md` had required it
+by name all along ("Atlas axis read tools"). Registering four would have left
+one axis off the surface for no reason anyone could have stated.
+
+The premise above was right that this was one decision about the whole surface,
+and right that it was not a question about tables. It was wrong only about the
+blocker: nothing about the tools needed to change. Each wrapper is the same
+three lines the other 35 use, and MCP now answers byte-identically to the CLI
+verb on every axis — verified by driving JSON-RPC over stdio against this
+repo's own snapshot and diffing against `kenn tables|contracts|documents|
+domains|packages --json`.
 
 **Gate.** The new arm pushed the CLI router over threshold, and splitting it by
 category made things *worse*: the extracted `dispatch_axis` came out at 0%

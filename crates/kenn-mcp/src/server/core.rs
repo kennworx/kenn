@@ -8,18 +8,62 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{tool, tool_router, ErrorData};
 
-use crate::error::McpError;
-use crate::tools::{
-    self, ByIdArgs, CheckAnchorsArgs, CheckCssArgs, CheckLinksArgs, FindAtLocationArgs,
+use kenn_query::QueryError;
+use kenn_query::{
+    ByIdArgs, CheckAnchorsArgs, CheckCssArgs, CheckLinksArgs, FindAtLocationArgs,
     FindDirectivesArgs, FindSimilarArgs, FindSymbolArgs, FindUsagesArgs, FindingDagArgs,
-    GetFindingArgs, GetIndexStatusArgs, GetSourceArgs, GetSymbolArgs, GetWorkspaceOverviewArgs,
-    ListImportsArgs, ListUsagesArgs, MergeFindingsArgs, RecordAnchorArgs, SearchFindingsArgs,
-    SearchSymbolsArgs, SemanticSearchArgs, ServerState, StoreFindingArgs, WaitForIndexArgs,
-    WatchStartArgs, WatchStopArgs,
+    GetFindingArgs, GetSourceArgs, GetSymbolArgs, GetWorkspaceOverviewArgs, ListContractsArgs,
+    ListDocumentsArgs, ListDomainsArgs, ListImportsArgs, ListPackagesArgs, ListTablesArgs,
+    ListUsagesArgs, MergeFindingsArgs, RecordAnchorArgs, SearchFindingsArgs, SearchSymbolsArgs,
+    SemanticSearchArgs, StoreFindingArgs,
+};
+
+use crate::tools::{
+    self, GetIndexStatusArgs, ServerState, WaitForIndexArgs, WatchStartArgs, WatchStopArgs,
 };
 
 use super::env::debug_env_snapshot;
 use super::errors::json_result;
+
+/// Run a read query against an open snapshot and render it as a tool result.
+///
+/// Every read tool has the same two-step preamble — gate, then borrow — and
+/// writing it out thirty times would bury each tool's one interesting line. A
+/// macro rather than a helper method because the context is BORROWED from the
+/// view: threading `&QueryCtx<'_>` into a closure runs into the same HRTB
+/// limitation `cmd_query.rs` documents for `Fn(&_, &_) -> Fut`.
+///
+/// The gate order lives here, once: `open_query` checks the lifecycle
+/// (`INDEX_UNAVAILABLE`) before the snapshot (`EMPTY_SNAPSHOT`).
+/// Like [`query_result!`] but without the empty-snapshot gate.
+///
+/// The findings tools are valid against an empty code graph — a directive or a
+/// claim is worth reading before the first index exists — so refusing them on
+/// an empty snapshot would be a regression. `end_to_end.rs` asserts exactly
+/// that contract.
+macro_rules! findings_result {
+    ($self:ident, $tool:path, $args:expr) => {
+        json_result(
+            async {
+                let view = $self.state.open_query_allow_empty()?;
+                $tool(&$self.state.query_ctx(&view), $args).await
+            }
+            .await,
+        )
+    };
+}
+
+macro_rules! query_result {
+    ($self:ident, $tool:path, $args:expr) => {
+        json_result(
+            async {
+                let view = $self.state.open_query().await?;
+                $tool(&$self.state.query_ctx(&view), $args).await
+            }
+            .await,
+        )
+    };
+}
 
 /// The kenn agent guide — how to use the code graph + findings/directives
 /// knowledge layer. Injected into the session as the MCP server's
@@ -86,7 +130,15 @@ impl KennMcpServer {
     )]
     async fn get_workspace_overview(&self) -> Result<CallToolResult, ErrorData> {
         json_result(
-            tools::get_workspace_overview(&self.state, GetWorkspaceOverviewArgs::default()).await,
+            async {
+                let view = self.state.open_query_allow_empty()?;
+                kenn_query::get_workspace_overview(
+                    &self.state.query_ctx(&view),
+                    GetWorkspaceOverviewArgs::default(),
+                )
+                .await
+            }
+            .await,
         )
     }
 
@@ -97,7 +149,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<CheckLinksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::check_links(&self.state, &params.0).await)
+        query_result!(self, kenn_query::check_links, &params.0)
     }
 
     #[tool(
@@ -107,7 +159,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<CheckCssArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::check_css(&self.state, &params.0).await)
+        query_result!(self, kenn_query::check_css, &params.0)
     }
 
     // ── SEARCH ─────────────────────────────────────────────────────────────
@@ -119,7 +171,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<SearchSymbolsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::search_symbols(&self.state, &params.0).await)
+        query_result!(self, kenn_query::search_symbols, &params.0)
     }
 
     #[tool(
@@ -129,7 +181,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<FindSymbolArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::find_symbol(&self.state, &params.0).await)
+        query_result!(self, kenn_query::find_symbol, &params.0)
     }
 
     #[tool(
@@ -139,7 +191,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<GetSymbolArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::get_symbol(&self.state, &params.0).await)
+        query_result!(self, kenn_query::get_symbol, &params.0)
     }
 
     #[tool(
@@ -149,7 +201,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<FindSimilarArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::find_similar(&self.state, &params.0).await)
+        query_result!(self, kenn_query::find_similar, &params.0)
     }
 
     #[tool(
@@ -159,7 +211,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<FindAtLocationArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::find_at_location(&self.state, &params.0).await)
+        query_result!(self, kenn_query::find_at_location, &params.0)
     }
 
     // ── NAVIGATE ───────────────────────────────────────────────────────────
@@ -171,7 +223,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<ByIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::list_callers(&self.state, &params.0).await)
+        query_result!(self, kenn_query::list_callers, &params.0)
     }
 
     #[tool(
@@ -181,7 +233,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<ByIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::list_callees(&self.state, &params.0).await)
+        query_result!(self, kenn_query::list_callees, &params.0)
     }
 
     #[tool(
@@ -191,7 +243,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<ByIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::list_implementers(&self.state, &params.0).await)
+        query_result!(self, kenn_query::list_implementers, &params.0)
     }
 
     #[tool(
@@ -201,7 +253,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<ByIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::list_overrides(&self.state, &params.0).await)
+        query_result!(self, kenn_query::list_overrides, &params.0)
     }
 
     #[tool(
@@ -211,7 +263,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<ListUsagesArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::list_usages(&self.state, &params.0).await)
+        query_result!(self, kenn_query::list_usages, &params.0)
     }
 
     #[tool(
@@ -221,7 +273,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<FindUsagesArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::find_usages(&self.state, &params.0).await)
+        query_result!(self, kenn_query::find_usages, &params.0)
     }
 
     #[tool(
@@ -231,7 +283,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<ByIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::list_correspondences(&self.state, &params.0).await)
+        query_result!(self, kenn_query::list_correspondences, &params.0)
     }
 
     // ── SCOPE ──────────────────────────────────────────────────────────────
@@ -243,7 +295,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<ByIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::list_in_scope(&self.state, &params.0).await)
+        query_result!(self, kenn_query::list_in_scope, &params.0)
     }
 
     #[tool(
@@ -253,7 +305,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<ListImportsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::list_imports(&self.state, &params.0).await)
+        query_result!(self, kenn_query::list_imports, &params.0)
     }
 
     #[tool(
@@ -263,7 +315,70 @@ impl KennMcpServer {
         &self,
         params: Parameters<ByIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::list_module_files(&self.state, &params.0).await)
+        query_result!(self, kenn_query::list_module_files, &params.0)
+    }
+
+    // ── ATLAS ──────────────────────────────────────────────────────────────
+    //
+    // The five axes the workspace is organized along. Each answers from the
+    // published snapshot — no clustering, no index build on the read path —
+    // and each returns an empty list, not an error, when its axis is empty for
+    // the workspace (mcp-server §"Atlas axis read tools").
+    //
+    // Every one takes an optional single-entity argument that is a QUERY, not
+    // an identifier: two packages can each define an `IValidator` and two
+    // schemas can each hold an `events`, so a name that matches more than one
+    // returns EVERY match, each tagged with its own `pub_id`. Never an error,
+    // never a second call.
+
+    #[tool(
+        description = "The workspace's packages, with each one's role in the dependency graph (provider / layer / consumer), symbol count, how many packages depend on it, how many it depends on, and its manifest path. Optional `package` narrows to one by exact name and adds its root-module doc verbatim, its member-file count, per-directory file counts, its component sub-areas, and its heaviest couplings. Start here on an unfamiliar repo: it answers \"what is this made of and what leans on what\" in one call."
+    )]
+    async fn list_packages(
+        &self,
+        params: Parameters<ListPackagesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        query_result!(self, kenn_query::list_packages, &params.0)
+    }
+
+    #[tool(
+        description = "Cross-package domains — clusters of symbols that work together across package boundaries, each named by its hub symbol. Reports size, how many packages it spans, and its cross-package link count. Optional `domain` (hub `pub_id` or title) adds the spanned packages and each one's central symbols. Use to find the concepts a repo is really organized around, which are often not the ones the directory tree suggests."
+    )]
+    async fn list_domains(
+        &self,
+        params: Parameters<ListDomainsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        query_result!(self, kenn_query::list_domains, &params.0)
+    }
+
+    #[tool(
+        description = "Cross-package contracts — first-party interfaces/traits whose implementers span more than one package, i.e. the abstractions that actually carry weight across a boundary. Reports the defining package, implementer count, and package span. Optional `contract` (`pub_id` or title) adds the implementers grouped by package. Use before changing an interface: these are the ones whose change radius leaves their own package."
+    )]
+    async fn list_contracts(
+        &self,
+        params: Parameters<ListContractsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        query_result!(self, kenn_query::list_contracts, &params.0)
+    }
+
+    #[tool(
+        description = "First-party non-code directories (docs, specs, configuration trees) with their file counts. Optional `document` narrows to one by name. Use to find where a repo keeps its prose before searching it."
+    )]
+    async fn list_documents(
+        &self,
+        params: Parameters<ListDocumentsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        query_result!(self, kenn_query::list_documents, &params.0)
+    }
+
+    #[tool(
+        description = "Database tables the workspace declares or touches, ranked by how broadly they are referenced. Each row reports whether the table is declared in-repo (`internal`) or only referenced (`external`), how many files reference it, how many languages those span, and the total reference count. Optional `table` (`pub_id` like `sql:orders`, or a bare name) adds the referencing sites — file, language, and whether the site declares, modifies, or reads it. Use to correlate schema with the code that uses it: a table with a wide language span is a contract between subsystems that no type system is checking."
+    )]
+    async fn list_tables(
+        &self,
+        params: Parameters<ListTablesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        query_result!(self, kenn_query::list_tables, &params.0)
     }
 
     // ── KNOWLEDGE LAYER ────────────────────────────────────────────────────
@@ -275,7 +390,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<SemanticSearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::semantic_search(&self.state, &params.0).await)
+        query_result!(self, kenn_query::semantic_search, &params.0)
     }
 
     #[tool(
@@ -285,7 +400,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<GetSourceArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::get_source(&self.state, &params.0).await)
+        query_result!(self, kenn_query::get_source, &params.0)
     }
 
     #[tool(
@@ -295,7 +410,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<GetFindingArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::get_finding(&self.state, &params.0).await)
+        findings_result!(self, kenn_query::get_finding, &params.0)
     }
 
     #[tool(
@@ -305,7 +420,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<SearchFindingsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::search_findings(&self.state, &params.0).await)
+        findings_result!(self, kenn_query::search_findings, &params.0)
     }
 
     #[tool(
@@ -315,7 +430,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<StoreFindingArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::store_finding(&self.state, &params.0).await)
+        findings_result!(self, kenn_query::store_finding, &params.0)
     }
 
     #[tool(
@@ -325,7 +440,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<MergeFindingsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::merge_findings(&self.state, &params.0).await)
+        findings_result!(self, kenn_query::merge_findings, &params.0)
     }
 
     #[tool(
@@ -335,7 +450,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<FindDirectivesArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::find_directives(&self.state, &params.0).await)
+        findings_result!(self, kenn_query::find_directives, &params.0)
     }
 
     #[tool(
@@ -345,7 +460,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<CheckAnchorsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::check_anchors(&self.state, &params.0).await)
+        findings_result!(self, kenn_query::check_anchors, &params.0)
     }
 
     #[tool(
@@ -355,7 +470,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<RecordAnchorArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::record_anchor(&self.state, &params.0).await)
+        findings_result!(self, kenn_query::record_anchor, &params.0)
     }
 
     #[tool(
@@ -365,7 +480,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<FindingDagArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::find_predecessors(&self.state, &params.0).await)
+        findings_result!(self, kenn_query::find_predecessors, &params.0)
     }
 
     #[tool(
@@ -375,7 +490,7 @@ impl KennMcpServer {
         &self,
         params: Parameters<FindingDagArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json_result(tools::find_successors(&self.state, &params.0).await)
+        findings_result!(self, kenn_query::find_successors, &params.0)
     }
 
     // ── LIFECYCLE ──────────────────────────────────────────────────────────
@@ -405,7 +520,7 @@ impl KennMcpServer {
         description = "Debug: dump the MCP subprocess's pid, cwd, and the subset of environment variables matching well-known host prefixes (CLAUDE_*, CLAUDECODE, MCP_*, AI_AGENT, XDG_*, HOME). Filtered to avoid leaking unrelated secrets. Use this to verify what env Claude Code (or any MCP host) actually passes when spawning kenn-mcp."
     )]
     async fn debug_env(&self) -> Result<CallToolResult, ErrorData> {
-        json_result(Ok::<_, McpError>(debug_env_snapshot()))
+        json_result(Ok::<_, QueryError>(debug_env_snapshot()))
     }
 }
 

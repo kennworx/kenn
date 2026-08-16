@@ -5,14 +5,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kenn_mcp::snapshot_id_from_timestamp;
 use kenn_mcp::state::LifecycleState;
-use kenn_mcp::tools::{
-    list_imports, list_usages, ImportDirectionArg, ListImportsArgs, ListUsagesArgs, ServerState,
-};
+use kenn_mcp::tools::ServerState;
 use kenn_model::{
     EdgeKind, EdgeProperties, EdgeRecord, FileRecord, ImportKind, Kind, Language, PackageRecord,
     SymbolRecord,
+};
+use kenn_query::snapshot_id_from_timestamp;
+use kenn_query::{
+    list_imports, list_module_files, list_usages, ByIdArgs, ImportDirectionArg, ListImportsArgs,
+    ListUsagesArgs,
 };
 use kenn_store::api::WriteBatch;
 use kenn_store::{open_writer, reader_from_writer, DbReader, DbWriter, WriterOptions};
@@ -24,6 +26,10 @@ const FILE: u32 = 1;
 const HANDLER_ID: u32 = 101;
 const REPO_ID: u32 = 102;
 const SHIPMENT_ID: u32 = 103;
+/// A module that CONTAINS the corpus file — `list_module_files` walks
+/// `Contains` edges from a module symbol to file ids, so without one the
+/// query has nothing to return and its test would pass vacuously.
+const MODULE_ID: u32 = 104;
 
 fn sym(id: u32, pkg_id: u32, name: &str, kind: Kind) -> SymbolRecord {
     SymbolRecord {
@@ -70,11 +76,18 @@ async fn build_corpus(dir: &Path) -> DbWriter {
             sym(HANDLER_ID, PKG_A, "OrderHandler", Kind::Class),
             sym(REPO_ID, PKG_A, "OrderRepository", Kind::Class),
             sym(SHIPMENT_ID, PKG_B, "ShipmentTracker", Kind::Class),
+            sym(MODULE_ID, PKG_A, "Orders", Kind::Module),
         ],
         symbol_docs: Vec::new(),
         file_docs: Vec::new(),
         defs: Vec::new(),
         edges: vec![
+            // The module contains the corpus file — what `list_module_files` walks.
+            EdgeRecord {
+                src_id: MODULE_ID,
+                target_id: FILE,
+                properties: EdgeProperties::Contains,
+            },
             // OrderHandler calls OrderRepository (Calls edge, inbound on Repo)
             EdgeRecord {
                 src_id: HANDLER_ID,
@@ -133,10 +146,12 @@ async fn list_usages_aggregates_inbound_edges_across_kinds() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     // REPO has 1 inbound Calls edge from HANDLER.
     let resp = list_usages(
-        &state,
+        &ctx,
         &ListUsagesArgs {
             id: "cs:OrderRepository".into(),
             edge_kinds: None, // default = Calls/TypeUse/FieldAccess/Instantiates
@@ -167,9 +182,11 @@ async fn list_imports_returns_outbound_and_inbound() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     let outbound = list_imports(
-        &state,
+        &ctx,
         &ListImportsArgs {
             id: "cs:OrderHandler".into(),
             direction: ImportDirectionArg::Outbound,
@@ -187,7 +204,7 @@ async fn list_imports_returns_outbound_and_inbound() {
     );
 
     let inbound = list_imports(
-        &state,
+        &ctx,
         &ListImportsArgs {
             id: "cs:ShipmentTracker".into(),
             direction: ImportDirectionArg::Inbound,
@@ -207,7 +224,7 @@ async fn list_imports_returns_outbound_and_inbound() {
     // `both` direction returns rows from both sides plus a per-row
     // direction tag.
     let both = list_imports(
-        &state,
+        &ctx,
         &ListImportsArgs {
             id: "cs:OrderHandler".into(),
             direction: ImportDirectionArg::Both,
@@ -231,9 +248,11 @@ async fn list_imports_zero_total_on_unused_symbol() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
     let resp = list_imports(
-        &state,
+        &ctx,
         &ListImportsArgs {
             id: "cs:OrderRepository".into(),
             direction: ImportDirectionArg::Outbound,
@@ -245,4 +264,57 @@ async fn list_imports_zero_total_on_unused_symbol() {
     .await
     .expect("list_imports zero");
     assert!(resp.items.is_empty());
+}
+
+/// `list_module_files` walks `Contains` edges from a module symbol to file ids.
+///
+/// Added because the CRAP gate reported the function at 0% coverage once the
+/// `QueryCtx` migration un-nested it: nothing in-process had ever called it.
+/// The corpus needed a module and a `Contains` edge before the query could
+/// return anything — without them the test would pass on an empty list and
+/// guard nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_module_files_returns_the_modules_files() {
+    let dir = TempDir::new().unwrap();
+    let writer = build_corpus(dir.path()).await;
+    let state = ready_state(
+        dir.path(),
+        reader_from_writer(&writer).await.expect("reader"),
+    );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
+
+    let resp = list_module_files(
+        &ctx,
+        &ByIdArgs {
+            id: "cs:Orders".into(),
+            filters: None,
+            pagination: None,
+        },
+    )
+    .await
+    .expect("list_module_files");
+
+    assert_eq!(
+        resp.items
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        ["src/Orders.cs"],
+        "the module's contained file, resolved to its path"
+    );
+    assert_eq!(resp.items[0].language, Language::Csharp);
+
+    // An id that resolves to no symbol is a loud error, not an empty list.
+    let err = list_module_files(
+        &ctx,
+        &ByIdArgs {
+            id: "cs:NoSuchModule".into(),
+            filters: None,
+            pagination: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, kenn_query::QueryErrorCode::InvalidInput);
 }

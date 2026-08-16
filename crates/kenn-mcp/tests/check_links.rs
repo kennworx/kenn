@@ -6,13 +6,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kenn_mcp::snapshot_id_from_timestamp;
 use kenn_mcp::state::LifecycleState;
-use kenn_mcp::tools::{check_links, CheckLinksArgs, ServerState};
+use kenn_mcp::tools::ServerState;
 use kenn_model::{
     compose_short_id, DefRecord, EdgeProperties, EdgeRecord, FileRecord, Kind, Language, LinkGrade,
     SymbolRecord,
 };
+use kenn_query::snapshot_id_from_timestamp;
+use kenn_query::{check_links, CheckLinksArgs};
 use kenn_store::api::WriteBatch;
 use kenn_store::{open_writer, reader_from_writer, DbReader, DbWriter, WriterOptions};
 use tempfile::TempDir;
@@ -148,8 +149,10 @@ async fn check_links_lists_non_exact_links() {
         dir.path(),
         reader_from_writer(&writer).await.expect("reader"),
     );
+    let view = state.open_query().await.expect("snapshot opens");
+    let ctx = state.query_ctx(&view);
 
-    let resp = check_links(&state, &CheckLinksArgs::default())
+    let resp = check_links(&ctx, &CheckLinksArgs::default())
         .await
         .expect("check_links");
 
@@ -184,7 +187,7 @@ async fn check_links_lists_non_exact_links() {
 
     // grade filter narrows to just the requested grade.
     let only_dangling = check_links(
-        &state,
+        &ctx,
         &CheckLinksArgs {
             grade: Some(vec!["dangling".into()]),
             limit: None,
@@ -197,7 +200,7 @@ async fn check_links_lists_non_exact_links() {
 
     // limit caps the rows but `total` still reports the full count.
     let capped = check_links(
-        &state,
+        &ctx,
         &CheckLinksArgs {
             grade: None,
             limit: Some(1),
@@ -211,7 +214,7 @@ async fn check_links_lists_non_exact_links() {
 
     // an unknown grade name is a loud error, not a silent empty result.
     check_links(
-        &state,
+        &ctx,
         &CheckLinksArgs {
             grade: Some(vec!["bogus".into()]),
             limit: None,
