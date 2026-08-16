@@ -1,0 +1,2 @@
+{"op":"attach","anchor":"crates/kenn-indexer/src/sql/registry.rs","ts":"2026-08-16T09:55:32.106241Z","sha":"dcdf7cfed549bbdf"}
+{"op":"attach","anchor":"crates/kenn-indexer/src/xml_sql/resolve.rs","ts":"2026-08-16T09:55:32.106241Z","sha":"1ff55eb2068a2d89"}
