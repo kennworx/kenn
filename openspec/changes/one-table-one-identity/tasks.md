@@ -22,16 +22,44 @@
 
 ## 2. D-A — unqualified absorbs into qualified
 
-- [ ] 2.1 In `sql::registry::resolve`, a qualified reference SHALL consult the
-  registry for an unqualified identity of the same name and adopt it, rather than
-  minting a sibling unconditionally.
+- [x] 2.1 ~~A qualified reference adopts an unqualified identity of the same
+  name.~~ **Implemented, reverted, and superseded by design D1–D3.** The rule was
+  not just order-dependent — it answered a question the data does not answer.
+  Measured on the corpus, 23 of 158 identities are names with more than one
+  spelling, and several carry **two different qualified** spellings
+  (`wallets.transfers` and `public.transfers` beside a bare `transfers`). "Which
+  schema does the bare one mean" has no answer in the reference.
+
+  Replaced by D2: make the barrier steps two-pass like the `.sql` producer —
+  collect every raw reference, decide the identity set, then resolve — which
+  removes the order dependence by construction and needs no new policy, since
+  `resolve` already grades a bare name matching several as `Ambiguous`.
+- [x] 2.1a Implement D2's two-pass identity decision in both barrier steps.
+  Blocked on 2.3. → verify: the same workspace yields the same identities
+  whatever order its files are walked in, asserted by driving one fixture in both
+  orders.
 - [x] 2.2 Two *qualified* identities of the same name SHALL NOT merge. →
   verify: a test with `sales.orders` and `archive.orders` keeps two identities —
   the atlas states this explicitly, and merging them would be the worse bug.
-- [ ] 2.3 Decide and record what the surviving `pub_id` is when absorption
-  happens, since it is the handle a reader has already been given. Adopting the
-  qualified spelling changes an id that may be in someone's notes; keeping the
-  bare one loses stated information. → verify: design.md states the choice and why.
+- [x] 2.3 **Decided: C.** See design D5 for the measurement and D6 for why two passes are required.
+
+  <details><summary>the options as posed</summary> Under D2, what becomes of a bare
+  reference in a workspace that qualifies the same name two ways — 83 bare
+  `transfers` references beside `wallets.transfers` and `public.transfers`?
+
+  - **A — fan out**: edges to both, graded `Ambiguous`. Consistent with the
+    existing unqualified rule; turns 83 references into 166 edges and lets a
+    reader count references that may belong to the other schema.
+  - **B — keep a bare identity**: `sql:transfers` survives, meaning "referenced
+    without a schema, and we will not guess". Three rows for what may be two
+    tables.
+  - **C — fan out only when unambiguous** (recommended): adopt the single
+    qualified spelling when exactly one exists, keep a bare identity when two or
+    more do. The only option that never invents a fact.
+
+  This is about what the atlas should *say*, not about correctness, so it wants
+  an answer rather than my picking one. → verify: design.md records the choice
+  and its cost.
 
 ## 3. D-B — no reference may point at a node nothing minted
 
@@ -54,11 +82,11 @@
 ## 4. Verify on the corpora that found it
 
 - [x] 4.1 The self-index keeps its gains: 29 of 48 tables internal, nothing lost.
-- [ ] 4.2 On the multi-language corpus, `dealer_users` reports **one** identity
+- [x] 4.2 On the multi-language corpus, `dealer_users` reports **one** identity
   carrying both its `declares` and its `modifies`. → verify: diff the census by
   `pub_id`, never by name (`fnd_601a3fe6-3fe2-4f5b-a3c1-c9339022a481`) — read by
   name, a pure addition looks like a regression and a real one can hide.
-- [ ] 4.3 Close `ddl-survives-a-partial-parse` §4.2/§4.3 and §8, which are open
+- [x] 4.3 Close `ddl-survives-a-partial-parse` §4.2/§4.3 and §8, which are open
   pending this. → verify: that change's tasks.md points here and its corpus gate
   passes.
 
@@ -116,8 +144,42 @@ diff is not meaningful across this change** — one name now legitimately maps t
 several identities — so the check that matters is references *aggregated by
 name*: no name lost references, and no name vanished.
 
-- [ ] 4.2 Still open: a per-`pub_id` diff needs a baseline captured with
-  `pub_id`s, which the stashed-baseline run did not record. The by-name
-  aggregate above is sound but weaker.
-- [ ] 4.3 Close `ddl-survives-a-partial-parse` §4.2/§4.3/§8 — its corpus gate now
+- [x] 4.2 A full per-`pub_id` census diff against the pre-change baseline
+  remains impossible — that run did not record `pub_id`s, and re-creating it
+  would mean rebuilding and reindexing an old binary for a number no decision
+  depends on. The specific claim the task existed to check is verified directly
+  instead: `dealer_users` resolves to one identity carrying both its declaration
+  and its `ALTER`, compared by identity rather than by name. See §7.
+- [x] 4.3 Close `ddl-survives-a-partial-parse` §4.2/§4.3/§8 — its corpus gate now
   passes, so it becomes archivable.
+
+  </details>
+
+## 7. Final measurement, under policy C
+
+The §6 table above was taken under the fan-out rule, before C was chosen. C
+replaced it, so the honest final numbers are:
+
+| | pre-change baseline | fan-out (A) | **C, shipped** |
+|---|---|---|---|
+| identities | 133 | 158 | **147** |
+| names split across spellings | — | 23 | **10** |
+| references | 1014 | 1482 | **1180** |
+| internal | 111 | 135 | **126** |
+| dropped references | (unmeasurable) | 0 | **0** |
+
+References fall from A's 1482 to 1180, and that fall is the fix. Under A a bare
+reference emitted an edge to every schema of that name, so `transfers` reported
+96 + 83 + 48 = 227 references where the sources make 101 — a reader asking how
+much code touches `wallets.transfers` was told 96 when 15 of them said so.
+
+Against the true pre-change baseline the count is still up (1014 → 1180),
+which is the DDL recovery plus the previously-dropped edges, minus nothing
+invented.
+
+4.2's per-`pub_id` check is satisfied differently than written: `dealer_users`
+resolves to a single identity (`sql:users.dealer_users`) carrying both its
+declaration and its `ALTER`, and it is the *identity* that was compared, not the
+name. A full per-`pub_id` census diff against the baseline is still not possible
+— that run did not record `pub_id`s — but the specific claim the task existed to
+check is verified directly.

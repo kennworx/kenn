@@ -70,6 +70,18 @@ pub fn resolve(known: &NameSet, config: &XmlSqlConfig, rows: &[SymbolSurfaceRow]
     let mut seen_minted = NameSet::new();
     let roots = RootFilter::new(&config.roots);
 
+    // ── Pass 1: every raw reference, and every schema any of them names ──
+    //
+    // Two passes rather than one, for the reason the `.sql` producer gives for
+    // its own: an identity decided the moment a name is first seen is decided by
+    // walk order. Concretely, whether a bare `transfers` adopts
+    // `wallets.transfers` depends on whether `public.transfers` has been read
+    // yet — so the same workspace answers differently as unrelated files are
+    // added. Collecting first makes "how many schemas qualify this name" a fact
+    // about the workspace instead of about the walk.
+    let mut raw_refs: Vec<(ShortId, TableKey, RefRole)> = Vec::new();
+    let mut qualified_seen = NameSet::new();
+
     for row in rows {
         if !roots.admits(&row.path) {
             continue;
@@ -84,32 +96,34 @@ pub fn resolve(known: &NameSet, config: &XmlSqlConfig, rows: &[SymbolSurfaceRow]
             out.counts.elements_with_attribute += 1;
         }
 
-        for (raw, role) in found {
-            // Resolve against what the `.sql` pass wrote AND what this pass has
-            // minted, so a reference reaches a sibling minted moments ago
-            // instead of starting a second identity for one table.
-            for candidate in resolve_name(
-                &Union {
-                    known,
-                    minted: &seen_minted,
-                },
-                raw.schema.as_deref(),
-                &raw.name,
-            ) {
-                // Guard on the whole key, not the bare name. Two schemas can
-                // each hold an `events`, and a name-only guard mints the first
-                // and silently drops the second's edge in `emit_table_edges`.
-                if !known.contains(&candidate.key) && !seen_minted.contains(&candidate.key) {
-                    seen_minted.insert(candidate.key.clone());
-                    minted.push(candidate.key.clone());
-                }
-                out.refs.push(XmlTableRef {
-                    sym_id: row.sym_id,
-                    table: candidate.key,
-                    role,
-                    grade: candidate.grade,
-                });
+        for (key, role) in found {
+            if key.schema.is_some() {
+                qualified_seen.insert(key.clone());
             }
+            raw_refs.push((row.sym_id, key, role));
+        }
+    }
+
+    // ── Pass 2: resolve each reference against the complete picture ──
+    let registry = Union {
+        known,
+        minted: &qualified_seen,
+    };
+    for (sym_id, raw, role) in raw_refs {
+        for candidate in resolve_name(&registry, raw.schema.as_deref(), &raw.name) {
+            // Guard on the whole key, not the bare name. Two schemas can each
+            // hold an `events`, and a name-only guard mints the first and
+            // silently drops the second's edge in `emit_table_edges`.
+            if !known.contains(&candidate.key) && !seen_minted.contains(&candidate.key) {
+                seen_minted.insert(candidate.key.clone());
+                minted.push(candidate.key.clone());
+            }
+            out.refs.push(XmlTableRef {
+                sym_id,
+                table: candidate.key,
+                role,
+                grade: candidate.grade,
+            });
         }
     }
 
@@ -375,6 +389,69 @@ mod tests {
             assert!(
                 mine.iter().any(|r| r.role == RefRole::Defines),
                 "{label}: the declaration survives"
+            );
+        }
+    }
+
+    /// Three spellings of one name resolve the same way whatever the walk order.
+    ///
+    /// This is the case the one-pass version could not get right: a bare
+    /// `transfers` adopts `wallets.transfers` when it is the only schema seen so
+    /// far, and stands for itself once `public.transfers` shows up — so the same
+    /// workspace answered differently depending on which file was read first.
+    /// Measured on a real corpus, `transfers` genuinely has all three spellings.
+    ///
+    /// The rule (design C): adopt the one schema that qualifies a name, refuse
+    /// to choose when several do. Two passes are what make "several" a fact
+    /// about the workspace rather than about the walk.
+    #[test]
+    fn a_name_with_two_schemas_resolves_the_same_in_any_order() {
+        let bare = row(1, "db/a.xml", "<sql>", "SELECT id FROM transfers");
+        let wallets = row(
+            2,
+            "db/b.xml",
+            "<sql>",
+            "CREATE TABLE wallets.transfers (id INT)",
+        );
+        let public = row(
+            3,
+            "db/c.xml",
+            "<sql>",
+            "CREATE TABLE public.transfers (id INT)",
+        );
+
+        let orders: [(&str, Vec<SymbolSurfaceRow>); 3] = [
+            (
+                "bare first",
+                vec![bare.clone(), wallets.clone(), public.clone()],
+            ),
+            (
+                "bare middle",
+                vec![wallets.clone(), bare.clone(), public.clone()],
+            ),
+            (
+                "bare last",
+                vec![wallets.clone(), public.clone(), bare.clone()],
+            ),
+        ];
+        for (label, rows) in orders {
+            let got = resolve(&NameSet::new(), &config(vec![]), &rows);
+            let keys: std::collections::BTreeSet<&TableKey> =
+                got.refs.iter().map(|r| &r.table).collect();
+            assert_eq!(
+                keys.len(),
+                3,
+                "{label}: two schemas plus an unqualified name — three identities: {keys:?}"
+            );
+            let bare_ref = got
+                .refs
+                .iter()
+                .find(|r| r.sym_id == 1)
+                .expect("the bare reference survives");
+            assert_eq!(
+                bare_ref.table,
+                TableKey::new(None, "transfers".into()),
+                "{label}: the bare reference picks neither schema"
             );
         }
     }
@@ -673,22 +750,30 @@ mod tests {
     }
 
     #[test]
-    fn an_ambiguous_reference_keeps_every_candidate() {
+    fn an_ambiguous_reference_is_not_resolved_to_either_candidate() {
         // Through the SAME matching rule the `.sql` producer uses, not a
-        // reimplementation: an unqualified name matches every table of that
-        // name, and all the matches are kept and marked rather than one being
-        // picked. A bridge that silently chose would answer confidently and
-        // wrongly.
+        // reimplementation: a bridge that silently chose would answer
+        // confidently and wrongly.
+        //
+        // How it declines has changed. This used to keep BOTH candidates,
+        // graded `Ambiguous` — which never invents a table but does invent
+        // references: one reference became two edges, and a count against
+        // `a.users` included one belonging to `b.users`. It now resolves to the
+        // bare name, which is what the reference actually said.
         let known = NameSet::from_table_pub_ids(["sql:a.users", "sql:b.users"]);
         let rows = [row(1, "db/log.xml", "<sql>", "SELECT id FROM users")];
         let got = resolve(&known, &config(vec![]), &rows);
-        assert_eq!(got.refs.len(), 2, "both kept: {:?}", got.refs);
-        assert!(
-            got.refs.iter().all(|r| r.grade == LinkGrade::Ambiguous),
-            "and marked: {:?}",
-            got.refs
+        assert_eq!(got.refs.len(), 1, "one reference, one edge: {:?}", got.refs);
+        assert_eq!(
+            got.refs[0].table,
+            TableKey::new(None, "users".into()),
+            "neither schema is picked"
         );
-        assert!(got.minted.is_empty(), "both already exist");
+        assert_eq!(
+            got.minted.len(),
+            1,
+            "the unqualified identity is minted, since neither known one is it"
+        );
     }
 
     #[test]

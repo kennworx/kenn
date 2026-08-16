@@ -86,6 +86,16 @@ pub fn resolve(
     // reach one node rather than two.
     let mut seen_minted: NameSet = NameSet::new();
 
+    // ── Pass 1: every raw reference, and every schema any of them names ──
+    //
+    // Two passes for the reason the `.sql` producer gives for its own: an
+    // identity decided when a name is first seen is decided by walk order, so
+    // whether a bare `orders` adopts `sales.orders` would depend on whether
+    // `archive.orders` had been read yet. Collecting first makes "how many
+    // schemas qualify this name" a fact about the workspace, not the walk.
+    let mut raw_refs: Vec<(ShortId, TableKey, RefRole)> = Vec::new();
+    let mut qualified_seen = NameSet::new();
+
     for ((path, language), spans) in by_file(bodies) {
         out.counts.bodies_scanned += spans.len() as u64;
 
@@ -104,36 +114,38 @@ pub fn resolve(
             };
             bodies_with_lits.insert(sym);
             for r in refs_of_literal(&lit.text) {
-                // Resolve against what the `.sql` pass wrote AND what this pass
-                // has minted, so a reference can reach a sibling minted moments
-                // ago rather than starting a second identity for one table.
-                let candidates = resolve_name(
-                    &Union {
-                        known,
-                        minted: &seen_minted,
-                    },
-                    r.schema.as_deref(),
-                    &r.name,
-                );
-                for c in candidates {
-                    // Test the whole key, not the bare name. A name-only guard
-                    // lets `users.orders` satisfy it for `orders`, whose edge
-                    // then targets a node nothing minted and is silently
-                    // dropped by `emit_table_edges`.
-                    if !known.contains(&c.key) && !seen_minted.contains(&c.key) {
-                        seen_minted.insert(c.key.clone());
-                        minted.push(c.key.clone());
-                    }
-                    out.refs.push(CodeTableRef {
-                        sym_id: sym,
-                        table: c.key,
-                        role: r.role,
-                        grade: c.grade,
-                    });
+                let key = TableKey::new(r.schema.clone(), r.name.clone());
+                if key.schema.is_some() {
+                    qualified_seen.insert(key.clone());
                 }
+                raw_refs.push((sym, key, r.role));
             }
         }
         out.counts.bodies_with_literals += bodies_with_lits.len() as u64;
+    }
+
+    // ── Pass 2: resolve each reference against the complete picture ──
+    let registry = Union {
+        known,
+        minted: &qualified_seen,
+    };
+    for (sym, raw, role) in raw_refs {
+        for c in resolve_name(&registry, raw.schema.as_deref(), &raw.name) {
+            // Test the whole key, not the bare name. A name-only guard lets
+            // `users.orders` satisfy it for `orders`, whose edge then targets a
+            // node nothing minted and is silently dropped by
+            // `emit_table_edges`.
+            if !known.contains(&c.key) && !seen_minted.contains(&c.key) {
+                seen_minted.insert(c.key.clone());
+                minted.push(c.key.clone());
+            }
+            out.refs.push(CodeTableRef {
+                sym_id: sym,
+                table: c.key,
+                role,
+                grade: c.grade,
+            });
+        }
     }
 
     out.counts.refs_emitted = out.refs.len() as u64;
