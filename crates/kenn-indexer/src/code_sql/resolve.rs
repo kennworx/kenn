@@ -127,10 +127,18 @@ pub fn resolve(
 
 /// The table references one literal makes, or none when it is not SQL.
 ///
-/// A literal is one fragment, not a file of statements, so the whole-then-split
-/// tiering the `.sql` producer applies is deliberately not used: splitting a
-/// literal manufactures partial parses, which is where a query-local name gets
-/// read as a table.
+/// A literal can be either of two things, and telling them apart is the whole
+/// job here. Most are one fragment of a query assembled at runtime, where a
+/// partial parse is where a query-local name gets read as a table. Some are a
+/// complete schema constant, where the unparsed leftovers are whole statements
+/// the parser does not know — a vendor extension such as
+/// `CREATE VIRTUAL TABLE … USING fts5(…)`, which no supported dialect accepts.
+///
+/// So a partial parse keeps the statements whose names cannot lie
+/// ([`names_are_positional`]) and drops the rest. Refusing the whole literal
+/// instead used to cost this workspace its own schema: 26 statements parsed,
+/// one did not, and all 26 were discarded along with every declaration of the
+/// 14 tables they create.
 ///
 /// Most literals in any codebase are messages, paths, and formats — measured,
 /// 4103 bodies carried literals and 154 named a table — so a non-parse is
@@ -149,13 +157,16 @@ fn refs_of_literal(text: &str) -> Vec<crate::sql::parse::TableRef> {
         return Vec::new();
     }
     let ex = extract(t, None);
-    if ex.unparsed > 0 {
-        // Part of it did not parse, so this is a fragment of a larger query
-        // assembled at runtime. A partial parse is exactly where an alias or a
-        // CTE name reads as a table.
-        return Vec::new();
-    }
-    ex.statements.into_iter().flat_map(|s| s.refs).collect()
+    let whole = ex.unparsed == 0;
+    ex.statements
+        .into_iter()
+        .filter(|s| {
+            whole
+                || s.verb
+                    .is_some_and(crate::sql::parse::Verb::names_positional)
+        })
+        .flat_map(|s| s.refs)
+        .collect()
 }
 
 #[cfg(test)]
@@ -175,6 +186,101 @@ mod tests {
 
     fn src_of(text: &'static str) -> impl Fn(&str) -> Option<String> {
         move |_| Some(text.to_owned())
+    }
+
+    /// The `CREATE VIRTUAL TABLE` spelling that started all this. Kept verbatim
+    /// — `tokenize='unicode61'` is the named argument sqlparser rejects, and a
+    /// simplified `USING fts5(words)` may well parse, in which case the two
+    /// tests below would never reach the partial-parse branch they are named
+    /// for (CLAUDE.md §9, "suspect the fixture").
+    const SCHEMA_CONST: &str = "\
+fn schema() {
+  let ddl = \"
+    CREATE TABLE symbols (id INTEGER NOT NULL, name TEXT NOT NULL);
+    CREATE INDEX symbols_id ON symbols(id);
+    CREATE VIRTUAL TABLE name_words USING fts5(words, tokenize='unicode61');
+    CREATE TABLE defs (sym_id INTEGER NOT NULL);
+  \";
+}";
+
+    /// The fixture reaches the branch: this asserts the literal really does
+    /// parse only in part, so the recovery below is not passing for some
+    /// unrelated reason.
+    #[test]
+    fn the_schema_fixture_really_is_a_partial_parse() {
+        let ddl = SCHEMA_CONST
+            .split_once("let ddl = \"")
+            .and_then(|(_, r)| r.split_once("\";"))
+            .expect("literal")
+            .0;
+        let ex = crate::sql::parse::extract(ddl, None);
+        assert!(
+            ex.unparsed > 0,
+            "fixture parses whole — it no longer exercises the partial-parse path"
+        );
+        assert!(!ex.statements.is_empty(), "nothing parsed at all");
+    }
+
+    /// A schema constant survives one statement no dialect can read.
+    ///
+    /// Mutation-checked against the rule it guards: restore the old
+    #[test]
+    fn a_schema_constant_survives_one_unreadable_statement() {
+        let known = NameSet::from_table_pub_ids(Vec::<&str>::new());
+        let bodies = [body(1, "schema.rs", 1, 9)];
+        let got = resolve(&known, &bodies, &src_of(SCHEMA_CONST));
+
+        let mut named: Vec<&str> = got.refs.iter().map(|r| r.table.name.as_str()).collect();
+        named.sort_unstable();
+        named.dedup();
+        assert_eq!(
+            named,
+            ["defs", "symbols"],
+            "both real tables, and not the virtual one: {named:?}"
+        );
+        // The two `CREATE TABLE`s declare; the `CREATE INDEX` reads the table it
+        // indexes. All three are DDL, which is why all three survive — a rule
+        // that kept only `Defines` would have dropped the index.
+        assert!(
+            got.refs
+                .iter()
+                .any(|r| r.table.name == "symbols" && r.role == RefRole::Defines),
+            "symbols is declared"
+        );
+        assert!(
+            got.refs
+                .iter()
+                .any(|r| r.table.name == "symbols" && r.role == RefRole::Accesses),
+            "the CREATE INDEX reference survives too"
+        );
+    }
+
+    /// And the protection the rule exists for still holds: a torn-off query
+    /// piece contributes nothing, even though it parses cleanly on its own.
+    ///
+    /// Mutation-checked the other way: drop the `names_are_positional` filter
+    /// (trust every statement on a partial parse) and this finds `recent`.
+    #[test]
+    fn a_torn_query_fragment_still_contributes_nothing() {
+        let known = NameSet::from_table_pub_ids(Vec::<&str>::new());
+        let bodies = [body(1, "q.rs", 1, 5)];
+        // The `WITH recent AS (…)` that would have made `recent` a CTE lives in
+        // another literal; here the tail parses as a plain SELECT and `recent`
+        // reads as a table. That is the false positive being prevented.
+        let got = resolve(
+            &known,
+            &bodies,
+            &src_of(
+                "fn f() {\n  let q = \"\
+                 SELECT id FROM recent WHERE x = 1;\n\
+                 ) SELECT\";\n}",
+            ),
+        );
+        assert!(
+            got.refs.is_empty(),
+            "a query verb must not be trusted under a partial parse: {:?}",
+            got.refs.iter().map(|r| &r.table.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -266,13 +372,20 @@ mod tests {
     }
 
     #[test]
-    fn a_partially_parsing_literal_contributes_nothing() {
+    fn a_partially_parsing_query_contributes_nothing() {
         // The guard's actual job, and the case the test above does NOT reach.
         // When part of a literal parses and part does not, `extract` falls back
         // to splitting and returns the good pieces alongside an `unparsed`
         // count. That is a runtime-assembled query seen mid-assembly, and its
         // parseable half is exactly where an alias or a CTE name reads as a
-        // table — so the whole literal is discarded rather than half-trusted.
+        // table.
+        //
+        // Note what this asserts and what it does not. It used to be named for
+        // the whole literal, because the whole literal was discarded. The rule
+        // is now narrower — a partial parse keeps its DDL and drops its queries
+        // — so what makes `users` invisible here is the SELECT verb, not the
+        // literal. Swap the SELECT for a `CREATE TABLE` and the table WOULD be
+        // reported, which is `a_schema_constant_survives_one_unreadable_statement`.
         let known = NameSet::new();
         let bodies = [body(1, "a.rs", 1, 3)];
         let got = resolve(
@@ -282,7 +395,7 @@ mod tests {
         );
         assert!(
             got.refs.is_empty(),
-            "a half-parsed literal is not half-trusted: {:?}",
+            "a query's names are not trusted beside an unparsed piece: {:?}",
             got.refs
         );
     }

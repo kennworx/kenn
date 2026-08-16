@@ -438,13 +438,14 @@ fn statement_signature(st: &crate::sql::parse::ParsedStatement) -> String {
     // An unmapped kind still signs, by the role of what it touched — an empty
     // signature would make the statement unfindable by shape, which is the one
     // thing this surface is for.
-    let verb = st
-        .verb
-        .unwrap_or_else(|| match st.refs.first().map(|r| r.role) {
+    let verb = st.verb.map_or_else(
+        || match st.refs.first().map(|r| r.role) {
             Some(RefRole::Defines) => "CREATE",
             Some(RefRole::Alters) => "ALTER",
             Some(RefRole::Accesses) | None => "QUERY",
-        });
+        },
+        crate::sql::parse::Verb::as_str,
+    );
     if named.is_empty() {
         verb.to_owned()
     } else {

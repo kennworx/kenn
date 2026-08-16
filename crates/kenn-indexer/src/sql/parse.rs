@@ -76,7 +76,7 @@ pub struct ParsedStatement {
     /// Kept because the role cannot stand in for it: `UPDATE` and `SELECT` are
     /// both `RefRole::Accesses`, so without this they are indistinguishable
     /// downstream and a statement's signature could not say which it was.
-    pub verb: Option<&'static str>,
+    pub verb: Option<Verb>,
 }
 
 /// Result of extracting from one blob of SQL text.
@@ -264,55 +264,186 @@ pub fn looks_like_sql(text: &str) -> bool {
         })
 }
 
+/// What a statement does, as SQL spells it.
+///
+/// An enum rather than the rendered string it used to be, for one reason: the
+/// two questions asked of a verb — how to render it, and whether its table names
+/// survive a partial parse — must both be answered for every kind, and an
+/// exhaustive `match` is the only thing that can *make* them be. A `&'static str`
+/// pushed that check to runtime, and the test standing in for it had to scrape
+/// this file's own source to enumerate the arms — which a `rustfmt` line-wrap
+/// could silently defeat.
+///
+/// Only table-bearing kinds appear. sqlparser 0.62 has 135 `Statement` variants,
+/// but a statement naming no table produces no node, so the rest are unreachable
+/// from here and `None` is the honest answer for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verb {
+    SelectFrom,
+    InsertInto,
+    Update,
+    DeleteFrom,
+    MergeInto,
+    CreateTable,
+    CreateView,
+    CreateIndex,
+    CreateSchema,
+    AlterTable,
+    RenameTable,
+    TruncateTable,
+    /// `DROP` renders its object type, because one sqlparser variant covers
+    /// table, view and index and signing a `DROP VIEW` as `DROP TABLE` would be
+    /// a lie about the schema.
+    DropTable,
+    DropView,
+    DropMaterializedView,
+    DropIndex,
+    DropSchema,
+    DropSequence,
+    DropRole,
+    DropDatabase,
+    /// An object type this module does not name individually.
+    Drop,
+    Analyze,
+    Copy,
+    CommentOn,
+    Grant,
+    Revoke,
+}
+
+impl Verb {
+    /// The signature rendering. These strings are the user-visible surface
+    /// (`index-sql` §"SQL statement signature") and are unchanged from when this
+    /// was a bare `&'static str`.
+    ///
+    /// Every arm renders a *distinct* verb, so no `match_same_arms` allow is
+    /// needed — and that is worth keeping: two kinds sharing a rendering would
+    /// be a real collapse rather than a lint to silence.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SelectFrom => "SELECT FROM",
+            Self::InsertInto => "INSERT INTO",
+            Self::Update => "UPDATE",
+            Self::DeleteFrom => "DELETE FROM",
+            Self::MergeInto => "MERGE INTO",
+            Self::CreateTable => "CREATE TABLE",
+            Self::CreateView => "CREATE VIEW",
+            Self::CreateIndex => "CREATE INDEX",
+            Self::CreateSchema => "CREATE SCHEMA",
+            Self::AlterTable => "ALTER TABLE",
+            Self::RenameTable => "RENAME TABLE",
+            Self::TruncateTable => "TRUNCATE TABLE",
+            Self::DropTable => "DROP TABLE",
+            Self::DropView => "DROP VIEW",
+            Self::DropMaterializedView => "DROP MATERIALIZED VIEW",
+            Self::DropIndex => "DROP INDEX",
+            Self::DropSchema => "DROP SCHEMA",
+            Self::DropSequence => "DROP SEQUENCE",
+            Self::DropRole => "DROP ROLE",
+            Self::DropDatabase => "DROP DATABASE",
+            Self::Drop => "DROP",
+            Self::Analyze => "ANALYZE",
+            Self::Copy => "COPY",
+            Self::CommentOn => "COMMENT ON",
+            Self::Grant => "GRANT",
+            Self::Revoke => "REVOKE",
+        }
+    }
+
+    /// Whether this statement's table names can be trusted when the text around
+    /// it did NOT fully parse.
+    ///
+    /// True for the statements that name a schema object by grammatical
+    /// position. There is no production that puts a CTE or an alias in the
+    /// target slot of `CREATE TABLE`, `CREATE INDEX … ON`, or `ALTER TABLE`, so
+    /// such a name is a real table whatever the bytes around it were.
+    ///
+    /// False for queries and DML, and that is the whole point. [`refs_of`]
+    /// already subtracts a statement's OWN `WITH` names, so the only way a CTE
+    /// reads as a table is when its `WITH` clause was torn away into a different
+    /// piece — and a piece torn off a query parses as a query. Excluding the
+    /// query verbs is therefore exactly the protection, not a proxy for it.
+    ///
+    /// **Exhaustive on purpose.** Adding a `Verb` variant will not compile until
+    /// it is classified here, which is the guarantee the old string-matching
+    /// version could not give. Callers holding a fully-parsed blob do not need
+    /// this — every statement is trustworthy then.
+    #[must_use]
+    pub const fn names_positional(self) -> bool {
+        match self {
+            Self::CreateTable
+            | Self::CreateView
+            | Self::CreateIndex
+            | Self::CreateSchema
+            | Self::AlterTable
+            | Self::RenameTable
+            | Self::TruncateTable
+            | Self::DropTable
+            | Self::DropView
+            | Self::DropMaterializedView
+            | Self::DropIndex
+            | Self::DropSchema
+            | Self::DropSequence
+            | Self::DropRole
+            | Self::DropDatabase
+            | Self::Drop
+            | Self::Analyze
+            | Self::Copy
+            | Self::CommentOn
+            | Self::Grant
+            | Self::Revoke => true,
+            // A torn-away `WITH` turns a CTE into a table here, and nowhere
+            // else. `CREATE TABLE … AS SELECT` and `CREATE VIEW … AS SELECT`
+            // are deliberately NOT in this group: a `WITH` belonging to their
+            // body parses inside them, so it cannot be separated the way a
+            // leading one can.
+            Self::SelectFrom
+            | Self::InsertInto
+            | Self::Update
+            | Self::DeleteFrom
+            | Self::MergeInto => false,
+        }
+    }
+}
+
 /// How SQL spells what a statement does, for its signature.
 ///
 /// A standalone table rather than a branch inside `refs_of`, which already
 /// carries enough complexity — and a mapping table is easier to check against
 /// the grammar when it reads as one list.
-///
-/// Only table-bearing kinds appear. sqlparser 0.62 has 135 `Statement`
-/// variants, but a statement naming no table produces no node, so the rest are
-/// unreachable from here and `None` is the honest answer for them.
-///
-/// `Drop` renders its `object_type`, because one variant covers table, view and
-/// index and signing a `DROP VIEW` as `DROP TABLE` would be a lie about the
-/// schema.
-/// No `match_same_arms` allow is needed, and that is a property worth keeping:
-/// every arm renders a *distinct* verb, so two kinds sharing a rendering would
-/// be a real collapse rather than a lint to silence. `#[expect]` was added here
-/// on the assumption it would be required and clippy reported it unfulfilled.
 #[must_use]
-pub fn verb_of(stmt: &Statement) -> Option<&'static str> {
+pub fn verb_of(stmt: &Statement) -> Option<Verb> {
     use sqlparser::ast::ObjectType;
     Some(match stmt {
-        Statement::Query(_) => "SELECT FROM",
-        Statement::Insert(_) => "INSERT INTO",
-        Statement::Update { .. } => "UPDATE",
-        Statement::Delete(_) => "DELETE FROM",
-        Statement::CreateTable(_) => "CREATE TABLE",
-        Statement::AlterTable(_) => "ALTER TABLE",
+        Statement::Query(_) => Verb::SelectFrom,
+        Statement::Insert(_) => Verb::InsertInto,
+        Statement::Update { .. } => Verb::Update,
+        Statement::Delete(_) => Verb::DeleteFrom,
+        Statement::CreateTable(_) => Verb::CreateTable,
+        Statement::AlterTable(_) => Verb::AlterTable,
         Statement::Drop { object_type, .. } => match object_type {
-            ObjectType::Table => "DROP TABLE",
-            ObjectType::View => "DROP VIEW",
-            ObjectType::MaterializedView => "DROP MATERIALIZED VIEW",
-            ObjectType::Index => "DROP INDEX",
-            ObjectType::Schema => "DROP SCHEMA",
-            ObjectType::Sequence => "DROP SEQUENCE",
-            ObjectType::Role => "DROP ROLE",
-            ObjectType::Database => "DROP DATABASE",
-            _ => "DROP",
+            ObjectType::Table => Verb::DropTable,
+            ObjectType::View => Verb::DropView,
+            ObjectType::MaterializedView => Verb::DropMaterializedView,
+            ObjectType::Index => Verb::DropIndex,
+            ObjectType::Schema => Verb::DropSchema,
+            ObjectType::Sequence => Verb::DropSequence,
+            ObjectType::Role => Verb::DropRole,
+            ObjectType::Database => Verb::DropDatabase,
+            _ => Verb::Drop,
         },
-        Statement::Truncate { .. } => "TRUNCATE TABLE",
-        Statement::Merge { .. } => "MERGE INTO",
-        Statement::RenameTable(_) => "RENAME TABLE",
-        Statement::CreateView { .. } => "CREATE VIEW",
-        Statement::CreateIndex(_) => "CREATE INDEX",
-        Statement::CreateSchema { .. } => "CREATE SCHEMA",
-        Statement::Analyze { .. } => "ANALYZE",
-        Statement::Copy { .. } => "COPY",
-        Statement::Comment { .. } => "COMMENT ON",
-        Statement::Grant { .. } => "GRANT",
-        Statement::Revoke { .. } => "REVOKE",
+        Statement::Truncate { .. } => Verb::TruncateTable,
+        Statement::Merge { .. } => Verb::MergeInto,
+        Statement::RenameTable(_) => Verb::RenameTable,
+        Statement::CreateView { .. } => Verb::CreateView,
+        Statement::CreateIndex(_) => Verb::CreateIndex,
+        Statement::CreateSchema { .. } => Verb::CreateSchema,
+        Statement::Analyze { .. } => Verb::Analyze,
+        Statement::Copy { .. } => Verb::Copy,
+        Statement::Comment { .. } => Verb::CommentOn,
+        Statement::Grant { .. } => Verb::Grant,
+        Statement::Revoke { .. } => Verb::Revoke,
         _ => return None,
     })
 }
@@ -663,6 +794,83 @@ fn parse_relation(raw: &str) -> Option<(Option<String>, String)> {
 }
 
 #[cfg(test)]
+mod verb_tests {
+    use super::Verb;
+
+    /// What `names_positional` is FOR: a schema object's name cannot be a CTE
+    /// or an alias, because the grammar admits nothing else in that slot.
+    ///
+    /// There is deliberately no test enumerating every variant. The `match` in
+    /// `names_positional` is exhaustive, so a new `Verb` does not compile until
+    /// it is classified — the compiler gives what an enumeration test could only
+    /// approximate. An earlier draft scraped this file's own source to check the
+    /// same property and could have been defeated by a `rustfmt` line-wrap.
+    #[test]
+    fn schema_statements_name_their_object_positionally() {
+        for v in [
+            Verb::CreateTable,
+            Verb::CreateIndex,
+            Verb::CreateView,
+            Verb::AlterTable,
+            Verb::DropTable,
+            Verb::DropView,
+            Verb::TruncateTable,
+            Verb::RenameTable,
+        ] {
+            assert!(v.names_positional(), "{} should be trusted", v.as_str());
+        }
+    }
+
+    /// The protection the predicate exists for: a query's names can be a CTE
+    /// whose `WITH` was torn into another piece.
+    #[test]
+    fn queries_and_dml_are_not_trusted() {
+        for v in [
+            Verb::SelectFrom,
+            Verb::InsertInto,
+            Verb::Update,
+            Verb::DeleteFrom,
+            Verb::MergeInto,
+        ] {
+            assert!(!v.names_positional(), "{} must not be trusted", v.as_str());
+        }
+    }
+
+    /// The rendered strings are a user-visible surface (`index-sql`
+    /// §"SQL statement signature"), so they are asserted, not just derived.
+    #[test]
+    fn verbs_render_as_sql_spells_them() {
+        assert_eq!(Verb::SelectFrom.as_str(), "SELECT FROM");
+        assert_eq!(Verb::CreateTable.as_str(), "CREATE TABLE");
+        assert_eq!(
+            Verb::DropMaterializedView.as_str(),
+            "DROP MATERIALIZED VIEW"
+        );
+        assert_eq!(Verb::CommentOn.as_str(), "COMMENT ON");
+    }
+
+    /// A `DROP` renders its object type rather than collapsing to `DROP TABLE`,
+    /// because signing a `DROP VIEW` as a table drop would be a lie about the
+    /// schema.
+    #[test]
+    fn each_drop_keeps_its_object_type() {
+        let rendered: Vec<&str> = [
+            Verb::DropTable,
+            Verb::DropView,
+            Verb::DropMaterializedView,
+            Verb::DropIndex,
+        ]
+        .iter()
+        .map(|v| v.as_str())
+        .collect();
+        let mut unique = rendered.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), rendered.len(), "two drops share a rendering");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{extract, looks_like_sql, validate_dialect, RefRole};
 
@@ -786,6 +994,10 @@ mod tests {
 
     /// Parse one statement and report the verb the mapping table gives it.
     fn verb(text: &str) -> Option<&'static str> {
+        verb_enum(text).map(super::Verb::as_str)
+    }
+
+    fn verb_enum(text: &str) -> Option<super::Verb> {
         let stmts = super::parse_with_sweep(text, None)?;
         super::verb_of(stmts.first()?)
     }

@@ -115,13 +115,22 @@ fn refs_from_text(text: &str, dialect: Option<&str>, out: &mut Vec<(TableKey, Re
         return false;
     }
     let extraction = extract(t, dialect);
-    // A whole element body is one fragment, like a code literal: a partial
-    // parse is where an alias or a CTE name gets read as a table.
-    if extraction.unparsed > 0 {
-        return false;
-    }
+    // Same rule a code literal follows, for the same reason: a changelog's
+    // `<sql>` body is the same kind of artifact as a schema constant in code,
+    // and which file carried it must not decide whether its `CREATE TABLE`
+    // statements are seen. On a partial parse keep the statements that name a
+    // schema object by position and drop the rest — an alias or a CTE whose
+    // `WITH` was torn into another piece can only appear under a query verb.
+    let whole = extraction.unparsed == 0;
     let mut any = false;
     for statement in extraction.statements {
+        if !whole
+            && !statement
+                .verb
+                .is_some_and(crate::sql::parse::Verb::names_positional)
+        {
+            continue;
+        }
         for r in statement.refs {
             any = true;
             out.push((TableKey::new(r.schema, r.name), r.role));
@@ -284,6 +293,57 @@ mod tests {
         assert_eq!(got.refs[0].table.name, "users");
         assert_eq!(got.refs[0].role, RefRole::Alters, "alters, not accesses");
         assert_eq!(got.counts.elements_with_sql, 1);
+    }
+
+    /// A changeset body is the same kind of artifact as a schema constant in
+    /// code, so it follows the same rule: one statement no dialect can read
+    /// does not cost the readable ones beside it.
+    ///
+    /// `tokenize='unicode61'` is kept verbatim — the named argument is what
+    /// sqlparser rejects, and a simplified `USING fts5(words)` may parse, in
+    /// which case this test would never reach the partial-parse branch it is
+    /// named for.
+    #[test]
+    fn a_changeset_body_survives_one_unreadable_statement() {
+        let known = NameSet::new();
+        let rows = [row(
+            1,
+            "db/log.xml",
+            "<sql>",
+            "CREATE TABLE ledger (id INTEGER NOT NULL); \
+             CREATE VIRTUAL TABLE ledger_fts USING fts5(body, tokenize='unicode61');",
+        )];
+        let got = resolve(&known, &config(vec![]), &rows);
+        let named: Vec<&str> = got.refs.iter().map(|r| r.table.name.as_str()).collect();
+        assert_eq!(
+            named,
+            ["ledger"],
+            "the readable CREATE survives, the virtual table does not: {named:?}"
+        );
+        assert_eq!(got.refs[0].role, RefRole::Defines);
+        assert_eq!(
+            got.counts.elements_with_sql, 1,
+            "the element still counts as carrying SQL"
+        );
+    }
+
+    /// The other half of the rule, at this call site: a query beside an
+    /// unparsed piece is still refused.
+    #[test]
+    fn a_changeset_query_beside_an_unparsed_piece_contributes_nothing() {
+        let known = NameSet::new();
+        let rows = [row(
+            1,
+            "db/log.xml",
+            "<sql>",
+            "SELECT id FROM recent WHERE x = 1; ((( not sql at all",
+        )];
+        let got = resolve(&known, &config(vec![]), &rows);
+        assert!(
+            got.refs.is_empty(),
+            "a query verb is not trusted under a partial parse: {:?}",
+            got.refs.iter().map(|r| &r.table.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]
