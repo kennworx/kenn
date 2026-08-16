@@ -161,6 +161,15 @@ pub(crate) fn is_verbatim_language(lang: &str) -> bool {
 /// this version" is answered by an attribute, and "which migration drops this
 /// column" by element text, and a caller should not have to know which.
 ///
+/// **This is a stopgap for SQL, and it names its own retirement condition.** A
+/// statement's whole text is searchable verbatim because *columns are not
+/// nodes*: `ALTER TABLE users ADD COLUMN last_login` is the only place
+/// `last_login` appears in the graph, so dropping the text would make the column
+/// unfindable. When columns become nodes with their own identities, this shrinks
+/// to a real signature — verb plus tables — and the text stops being indexed
+/// wholesale. Until then a statement's `name_text` is bigger than a signature
+/// should be, on purpose.
+///
 /// Markup is flattened to words rather than kept as tags. `<dep groupId="x">`
 /// searched as written would need the query to include the angle brackets and
 /// the `=`; flattened, `groupId x` matches, and so does a bare `x`. The

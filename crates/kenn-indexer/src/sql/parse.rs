@@ -15,11 +15,26 @@
 //!   than any single dialect (the best scored 13/16). Narrowing the retry set by
 //!   syntax markers misroutes: Oracle's `(+)` outer-join operator parses only
 //!   under the SQL Server dialect.
-//! * **Whole text first, split only on failure.** Splitting first shears a
-//!   procedure or anonymous block at its internal separators and the leading
-//!   fragment — carrying the block's opening statement — fails, taking its table
-//!   references with it. Measured, splitting first lost a third of one file's
-//!   tables.
+//! * **Whole text first, split only on failure.** The failure mode splitting
+//!   first invites is real: it shears a procedure or anonymous block at its
+//!   internal separators, and the leading fragment — carrying the block's
+//!   opening statement — fails, taking its table references with it. On the
+//!   spike's hand-written statements that cost a third of one file's tables.
+//!
+//!   **It did not reproduce on real corpora.** Re-measured over two Postgres
+//!   repositories (21 and 54 `.sql` files), the two orderings recovered
+//!   *identical* table counts — 159/159 and 228/228, with no file favouring
+//!   either. Whole-first remains the right default because it is cheaper (one
+//!   parse instead of one per piece) and because the shearing hazard is real
+//!   where those blocks occur, but the coverage advantage is unproven outside
+//!   the spike. Neither corpus is Oracle or T-SQL, where the hazard is most
+//!   likely; that case is still unmeasured. `audit_strategy_on_a_real_corpus`
+//!   re-runs this.
+//!
+//!   What the same audit did confirm: the tokenizer stays more permissive than
+//!   the parser. In both repositories 9 files failed a whole-file parse and
+//!   still tokenized into pieces, which is the property the split tier depends
+//!   on.
 
 use std::ops::Range;
 
@@ -54,6 +69,14 @@ pub struct ParsedStatement {
     /// Byte range in the input this statement occupies.
     pub span: Range<usize>,
     pub refs: Vec<TableRef>,
+    /// What the statement *does*, as SQL spells it — `SELECT FROM`,
+    /// `ALTER TABLE`, `DROP VIEW`. `None` when the parser produced a kind this
+    /// module does not map.
+    ///
+    /// Kept because the role cannot stand in for it: `UPDATE` and `SELECT` are
+    /// both `RefRole::Accesses`, so without this they are indistinguishable
+    /// downstream and a statement's signature could not say which it was.
+    pub verb: Option<&'static str>,
 }
 
 /// Result of extracting from one blob of SQL text.
@@ -241,6 +264,59 @@ pub fn looks_like_sql(text: &str) -> bool {
         })
 }
 
+/// How SQL spells what a statement does, for its signature.
+///
+/// A standalone table rather than a branch inside `refs_of`, which already
+/// carries enough complexity — and a mapping table is easier to check against
+/// the grammar when it reads as one list.
+///
+/// Only table-bearing kinds appear. sqlparser 0.62 has 135 `Statement`
+/// variants, but a statement naming no table produces no node, so the rest are
+/// unreachable from here and `None` is the honest answer for them.
+///
+/// `Drop` renders its `object_type`, because one variant covers table, view and
+/// index and signing a `DROP VIEW` as `DROP TABLE` would be a lie about the
+/// schema.
+/// No `match_same_arms` allow is needed, and that is a property worth keeping:
+/// every arm renders a *distinct* verb, so two kinds sharing a rendering would
+/// be a real collapse rather than a lint to silence. `#[expect]` was added here
+/// on the assumption it would be required and clippy reported it unfulfilled.
+#[must_use]
+pub fn verb_of(stmt: &Statement) -> Option<&'static str> {
+    use sqlparser::ast::ObjectType;
+    Some(match stmt {
+        Statement::Query(_) => "SELECT FROM",
+        Statement::Insert(_) => "INSERT INTO",
+        Statement::Update { .. } => "UPDATE",
+        Statement::Delete(_) => "DELETE FROM",
+        Statement::CreateTable(_) => "CREATE TABLE",
+        Statement::AlterTable(_) => "ALTER TABLE",
+        Statement::Drop { object_type, .. } => match object_type {
+            ObjectType::Table => "DROP TABLE",
+            ObjectType::View => "DROP VIEW",
+            ObjectType::MaterializedView => "DROP MATERIALIZED VIEW",
+            ObjectType::Index => "DROP INDEX",
+            ObjectType::Schema => "DROP SCHEMA",
+            ObjectType::Sequence => "DROP SEQUENCE",
+            ObjectType::Role => "DROP ROLE",
+            ObjectType::Database => "DROP DATABASE",
+            _ => "DROP",
+        },
+        Statement::Truncate { .. } => "TRUNCATE TABLE",
+        Statement::Merge { .. } => "MERGE INTO",
+        Statement::RenameTable(_) => "RENAME TABLE",
+        Statement::CreateView { .. } => "CREATE VIEW",
+        Statement::CreateIndex(_) => "CREATE INDEX",
+        Statement::CreateSchema { .. } => "CREATE SCHEMA",
+        Statement::Analyze { .. } => "ANALYZE",
+        Statement::Copy { .. } => "COPY",
+        Statement::Comment { .. } => "COMMENT ON",
+        Statement::Grant { .. } => "GRANT",
+        Statement::Revoke { .. } => "REVOKE",
+        _ => return None,
+    })
+}
+
 /// A table name written somewhere that is not a statement — an XML attribute —
 /// normalized to the identity a statement naming the same table would produce.
 ///
@@ -403,7 +479,11 @@ pub fn extract(text: &str, primary: Option<&str>) -> Extraction {
             .zip(spans)
             .filter_map(|(s, span)| {
                 let refs = refs_of(s);
-                (!refs.is_empty()).then_some(ParsedStatement { span, refs })
+                (!refs.is_empty()).then_some(ParsedStatement {
+                    span,
+                    refs,
+                    verb: verb_of(s),
+                })
             })
             .collect();
         return Extraction {
@@ -425,7 +505,15 @@ pub fn extract(text: &str, primary: Option<&str>) -> Extraction {
             Some(stmts) => {
                 let refs: Vec<TableRef> = stmts.iter().flat_map(refs_of).collect();
                 if !refs.is_empty() {
-                    statements.push(ParsedStatement { span: piece, refs });
+                    // A split piece can hold more than one statement; the first
+                    // is what the piece is *about*, and it is what the span
+                    // starts at.
+                    let verb = stmts.first().and_then(verb_of);
+                    statements.push(ParsedStatement {
+                        span: piece,
+                        refs,
+                        verb,
+                    });
                 }
             }
             None => unparsed += 1,
@@ -694,6 +782,75 @@ mod tests {
         ] {
             assert_eq!(names(text), ["users"], "quoting stripped from {text}");
         }
+    }
+
+    /// Parse one statement and report the verb the mapping table gives it.
+    fn verb(text: &str) -> Option<&'static str> {
+        let stmts = super::parse_with_sweep(text, None)?;
+        super::verb_of(stmts.first()?)
+    }
+
+    #[test]
+    fn every_mapped_kind_renders_its_own_verb() {
+        // Walked arm by arm, not sampled: the gate's own arithmetic makes a
+        // partly-covered mapping table expensive, and a kind that silently
+        // renders as another is a lie about the schema.
+        for (sql, want) in [
+            ("SELECT id FROM users", "SELECT FROM"),
+            ("INSERT INTO users (id) VALUES (1)", "INSERT INTO"),
+            ("UPDATE users SET id = 1", "UPDATE"),
+            ("DELETE FROM users WHERE id = 1", "DELETE FROM"),
+            ("CREATE TABLE users (id INT)", "CREATE TABLE"),
+            ("ALTER TABLE users ADD COLUMN x INT", "ALTER TABLE"),
+            ("DROP TABLE users", "DROP TABLE"),
+            ("DROP VIEW active_users", "DROP VIEW"),
+            ("DROP INDEX users_id_idx", "DROP INDEX"),
+            ("DROP SCHEMA tenant CASCADE", "DROP SCHEMA"),
+            ("DROP SEQUENCE users_id_seq", "DROP SEQUENCE"),
+            ("DROP ROLE app", "DROP ROLE"),
+            ("DROP DATABASE olddb", "DROP DATABASE"),
+            ("TRUNCATE TABLE audit_log", "TRUNCATE TABLE"),
+            (
+                "MERGE INTO a USING b ON a.id = b.id WHEN MATCHED THEN UPDATE SET x = 1",
+                "MERGE INTO",
+            ),
+            ("CREATE VIEW v AS SELECT id FROM users", "CREATE VIEW"),
+            ("CREATE INDEX users_id_idx ON users (id)", "CREATE INDEX"),
+            ("CREATE SCHEMA tenant", "CREATE SCHEMA"),
+            ("ANALYZE users", "ANALYZE"),
+            ("COMMENT ON TABLE users IS 'people'", "COMMENT ON"),
+            ("GRANT SELECT ON users TO app", "GRANT"),
+            ("REVOKE SELECT ON users FROM app", "REVOKE"),
+        ] {
+            assert_eq!(verb(sql), Some(want), "for: {sql}");
+        }
+    }
+
+    #[test]
+    fn a_drop_view_does_not_render_as_a_drop_table() {
+        // One `Drop` variant covers every object type, so this is the arm most
+        // likely to collapse into a wrong answer.
+        assert_ne!(verb("DROP VIEW v"), verb("DROP TABLE t"));
+        assert_ne!(verb("DROP INDEX i"), verb("DROP TABLE t"));
+    }
+
+    #[test]
+    fn the_verb_distinguishes_statements_the_role_cannot() {
+        // The reason the kind is retained at all: `UPDATE` and `SELECT` are
+        // both `RefRole::Accesses`, so the role alone loses the distinction.
+        let update = extract("UPDATE users SET id = 1", None);
+        let select = extract("SELECT id FROM users", None);
+        assert_eq!(update.statements[0].refs[0].role, RefRole::Accesses);
+        assert_eq!(select.statements[0].refs[0].role, RefRole::Accesses);
+        assert_ne!(update.statements[0].verb, select.statements[0].verb);
+    }
+
+    #[test]
+    fn an_unmapped_table_bearing_kind_reports_no_verb() {
+        // `None` rather than a wrong guess — the caller signs by role instead.
+        // 135 variants exist and most name no table; this pins that the table
+        // does not pretend to cover them.
+        assert_eq!(verb("EXPLAIN SELECT id FROM users"), None);
     }
 
     #[test]
@@ -1035,4 +1192,88 @@ fn audit_prefilter_false_negatives() {
     for r in &rejected_but_parses {
         println!("  MISS {r}");
     }
+}
+
+/// Manual audit for task 3.9: does the strategy hold on a real corpus?
+///
+/// Every number in the module doc came from hand-written statements. This walks
+/// a workspace's `.sql` files and reports, for each, what whole-file-first
+/// recovers against what split-first would, plus whether the tokenizer stayed
+/// more permissive than the parser (the split tier depends on it).
+///
+/// `KENN_SQL_AUDIT=<workspace>` and `--ignored --nocapture`.
+#[cfg(test)]
+#[test]
+#[ignore = "manual: needs KENN_SQL_AUDIT=<workspace path>"]
+fn audit_strategy_on_a_real_corpus() {
+    let Ok(root) = std::env::var("KENN_SQL_AUDIT") else {
+        return;
+    };
+    let (mut files, mut whole_tables, mut split_tables) = (0usize, 0usize, 0usize);
+    let (mut whole_wins, mut split_wins, mut tokenized_more) = (0usize, 0usize, 0usize);
+
+    let mut stack = vec![std::path::PathBuf::from(&root)];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if p.is_dir() {
+                if !matches!(name.as_str(), ".git" | ".kenn" | "node_modules" | "target") {
+                    stack.push(p);
+                }
+                continue;
+            }
+            if p.extension().and_then(|x| x.to_str()) != Some("sql") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            files += 1;
+
+            // Whole-file-first: the shipped strategy.
+            let whole: usize = extract(&src, None)
+                .statements
+                .iter()
+                .map(|s| s.refs.len())
+                .sum();
+            // Split-first: parse each tokenizer piece independently.
+            let pieces = statement_pieces(&src, None);
+            let split: usize = pieces
+                .iter()
+                .filter_map(|r| src.get(r.clone()))
+                .map(|piece| {
+                    extract(piece, None)
+                        .statements
+                        .iter()
+                        .map(|s| s.refs.len())
+                        .sum::<usize>()
+                })
+                .sum();
+            whole_tables += whole;
+            split_tables += split;
+            if whole > split {
+                whole_wins += 1;
+            } else if split > whole {
+                split_wins += 1;
+                println!("  SPLIT-WINS {} whole={whole} split={split}", p.display());
+            }
+            // The split tier only helps if tokenizing survives what parsing rejects.
+            if parse_with_sweep(&src, None).is_none() && pieces.len() > 1 {
+                tokenized_more += 1;
+            }
+        }
+    }
+    println!("files: {files}");
+    println!("table refs — whole-file-first: {whole_tables}, split-first: {split_tables}");
+    println!("files where whole-file-first recovered more: {whole_wins}");
+    println!("files where split-first recovered more:      {split_wins}");
+    println!("files the parser rejected whole but the tokenizer still split: {tokenized_more}");
 }

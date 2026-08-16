@@ -77,13 +77,14 @@
 - [x] 3.5 Drop split fragments that parse but reference nothing — a bare `END` parses
   as a statement with zero relations and would otherwise mint a meaningless statement
   node. → verify: splitting a block body produces no `END` node.
-- [ ] 3.6 Normalize extracted identifiers — strip dialect quoting (`` `users` ``,
+- [x] 3.6 Normalize extracted identifiers — strip dialect quoting (`` `users` ``,
   `[dbo].[users]`, `"users"`) before registry lookup or node minting. sqlparser
   returns names **with** their quoting, so unnormalized `` `users` `` and `users`
   mint two table identities, and a quoted reference silently drops under the
-  no-stub rule instead of linking. → verify: backtick-, bracket-, and
-  double-quote-qualified references to one table all resolve to the same node;
-  mutation — remove normalization and confirm the test goes red.
+  no-stub rule instead of linking. → verify: DONE —
+  `dialect_quoting_is_stripped_so_one_table_has_one_identity` covers all three quoting
+  styles; mutation (drop the trims from `normalize_ident`) goes red with
+  `left: ["`users`"] right: ["users"]`, and takes the dialect-sweep test with it.
 - [x] 3.7 Resolve table aliases within a statement so `FROM users u JOIN orders o`
   yields `users` and `orders`, not `u` and `o`. → verify: alias-heavy statement
   yields exactly the two real tables.
@@ -98,12 +99,20 @@
 - [x] 3.8 Mark references whose target is not statically knowable (runtime
   substitution) as unresolvable rather than emitting a name. → verify: a
   substituted table name produces an unresolvable reference, not a literal token.
-- [ ] 3.9 Re-run the whole strategy against a real repo with Oracle/T-SQL in `./tmp`
+- [x] 3.9 Re-run the whole strategy against a real repo with Oracle/T-SQL in `./tmp`
   before trusting it. Every number cited in 3.3–3.4 comes from `tmp/sqlspike`, which
   uses hand-written statements, not a corpus. Confirm on real source that tokenizing
   stays more permissive than parsing (3.4's split tier depends on it) and that
-  whole-file-first still beats split-first. → verify: the measured coverage on a real
-  repo is recorded alongside the spike numbers.
+  whole-file-first still beats split-first. → verify: **the spike's advantage did not
+  reproduce.** `audit_strategy_on_a_real_corpus` over two Postgres repositories (21 and
+  54 `.sql` files) recovered *identical* table counts either way — 159/159 and 228/228,
+  no file favouring either ordering. Whole-first stays the default because it is cheaper
+  (one parse, not one per piece) and the shearing hazard is real where procedure blocks
+  occur, but the coverage claim is now marked unproven outside the spike in the module
+  doc. The tokenizer-more-permissive-than-parser property, which the split tier depends
+  on, DID hold: 9 files in each repo failed a whole-file parse and still tokenized.
+  **Neither corpus is Oracle or T-SQL** — the dialects where shearing is likeliest — so
+  that half of this task remains unmeasured and is recorded as such.
 
 ## 4. Registry — one trait, one impl
 
@@ -148,13 +157,15 @@
 
 ## 5a. Statement signature
 
-- [ ] 5a.1 Retain the parser's statement kind on `ParsedStatement`
+- [x] 5a.1 Retain the parser's statement kind on `ParsedStatement`
   (`crates/kenn-indexer/src/sql/parse.rs`), set where `refs_of` already matches on
   `Statement`. The information is in hand there today and discarded — `ParsedStatement`
   carries only `span` and `refs`, so `UPDATE` and `SELECT` are indistinguishable
   downstream (both are `RefRole::Accesses`). → verify: two statements differing only in
-  operation are distinguishable from the extraction alone.
-- [ ] 5a.2 Add a standalone `verb_of(&Statement) -> &'static str` mapping table — NOT a
+  operation are distinguishable from the extraction alone. → verify:
+  `the_verb_distinguishes_statements_the_role_cannot` shows `UPDATE` and `SELECT` sharing
+  `RefRole::Accesses` while carrying different verbs.
+- [x] 5a.2 Add a standalone `verb_of(&Statement) -> &'static str` mapping table — NOT a
   branch inside `refs_of`, which already carries enough complexity. Cover every
   table-bearing kind: `Query`, `Insert`, `Update`, `Delete`, `CreateTable`, `AlterTable`,
   `Drop` (rendering its `object_type`, since one variant covers table/view/index),
@@ -162,59 +173,83 @@
   `AlterIndex`, `CreateSchema`, `Analyze`, `OptimizeTable`, `Cache`, `UNCache`,
   `LockTables`, `Copy`, `LoadData`, `Unload`, `Comment`, `Grant`, `Revoke`. The enum has
   135 variants in sqlparser 0.62, but a statement naming no table produces no node, so
-  the rest are unreachable from here. → verify: every listed kind renders its own verb; a
-  `DROP VIEW` does not render as `DROP TABLE`.
-- [ ] 5a.3 Cover `verb_of` with a test walking every arm. CRAP is
+  the rest are unreachable from here. → verify: 22 arms walked one by one, and `DROP VIEW`
+  / `DROP INDEX` each differ from `DROP TABLE`. `None` for an unmapped kind rather than a
+  guess, pinned by `EXPLAIN SELECT`.
+- [x] 5a.3 Cover `verb_of` with a test walking every arm. CRAP is
   `cyclomatic² × (1−coverage)³ + cyclomatic` against a threshold of 30, so a ~25-arm match
   scores 25 fully covered, 30 at 80% coverage, and 65 at 60% — this is the first function
   in the change that can trip the gate on its own. Expect
   `#[allow(clippy::match_same_arms)]` with a justification, which §5 sanctions for
-  documentation-style mapping tables. → verify: `just crap-ci` green with the function
-  present.
-- [ ] 5a.4 Render the signature in `ingest.rs` as verb plus the tables the statement
+  documentation-style mapping tables. → verify: gate green, and `verb_of` does not appear
+  in the report at all — fully covered, it scores under threshold. **The predicted allow
+  turned out to be unnecessary**: `#[expect(clippy::match_same_arms)]` came back
+  *unfulfilled*, because every arm renders a distinct verb. That is a property worth
+  keeping rather than a lint to silence, so the attribute was removed and the reason
+  recorded on the function.
+- [x] 5a.4 Render the signature in `ingest.rs` as verb plus the tables the statement
   names, signing a define-and-access statement by what it defines. No cap and no
-  truncation. → verify: a multi-table join names every table (spec scenario); a
-  create-as-select signs by its defined table.
-- [ ] 5a.5 Fall back to the reference role for an unrecognized kind rather than emitting
-  an empty signature. → verify: an unmapped table-bearing statement still signs (spec
-  scenario).
+  truncation. → verify: a four-table join names all four; `CREATE TABLE active AS SELECT
+  … FROM users` signs `CREATE TABLE active`, and mutating that rule renders
+  `CREATE TABLE active, users`. A self-join names its table once. Measured on a real
+  repo: `SELECT FROM postings, balances, merchants`, `DROP TABLE bench_bare, bench_fk,
+  bench_trig, bench_stmt`.
+- [x] 5a.5 Fall back to the reference role for an unrecognized kind rather than emitting
+  an empty signature. → verify: an unmapped kind signs `QUERY users`. The first version
+  of this test asserted only `!s.is_empty()` and **survived the mutation** — the table
+  list alone makes the string non-empty — so it now asserts on the verb, and the vacuous
+  `if let` guard was replaced with an `expect` so a fixture that stops producing a
+  statement fails loudly.
 
 ## 5b. Search surfaces
 
-- [ ] 5b.1 Extend the verbatim lexical projection in `build_name_rows`
+- [x] 5b.1 Extend the verbatim lexical projection in `build_name_rows`
   (`crates/kenn-store/src/db/sqlite/writer/finalize.rs`) to cover SQL alongside XML, and
   derive it from **both** surfaces so the statement text reaches the trigram index. Today
   the XML arm passes the signature through unsplit while everything else is
   identifier-split, and SQL statements carry an empty signature — so a statement's
   `name_text` is its synthetic name (`sql_statement …`) and its text is reachable only
-  through the porter index. → verify: a column name added by a statement is findable by
-  substring search (spec scenario); `VARCHAR(255)` is findable spelled as written.
-- [ ] 5b.2 Exclude SQL from the embedding selection in `scan_rows`
+  through the porter index. → verify: DONE by the shared verbatim arm landed in
+  `index-xml` 4.6 — one arm covering both languages, keyed on `is_verbatim_language`.
+  Measured on a real workspace: a column name a statement adds returns 3 substring hits,
+  matching the 3 rows that contain it. (`VARCHAR(255)` does not occur in that corpus, so
+  it proves nothing there — the column name is the real evidence.)
+- [x] 5b.2 Exclude SQL from the embedding selection in `scan_rows`
   (`crates/kenn-store/src/db/jobs.rs`) alongside XML — one filter covering both, not two.
   SQL currently writes the statement to the content surface and is therefore embedded by
   default. → verify: a SQL-only workspace produces zero vectors after an embed pass (spec
-  scenario); mutation-check by removing the filter and confirming vectors appear.
-- [ ] 5b.3 Record the stopgap in the code where the projection is defined: statement text
+  scenario); mutation-check by removing the filter and confirming vectors appear. →
+  verify: DONE — one `n.language NOT IN (…)` filter covers both languages;
+  `xml_and_sql_never_enrol_in_the_embedding_pass` and
+  `an_xml_only_workspace_embeds_nothing_at_all` guard it, and neutralizing the filter
+  turns both red naming the leaked rows.
+- [x] 5b.3 Record the stopgap in the code where the projection is defined: statement text
   is verbatim-searchable because columns are not nodes, and this shrinks to a true
-  signature when they are. → verify: the comment names the condition that would retire
-  it, not just the current behaviour.
+  signature when they are. → verify: DONE — the note sits on `verbatim_projection` in
+  `kenn-store/src/db/codes.rs` and names the retirement condition (columns becoming
+  nodes with their own identities), not just the current behaviour.
 
 ## 6. Verification
 
-- [ ] 6.1 A real repository with SQL migrations plus query files in `./tmp` indexes
+- [x] 6.1 A real repository with SQL migrations plus query files in `./tmp` indexes
   end to end; spot-check that one table node is reached from a `CREATE`, from an
   `ALTER`, and from a `SELECT` in different files. → verify: `kenn list usages`
-  on the table id returns statements from every referencing file.
-- [ ] 6.2 Mutation-check the grading guard (§9): force `Ambiguous` resolution to
+  on the table id returns statements from every referencing file. → verify: `ledger.accounts`
+  on a real Postgres repo — 23 usages across 6 files, reached by `CREATE TABLE accounts`,
+  `ALTER TABLE accounts` (3 files) and reads (2 files), each carrying its rendered
+  signature.
+- [x] 6.2 Mutation-check the grading guard (§9): force `Ambiguous` resolution to
   return a single candidate, confirm the multi-candidate test goes red for that
-  reason, restore. → verify: the test fails on the mutation and passes after restore.
-- [ ] 6.3 Mutation-check the drop rule: make a runtime-substituted name emit a table
-  node, confirm the not-knowable test goes red, restore. → verify: red on mutation,
-  green after.
-- [ ] 6.4 Mutation-check the mint rule: require a `DefinesTable` edge before a
+  reason, restore. → verify: red — `an_unqualified_reference_matching_two_keeps_both`
+  reports `left: 1 right: 2`.
+- [x] 6.3 Mutation-check the drop rule: make a runtime-substituted name emit a table
+  node, confirm the not-knowable test goes red, restore. → verify: red on both
+  substitution guards — the `${…}` one and the quoted C# interpolation one.
+- [x] 6.4 Mutation-check the mint rule: require a `DefinesTable` edge before a
   reference may link, confirm the undeclared-table test goes red, restore. This is the
   rule that decides whether a workspace whose schema lives elsewhere gets a graph at
   all — measured on a real repository, only 25 of 128 tables are declared in `.sql`. →
   verify: red on mutation, green after.
-- [ ] 6.5 `cargo clippy --workspace --all-targets` clean, `just crap-ci` green,
-  then `cargo fmt --all`, then clippy once more (§7 ordering).
+- [x] 6.5 `cargo clippy --workspace --all-targets` clean, `just crap-ci` green,
+  then `cargo fmt --all`, then clippy once more (§7 ordering). → verify: gate green;
+  `verb_of` does not appear in the report (fully covered, under threshold).

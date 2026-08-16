@@ -220,7 +220,7 @@ pub fn ingest_sql(
             if let Some(text) = f.content.get(st.span.clone()) {
                 sink.push_symbol_docs(SymbolDocsRecord {
                     sym_id: sym,
-                    sig: String::new(),
+                    sig: statement_signature(st),
                     doc: text.trim().to_string(),
                 })?;
             }
@@ -402,6 +402,56 @@ fn line_span(text: &str, start: usize, end: usize) -> (u32, u32) {
     (line_of(start), line_of(end))
 }
 
+/// A statement's signature: what it does, and to which tables.
+///
+/// `ALTER TABLE users`, `SELECT FROM users, auth`, `DELETE FROM sessions` — the
+/// shape a reader recognises, rather than the whole statement text (which lives
+/// on the content surface) or a synthetic name.
+///
+/// **Signed by what it defines**, when it defines anything. A
+/// `CREATE TABLE … AS SELECT` names both its new table and its sources, and the
+/// new table is what the statement is *about*; listing the sources first would
+/// file a declaration under the tables it read.
+///
+/// No cap and no truncation. A join list long enough to be a problem is not a
+/// thing real SQL produces, and a truncated signature is worse than a long one:
+/// it looks complete.
+fn statement_signature(st: &crate::sql::parse::ParsedStatement) -> String {
+    let defined: Vec<&str> = st
+        .refs
+        .iter()
+        .filter(|r| r.role == RefRole::Defines)
+        .map(|r| r.name.as_str())
+        .collect();
+    let named: Vec<&str> = if defined.is_empty() {
+        let mut seen: Vec<&str> = Vec::new();
+        for r in &st.refs {
+            if !seen.contains(&r.name.as_str()) {
+                seen.push(r.name.as_str());
+            }
+        }
+        seen
+    } else {
+        defined
+    };
+
+    // An unmapped kind still signs, by the role of what it touched — an empty
+    // signature would make the statement unfindable by shape, which is the one
+    // thing this surface is for.
+    let verb = st
+        .verb
+        .unwrap_or_else(|| match st.refs.first().map(|r| r.role) {
+            Some(RefRole::Defines) => "CREATE",
+            Some(RefRole::Alters) => "ALTER",
+            Some(RefRole::Accesses) | None => "QUERY",
+        });
+    if named.is_empty() {
+        verb.to_owned()
+    } else {
+        format!("{verb} {}", named.join(", "))
+    }
+}
+
 fn statement_name(role: Option<RefRole>, index: usize) -> String {
     let verb = match role {
         Some(RefRole::Defines) => "create",
@@ -562,5 +612,84 @@ mod tests {
         assert_eq!(c.statements, 1, "one statement node");
         assert_eq!(c.tables, 2);
         assert_eq!(c.edges, 2, "defines report, accesses orders");
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::statement_signature;
+    use crate::sql::parse::extract;
+
+    fn sig(text: &str) -> String {
+        let ex = extract(text, None);
+        statement_signature(&ex.statements[0])
+    }
+
+    #[test]
+    fn a_statement_signs_as_its_verb_and_the_tables_it_names() {
+        assert_eq!(
+            sig("ALTER TABLE users ADD COLUMN x INT"),
+            "ALTER TABLE users"
+        );
+        assert_eq!(sig("UPDATE users SET id = 1"), "UPDATE users");
+        assert_eq!(
+            sig("DELETE FROM sessions WHERE id = 1"),
+            "DELETE FROM sessions"
+        );
+    }
+
+    #[test]
+    fn a_multi_table_join_names_every_table_with_no_cap() {
+        // No truncation: a join list long enough to be a problem is not a thing
+        // real SQL produces, and a truncated signature is worse than a long one
+        // because it looks complete.
+        let s = sig("SELECT u.id FROM users u \
+             JOIN auth a ON a.uid = u.id \
+             JOIN sessions s ON s.uid = u.id \
+             JOIN audit_log l ON l.uid = u.id");
+        for t in ["users", "auth", "sessions", "audit_log"] {
+            assert!(s.contains(t), "{t} missing from {s:?}");
+        }
+        assert!(s.starts_with("SELECT FROM "), "{s:?}");
+    }
+
+    #[test]
+    fn a_create_as_select_signs_by_what_it_defines() {
+        // It names both its new table and its sources, and the new table is
+        // what the statement is ABOUT. Signing by the sources would file a
+        // declaration under the tables it merely read.
+        let s = sig("CREATE TABLE active AS SELECT id FROM users WHERE ok");
+        assert_eq!(s, "CREATE TABLE active");
+    }
+
+    #[test]
+    fn an_unmapped_kind_still_signs_by_role_rather_than_empty() {
+        // An empty verb would make the statement unfindable by shape, which is
+        // the one thing this surface exists for.
+        //
+        // Asserted on the VERB, not on the string being non-empty: the table
+        // list alone makes it non-empty, so `!s.is_empty()` passed even with
+        // the fallback deleted. And no `if let` — a vacuous pass when the
+        // fixture stops producing a statement is exactly how this would rot.
+        let ex = extract("EXPLAIN SELECT id FROM users", None);
+        let st = ex
+            .statements
+            .first()
+            .expect("the fixture must still yield a statement");
+        assert_eq!(st.verb, None, "precondition: the kind is unmapped");
+        let s = statement_signature(st);
+        assert!(
+            s.starts_with("QUERY "),
+            "signs by role when the kind is unmapped: {s:?}"
+        );
+        assert!(s.contains("users"), "and still names the table: {s:?}");
+    }
+
+    #[test]
+    fn a_table_named_twice_appears_once() {
+        // A self-join names one table twice; a signature listing it twice reads
+        // as two tables.
+        let s = sig("SELECT a.id FROM users a JOIN users b ON b.mgr = a.id");
+        assert_eq!(s, "SELECT FROM users");
     }
 }
