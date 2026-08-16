@@ -494,6 +494,30 @@ where
     out
 }
 
+/// Raw per-site table edges for the atlas tables axis.
+///
+/// Raw, not aggregate: which FILE made the reference is that axis's whole
+/// answer, and an aggregate edge has already collapsed it.
+///
+/// A free function rather than three more branches inside
+/// `compute_and_persist`, which sits a fraction under the complexity gate and
+/// grows every time an axis needs one more input.
+async fn scan_table_edges(
+    writer: &kenn_store::DbWriter,
+) -> Result<Vec<(ShortId, ShortId, EdgeKind)>, kenn_store::api::DbError> {
+    let mut out = Vec::new();
+    for kind in [
+        EdgeKind::DefinesTable,
+        EdgeKind::AltersTable,
+        EdgeKind::AccessesTable,
+    ] {
+        for (src, dst) in writer.scan_edges_for_aggregation(kind).await? {
+            out.push((src, dst, kind));
+        }
+    }
+    Ok(out)
+}
+
 /// One-shot driver: pulls everything the aggregation step needs from a
 /// writer that has already flushed its per-unit data, computes the
 /// rolled-up nodes + edges, and persists them via the writer's
@@ -658,24 +682,27 @@ pub async fn compute_and_persist(
         // (atlas tasks 3.4/8.4) verbatim from its root module.
         let file_docs: HashMap<ShortId, String> =
             writer.scan_file_docs().await?.into_iter().collect();
-        let (mut concepts, domains, contracts, shape) = crate::atlas::producer::build_concepts(
-            &symbols,
-            &files,
-            &primary_def_file,
-            &aggregate_of,
-            &atlas_anchors,
-            &nodes,
-            &edges,
-            &node_membership,
-            &flat_communities,
-            &primary_def_range,
-            &file_docs,
-            &crate::atlas::producer::ShapeMeta {
-                workspace_name: &ctx.workspace_name,
-                freshness: &ctx.freshness,
-                timestamp: &ctx.timestamp,
-            },
-        );
+        let table_edges = scan_table_edges(writer).await?;
+        let (mut concepts, domains, contracts, tables, shape) =
+            crate::atlas::producer::build_concepts(
+                &symbols,
+                &files,
+                &primary_def_file,
+                &aggregate_of,
+                &atlas_anchors,
+                &nodes,
+                &edges,
+                &node_membership,
+                &flat_communities,
+                &primary_def_range,
+                &file_docs,
+                &table_edges,
+                &crate::atlas::producer::ShapeMeta {
+                    workspace_name: &ctx.workspace_name,
+                    freshness: &ctx.freshness,
+                    timestamp: &ctx.timestamp,
+                },
+            );
         // The atlas respects .gitignore: drop any concept whose dir is ignored.
         concepts.retain(|c| !dir_is_gitignored(&ctx.source_root, &c.resource));
         // Refresh the stable `.kenn/atlas` handle here, in the SHARED writer,
@@ -692,8 +719,15 @@ pub async fn compute_and_persist(
                 );
             }
         }
-        crate::atlas::producer::write_bundle(&ctx.out_dir, &shape, &concepts, &domains, &contracts)
-            .map_err(|e| kenn_store::api::DbError::Backend(format!("atlas write: {e}")))?;
+        crate::atlas::producer::write_bundle(
+            &ctx.out_dir,
+            &shape,
+            &concepts,
+            &domains,
+            &contracts,
+            &tables,
+        )
+        .map_err(|e| kenn_store::api::DbError::Backend(format!("atlas write: {e}")))?;
     }
     Ok(Some(counts))
 }

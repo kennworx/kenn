@@ -15,3 +15,4 @@ pub mod domains;
 pub mod model;
 pub mod okf;
 pub mod producer;
+pub mod tables;

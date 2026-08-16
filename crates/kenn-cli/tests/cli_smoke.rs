@@ -465,3 +465,87 @@ fn workspace_discovery_no_env_no_flag_emits_reason() {
         "expected reason=no-claude-project-dir, stderr:\n{stderr}"
     );
 }
+
+/// The atlas axes answer from a real snapshot, including the tables axis.
+///
+/// Exercises `dispatch_axis`, which nothing else reaches: the router's coverage
+/// came entirely from the non-axis arms, so adding an axis command tripped the
+/// complexity gate on a function no test had ever run.
+///
+/// Markdown-only so it needs no external toolchain. The tables axis is empty
+/// here and that is the point — an axis with nothing to show must still answer.
+#[test]
+fn the_atlas_axes_answer_on_a_built_snapshot() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("README.md"),
+        "# Widgets\n\nProse about the widget subsystem.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("schema.sql"),
+        "CREATE TABLE widgets (id INT);\nSELECT id FROM widgets;\n",
+    )
+    .unwrap();
+    ci(dir.path(), &["init"]).success();
+    // `kenn init` leaves SQL opt-in; the axis must answer either way.
+    ci(dir.path(), &["index"]).success();
+
+    for axis in ["packages", "domains", "contracts", "documents", "tables"] {
+        let out = ci(dir.path(), &[axis, "--json"])
+            .success()
+            .get_output()
+            .clone();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("items"), "{axis} answered: {text}");
+    }
+}
+
+/// Naming a table returns its references rather than the listing — the drill-in
+/// half of the axis, and the arm that carries the grouping.
+#[test]
+fn naming_a_table_returns_its_reference_sites() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("README.md"), "# db\n").unwrap();
+    std::fs::write(
+        dir.path().join("schema.sql"),
+        "CREATE TABLE widgets (id INT);\nSELECT id FROM widgets;\n",
+    )
+    .unwrap();
+    ci(dir.path(), &["init"]).success();
+    // The template already carries a `[language.sql]` section, opt-in and off;
+    // appending a second one is a duplicate-key parse error, so flip the flag.
+    let cfg = dir.path().join("kenn.toml");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    let text = text.replacen(
+        "[language.sql]\nenabled = false",
+        "[language.sql]\nenabled = true",
+        1,
+    );
+    assert!(
+        text.contains("[language.sql]\nenabled = true"),
+        "flag flipped"
+    );
+    std::fs::write(&cfg, text).unwrap();
+    ci(dir.path(), &["index", "--force"]).success();
+
+    let listing = ci(dir.path(), &["tables", "--json"])
+        .success()
+        .get_output()
+        .clone();
+    let listing = String::from_utf8_lossy(&listing.stdout).to_string();
+    assert!(
+        listing.contains("widgets"),
+        "the table is listed: {listing}"
+    );
+
+    let named = ci(dir.path(), &["tables", "sql:widgets", "--json"])
+        .success()
+        .get_output()
+        .clone();
+    let named = String::from_utf8_lossy(&named.stdout).to_string();
+    assert!(
+        named.contains("declares"),
+        "naming it returns its sites, with what each does: {named}"
+    );
+}

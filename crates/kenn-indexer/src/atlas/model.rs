@@ -230,6 +230,50 @@ pub struct ContractConcept {
     pub package_span: u64,
 }
 
+/// One database table and every site that names it.
+///
+/// A table is the one entity a repository's schema, its migrations, its mapper
+/// files and its application code all name in common — and no other axis covers
+/// it, because a table is not in a package. Read STRAIGHT from the table edges,
+/// like a contract and for the same reasons: explicit, complete, deterministic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableConcept {
+    /// Path-qualified concept id, e.g. `tables/public.orders`.
+    pub id: String,
+    /// The table's name, schema-qualified when the source qualified it.
+    pub title: String,
+    /// The table node's own `pub_id`, so a reader can `kenn list usages` it.
+    pub pub_id: String,
+    /// True when some statement in this workspace declares the table. False
+    /// means the schema is owned elsewhere — ordinary, not a defect.
+    pub internal: bool,
+    /// References grouped by the file that made them, heaviest first, capped.
+    pub by_file: Vec<TableFileRefs>,
+    /// Distinct referencing files, BEFORE the render cap — the breadth that
+    /// ranks the axis.
+    pub file_span: u64,
+    /// Distinct referencing languages, BEFORE the render cap.
+    pub language_span: u64,
+    /// Total reference sites, BEFORE the render cap.
+    pub total_refs: u64,
+}
+
+/// The references to a [`TableConcept`] made from one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableFileRefs {
+    /// The file the references were made in.
+    pub file: String,
+    /// That file's language — so a table named by a migration, a changelog and
+    /// application code reads as such at a glance.
+    pub language: String,
+    /// The referencing symbols, each with its `pub_id` and location, capped for
+    /// render, paired with what the reference does (`declares` / `modifies` /
+    /// `accesses`).
+    pub sites: Vec<(String, SymbolRef)>,
+    /// Total references from this file, BEFORE the render cap.
+    pub count: u64,
+}
+
 /// The implementers of a [`ContractConcept`] that live in one package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractImplementers {
@@ -267,6 +311,9 @@ pub struct AtlasShape {
     /// a 125-package solution read as "24 domains" when it has 78.
     pub domains_total: usize,
     pub contracts_total: usize,
+    /// Tables selected before the render cap, so the index can name what it
+    /// dropped rather than showing a capped count as the whole.
+    pub tables_total: usize,
     /// Concrete freshness: HEAD sha, or the staleness key when git is absent.
     pub freshness: String,
     /// ISO-8601 build timestamp (header-only, ephemeral).

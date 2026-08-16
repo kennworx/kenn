@@ -24,9 +24,10 @@ use super::coupling::{classify, couplings, Direction, PairWeights};
 use super::domains;
 use super::model::{
     AtlasShape, Concept, ContractConcept, ContractImplementers, DomainConcept, SpannedPackage,
-    SymbolRef,
+    SymbolRef, TableConcept, TableFileRefs,
 };
 use super::okf;
+use super::tables;
 
 const UNANCHORED: &str = "<unanchored>";
 const MAX_MEMBERS: usize = 6;
@@ -372,11 +373,16 @@ pub fn build_concepts(
     flat: &[AnalysisFlatCommunityRecord],
     primary_def_range: &HashMap<ShortId, (u32, u32)>,
     file_docs: &HashMap<ShortId, String>,
+    // Raw per-site table edges `(referencing symbol, table, kind)`. Raw, not
+    // aggregate: which FILE made the reference is the tables axis's whole
+    // answer, and an aggregate has already collapsed that.
+    table_edges: &[(ShortId, ShortId, EdgeKind)],
     shape_meta: &ShapeMeta<'_>,
 ) -> (
     Vec<Concept>,
     Vec<DomainConcept>,
     Vec<ContractConcept>,
+    Vec<TableConcept>,
     AtlasShape,
 ) {
     // Each internal (non-external) symbol → its anchor name, skipping the
@@ -783,7 +789,14 @@ pub fn build_concepts(
         files,
         primary_def_range,
     );
-    // Built after both axes so the header can carry their pre-cap totals.
+    let (tables, tables_total) = build_tables(
+        symbols,
+        table_edges,
+        primary_def_file,
+        files,
+        primary_def_range,
+    );
+    // Built after every axis so the header can carry their pre-cap totals.
     let shape = AtlasShape {
         name: shape_meta.workspace_name.to_string(),
         languages,
@@ -795,10 +808,11 @@ pub fn build_concepts(
         test_ratio_pct,
         domains_total,
         contracts_total,
+        tables_total,
         freshness: shape_meta.freshness.to_string(),
         timestamp: shape_meta.timestamp.to_string(),
     };
-    (concepts, domains, contracts, shape)
+    (concepts, domains, contracts, tables, shape)
 }
 
 /// One [`SpannedPackage`] row from a package name + its member/link counts,
@@ -817,6 +831,14 @@ fn spanned_package(
     }
 }
 
+/// Render caps for the tables axis. Higher than the contract caps: tables are
+/// small enough to enumerate honestly — a real repository carried 128 distinct
+/// tables against tens of thousands of code symbols — and the axis is the only
+/// place the schema appears at all.
+const MAX_TABLES: usize = 40;
+const MAX_TABLE_FILES: usize = 12;
+const MAX_REFS_PER_FILE: usize = 6;
+
 const MAX_CONTRACTS: usize = 24;
 const MAX_CONTRACT_PKGS: usize = 12;
 const MAX_IMPLEMENTERS_PER_PKG: usize = 6;
@@ -831,6 +853,123 @@ const MAX_IMPLEMENTERS_PER_PKG: usize = 6;
 /// this abstraction implemented across the tree" — the question the package axis
 /// can't. Test nodes are excluded on both ends (a production contract's test
 /// doubles are not its architecture), matching domain/central eligibility.
+/// Project the store's records into the shared table selection, then render it
+/// with the display caps.
+///
+/// Per-SITE, not rolled up: which file made the reference is the reader's
+/// question, and an aggregate has already collapsed it. That is why this reads
+/// the raw symbol/edge records rather than the aggregate ones the contracts
+/// axis uses.
+fn build_tables<'a>(
+    symbols: &'a HashMap<ShortId, SymbolRecord>,
+    table_edges: &[(ShortId, ShortId, EdgeKind)],
+    primary_def_file: &HashMap<ShortId, ShortId>,
+    files: &'a HashMap<ShortId, String>,
+    primary_def_range: &HashMap<ShortId, (u32, u32)>,
+) -> (Vec<TableConcept>, usize) {
+    let table_kind = Kind::SqlTable;
+    let table_rows: Vec<(ShortId, &'a str)> = symbols
+        .iter()
+        .filter(|(_, r)| r.kind == table_kind)
+        .map(|(&id, r)| (id, r.name.as_str()))
+        .collect();
+
+    let sites: Vec<(ShortId, tables::RefSite<'a>)> = table_edges
+        .iter()
+        .filter_map(|(src, dst, kind)| {
+            let r = symbols.get(src)?;
+            let file = primary_def_file
+                .get(src)
+                .and_then(|f| files.get(f))
+                .map_or("", String::as_str);
+            let ref_kind = match kind {
+                EdgeKind::DefinesTable => tables::RefKind::Declares,
+                EdgeKind::AltersTable => tables::RefKind::Modifies,
+                _ => tables::RefKind::Accesses,
+            };
+            Some((
+                *dst,
+                tables::RefSite {
+                    symbol: *src,
+                    name: r.name.as_str(),
+                    file,
+                    language: r.language.db_name(),
+                    kind: ref_kind,
+                },
+            ))
+        })
+        .collect();
+
+    let selected = tables::select_tables(&table_rows, &sites);
+    // Counted BEFORE the cap, so the index can name what it dropped.
+    let total = selected.len();
+
+    let mut built: Vec<TableConcept> = selected
+        .into_iter()
+        .take(MAX_TABLES)
+        .map(|t| {
+            let by_file: Vec<TableFileRefs> = t
+                .by_file
+                .iter()
+                .take(MAX_TABLE_FILES)
+                .map(|(file, group)| TableFileRefs {
+                    file: (*file).to_string(),
+                    language: group
+                        .first()
+                        .map_or(String::new(), |s| s.language.to_string()),
+                    sites: group
+                        .iter()
+                        .take(MAX_REFS_PER_FILE)
+                        .map(|s| {
+                            (
+                                s.kind.as_str().to_string(),
+                                symbol_ref(
+                                    s.symbol,
+                                    symbols,
+                                    primary_def_file,
+                                    files,
+                                    primary_def_range,
+                                ),
+                            )
+                        })
+                        .collect(),
+                    count: group.len() as u64,
+                })
+                .collect();
+            TableConcept {
+                id: okf::table_id(t.name),
+                title: t.name.to_string(),
+                pub_id: symbols
+                    .get(&t.node)
+                    .map_or_else(String::new, |r| r.pub_id.clone()),
+                internal: t.internal,
+                by_file,
+                file_span: t.file_span,
+                language_span: t.language_span,
+                total_refs: t.total_refs,
+            }
+        })
+        .collect();
+    dedupe_table_ids(&mut built);
+    (built, total)
+}
+
+/// Ensure table concept ids are unique — two schemas can hold a table of the
+/// same name, and the slug drops the qualifier. Deterministic, like the
+/// contract equivalent.
+fn dedupe_table_ids(tables: &mut [TableConcept]) {
+    let mut seen: HashSet<String> = HashSet::new();
+    for t in tables.iter_mut() {
+        if !seen.insert(t.id.clone()) {
+            let mut n = 2;
+            while !seen.insert(format!("{}-{n}", t.id)) {
+                n += 1;
+            }
+            t.id = format!("{}-{n}", t.id);
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "resolving each implementer to its pub_id + location needs the same symbol maps the central-symbol pass holds; a struct only adds indirection"
@@ -1147,6 +1286,7 @@ pub fn write_bundle(
     concepts: &[Concept],
     domains: &[DomainConcept],
     contracts: &[ContractConcept],
+    tables: &[TableConcept],
 ) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(out_dir.join("packages"))?;
     for c in concepts {
@@ -1173,10 +1313,18 @@ pub fn write_bundle(
         }
         std::fs::write(path, okf::render_contract(c))?;
     }
+    for t in tables {
+        // Table id is `tables/<name-slug>`; same `<id>.md` layout.
+        let path = out_dir.join(format!("{}.md", t.id));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, okf::render_table(t))?;
+    }
     let index_path = out_dir.join(okf::INDEX_MD);
     std::fs::write(
         &index_path,
-        okf::render_index(shape, concepts, domains, contracts),
+        okf::render_index(shape, concepts, domains, contracts, tables),
     )?;
 
     let log_path = out_dir.join(okf::LOG_MD);
@@ -1339,7 +1487,7 @@ mod tests {
     }
 
     fn build(f: &Fx) -> (Vec<Concept>, AtlasShape) {
-        let (concepts, _domains, _contracts, shape) = build_concepts(
+        let (concepts, _domains, _contracts, _tables, shape) = build_concepts(
             &f.symbols,
             &f.files,
             &f.pdf,
@@ -1351,6 +1499,7 @@ mod tests {
             &[],
             &f.pdr,
             &HashMap::new(),
+            &[],
             &meta(),
         );
         (concepts, shape)
@@ -1443,6 +1592,7 @@ mod tests {
             flat,
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         )
         .1
@@ -1548,6 +1698,7 @@ mod tests {
             &flat,
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         )
         .1;
@@ -1709,7 +1860,7 @@ mod tests {
             membership(5, 1),
         ];
         let flat = vec![flat_community(1, 5, true)];
-        let (_c, domains, _contracts, _s) = build_concepts(
+        let (_c, domains, _contracts, _t, _s) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -1721,6 +1872,7 @@ mod tests {
             &flat,
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         assert!(
@@ -1771,7 +1923,7 @@ mod tests {
             membership(4, 1),
         ];
         let flat = vec![flat_community(1, 4, true)];
-        let (_c, domains, _contracts, _s) = build_concepts(
+        let (_c, domains, _contracts, _t, _s) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -1783,6 +1935,7 @@ mod tests {
             &flat,
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         assert!(
@@ -1856,7 +2009,7 @@ mod tests {
             membership(4, 1),
         ];
         let flat = vec![flat_community(1, 4, true)];
-        let (_c, domains, _contracts, _s) = build_concepts(
+        let (_c, domains, _contracts, _t, _s) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -1868,6 +2021,7 @@ mod tests {
             &flat,
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         assert_eq!(domains.len(), 1);
@@ -1994,7 +2148,7 @@ mod tests {
             membership(4, 1),
         ];
         let flat = vec![flat_community(1, 4, true)];
-        let (_c, domains, _contracts, _s) = build_concepts(
+        let (_c, domains, _contracts, _t, _s) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -2006,6 +2160,7 @@ mod tests {
             &flat,
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         assert!(
@@ -2046,7 +2201,7 @@ mod tests {
             membership(4, 1),
         ];
         let flat = vec![flat_community(1, 4, false)]; // NOT cross_anchor
-        let (_c, domains, _contracts, _s) = build_concepts(
+        let (_c, domains, _contracts, _t, _s) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -2058,6 +2213,7 @@ mod tests {
             &flat,
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         // Mutation-check backing (§9): dropping the `|| single_dominant` relaxation
@@ -2138,7 +2294,7 @@ mod tests {
             membership(7, 1),
         ];
         let flat = vec![flat_community(1, 4, true)];
-        let (concepts, domains, _contracts, _s) = build_concepts(
+        let (concepts, domains, _contracts, _s, _tbl) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -2150,6 +2306,7 @@ mod tests {
             &flat,
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         // Mutation-check backing (§9): removing the example `continue` in the
@@ -2224,7 +2381,7 @@ mod tests {
             .map(|(i, p)| (i, p.to_string()))
             .collect();
         let pdf = [(1, 10), (2, 20)].into_iter().collect();
-        let (concepts, _, _, _) = build_concepts(
+        let (concepts, _, _, _, _tbl) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -2236,6 +2393,7 @@ mod tests {
             &[],
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         let pkgs: Vec<&str> = concepts
@@ -2297,7 +2455,7 @@ mod tests {
             agg_node(3, "Gadget", Kind::Class, 1, "alpha"),
         ];
         let edges = vec![agg_edge(1, 2, 3), agg_edge(1, 3, 3), agg_edge(2, 3, 1)];
-        let (concepts, _, _, _) = build_concepts(
+        let (concepts, _, _, _, _tbl) = build_concepts(
             &symbols,
             &HashMap::new(),
             &HashMap::new(),
@@ -2309,6 +2467,7 @@ mod tests {
             &[],
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         let alpha = concepts.iter().find(|c| c.title == "alpha").unwrap();
@@ -2372,7 +2531,7 @@ mod tests {
             agg_edge(6, 7, 3),
             agg_edge(7, 8, 3),
         ];
-        let (concepts, _, _, _) = build_concepts(
+        let (concepts, _, _, _, _tbl) = build_concepts(
             &symbols,
             &HashMap::new(),
             &HashMap::new(),
@@ -2384,6 +2543,7 @@ mod tests {
             &[],
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         let central = |title: &str| -> Vec<String> {
@@ -2576,6 +2736,7 @@ mod tests {
                 &[],
                 &HashMap::new(),
                 fd,
+                &[],
                 &meta(),
             )
             .0
@@ -2611,7 +2772,7 @@ mod tests {
         let nodes: Vec<AggregateNodeRecord> = (1..=8)
             .map(|i| agg_node(i, &format!("S{i}"), Kind::Function, 1, "mono"))
             .collect();
-        let (concepts, _domains, _contracts, _shape) = build_concepts(
+        let (concepts, _domains, _contracts, _shape, _tbl) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -2623,6 +2784,7 @@ mod tests {
             &[],
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         let mono = concepts.iter().find(|c| c.title == "mono").unwrap();
@@ -2676,7 +2838,7 @@ mod tests {
     #[test]
     fn dominant_structured_package_subdivides_into_components() {
         let (symbols, files, pdf, agg, anchors, nodes) = structured_mono();
-        let (concepts, _domains, _contracts, _shape) = build_concepts(
+        let (concepts, _domains, _contracts, _shape, _tbl) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -2688,6 +2850,7 @@ mod tests {
             &[],
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         let pkg = concepts.iter().find(|c| c.title == "mono").unwrap();
@@ -2739,7 +2902,7 @@ mod tests {
         let nodes: Vec<AggregateNodeRecord> = (1..=7)
             .map(|i| agg_node(i, &format!("S{i}"), Kind::Class, 1, "mono"))
             .collect();
-        let (concepts, _domains, _contracts, _shape) = build_concepts(
+        let (concepts, _domains, _contracts, _shape, _tbl) = build_concepts(
             &symbols,
             &files,
             &pdf,
@@ -2751,6 +2914,7 @@ mod tests {
             &[],
             &HashMap::new(),
             &HashMap::new(),
+            &[],
             &meta(),
         );
         let mono = concepts.iter().find(|c| c.title == "mono").unwrap();
@@ -2828,7 +2992,7 @@ mod tests {
         let f = fixture();
         let (concepts, shape) = build(&f);
         let dir = tempfile::TempDir::new().unwrap();
-        let index = write_bundle(dir.path(), &shape, &concepts, &[], &[]).unwrap();
+        let index = write_bundle(dir.path(), &shape, &concepts, &[], &[], &[]).unwrap();
         assert!(index.exists());
         assert!(dir.path().join("packages/rust_alpha.md").exists());
         assert!(dir.path().join("documents/docs.md").exists());

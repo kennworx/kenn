@@ -372,6 +372,19 @@ pub enum QueryCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Database tables the graph knows, and what touches each. Bare: the first
+    /// page with their reference breadth, widest first — pass `--all` for every
+    /// one. With a name (id or table name): every site that declares, modifies,
+    /// or accesses it, grouped by file.
+    Tables {
+        /// The table's id (`sql:orders`, `sql:public.orders`) or its name. A
+        /// name matching several tables returns them all.
+        table: Option<String>,
+        #[command(flatten)]
+        page: PageArgs,
+        #[arg(long)]
+        json: bool,
+    },
     /// First-party non-code directories the atlas tracks (docs, specs, …).
     /// Bare: the first page with their file counts — pass `--all` for every one.
     Documents(DocumentsGroup),
@@ -391,11 +404,33 @@ pub enum QueryCommand {
     Get(GetGroup),
 }
 
-/// Route a query subcommand to its entry fn. Small (6 arms) and fully covered
-/// by tests, so it stays well under the CRAP threshold.
+/// Route a query subcommand to its entry fn.
+///
+/// Split in two by category rather than grown: each new atlas axis was adding an
+/// arm to one router until it tripped the complexity gate. The axes go to
+/// [`dispatch_axis`]; everything else is handled here.
 pub fn dispatch(cmd: QueryCommand, ctx: Ctx) -> Result<ExitCodes> {
     match cmd {
         QueryCommand::Overview { json } => run_overview(ctx, json),
+        QueryCommand::Find(g) => run_find(ctx, g),
+        QueryCommand::List(g) => run_list(ctx, g),
+        QueryCommand::Check(g) => run_check(ctx, g),
+        QueryCommand::Findings(g) => run_findings(ctx, g),
+        QueryCommand::Get(g) => run_get(ctx, g),
+        axis => dispatch_axis(axis, ctx),
+    }
+}
+
+/// The atlas axes — packages, domains, contracts, tables, documents. They share
+/// a shape (an optional name, a page, a format) and grow together, so they route
+/// together.
+#[expect(
+    clippy::unreachable,
+    reason = "`dispatch` routes only axis variants here; the arm names that invariant \
+              rather than letting a future variant fall through to the wrong handler"
+)]
+fn dispatch_axis(cmd: QueryCommand, ctx: Ctx) -> Result<ExitCodes> {
+    match cmd {
         QueryCommand::Packages {
             package,
             page,
@@ -407,12 +442,9 @@ pub fn dispatch(cmd: QueryCommand, ctx: Ctx) -> Result<ExitCodes> {
             page,
             json,
         } => run_contracts(ctx, contract, page, json),
+        QueryCommand::Tables { table, page, json } => run_tables(ctx, table, page, json),
         QueryCommand::Documents(g) => run_documents(ctx, g),
-        QueryCommand::Find(g) => run_find(ctx, g),
-        QueryCommand::List(g) => run_list(ctx, g),
-        QueryCommand::Check(g) => run_check(ctx, g),
-        QueryCommand::Findings(g) => run_findings(ctx, g),
-        QueryCommand::Get(g) => run_get(ctx, g),
+        _ => unreachable!("dispatch routes only axis commands here"),
     }
 }
 
@@ -525,6 +557,31 @@ pub fn run_contracts(
                     &state,
                     &tools::ListContractsArgs {
                         contract: contract.clone(),
+                        pagination: pg,
+                    },
+                )
+                .await
+            })
+            .await,
+            fmt,
+        )
+    })
+}
+
+pub fn run_tables(
+    ctx: Ctx,
+    table: Option<String>,
+    page: PageArgs,
+    json: bool,
+) -> Result<ExitCodes> {
+    let fmt = Format::from_json_flag(json);
+    run_on_state(ctx, false, |state| async move {
+        emit_result(
+            run_listing(page.all, &page, |pg| async {
+                tools::list_tables(
+                    &state,
+                    &tools::ListTablesArgs {
+                        table: table.clone(),
                         pagination: pg,
                     },
                 )

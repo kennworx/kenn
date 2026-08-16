@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::model::{
-    AtlasShape, Concept, ContractConcept, Coupling, DomainConcept, Role, SymbolRef,
+    AtlasShape, Concept, ContractConcept, Coupling, DomainConcept, Role, SymbolRef, TableConcept,
 };
 
 /// The reserved OKF filenames — never treated as concept documents.
@@ -123,6 +123,13 @@ fn concept_slug<'a>(name: &str, fallback: &'a str) -> std::borrow::Cow<'a, str> 
 #[must_use]
 pub fn contract_id(name: &str) -> String {
     format!("contracts/{}", concept_slug(name, "contract"))
+}
+
+/// Bundle-relative concept id for a table, under `tables/`. The producer
+/// disambiguates any residual slug collision.
+#[must_use]
+pub fn table_id(name: &str) -> String {
+    format!("tables/{}", concept_slug(name, "table"))
 }
 
 /// A readable domain concept id from its hub symbol name: a slug under
@@ -487,9 +494,97 @@ fn counts_note(c: &Concept, multilingual: bool) -> String {
     )
 }
 
+/// Render one table concept: what it is, and every site that names it grouped
+/// by the file the reference was made in.
+///
+/// Grouped by FILE rather than by package, unlike a contract's implementers. A
+/// table's references have no package to roll into — a statement in a migration,
+/// an element in a changelog and a function in application code are three files
+/// in three languages, and which file made the reference is the reader's actual
+/// question.
+#[must_use]
+#[expect(
+    clippy::format_push_string,
+    reason = "building a markdown document line by line; format! per line reads clearer than write! — same as every sibling renderer"
+)]
+pub fn render_table(t: &TableConcept) -> String {
+    let front = Frontmatter {
+        type_: "table",
+        title: &t.title,
+        description: None,
+        resource: None,
+        tags: vec![if t.internal { "declared" } else { "external" }],
+    };
+    let yaml = serde_yaml_ng::to_string(&front).unwrap_or_default();
+    let yaml = yaml.strip_prefix("---\n").unwrap_or(&yaml);
+    let sep = if yaml.ends_with('\n') { "" } else { "\n" };
+
+    // "external" is ordinary rather than a defect: measured on a real
+    // repository, 85 of 133 tables were named only by an attribute and declared
+    // by no statement in the workspace at all.
+    let origin = if t.internal {
+        "Declared in this workspace"
+    } else {
+        "Declared elsewhere — this workspace only references it"
+    };
+    let mut body = format!("\n_{origin}_\n\n| ID |\n|---|\n| `{}` |\n", t.pub_id);
+    let shown = t.by_file.len() as u64;
+    let cap_note = if t.file_span > shown {
+        format!(", heaviest {shown} shown")
+    } else {
+        String::new()
+    };
+    body.push_str(&format!(
+        "\n## References — {} across {} files in {} languages{cap_note}\n",
+        t.total_refs, t.file_span, t.language_span,
+    ));
+    for f in &t.by_file {
+        body.push_str(&format!(
+            "\n### `{}` — {} ({})\n\n| Does | ID | Location |\n|---|---|---|\n",
+            f.file, f.count, f.language,
+        ));
+        for (kind, s) in &f.sites {
+            body.push_str(&format!("| {kind} | `{}` | {} |\n", s.pub_id, location(s)));
+        }
+        if f.count > f.sites.len() as u64 {
+            body.push_str(&format!(
+                "\n_… (+{} more)_\n",
+                f.count - f.sites.len() as u64
+            ));
+        }
+    }
+    format!("---\n{yaml}{sep}---\n{body}")
+}
+
+/// The tables axis section of `index.md`. Extracted because each axis is a
+/// self-contained block and `render_index` grows by one every time an axis
+/// lands — this one took it past the line limit.
+#[expect(
+    clippy::format_push_string,
+    reason = "building a markdown document line by line; same as every sibling renderer"
+)]
+fn push_tables_axis(out: &mut String, shape: &AtlasShape, tables: &[TableConcept]) {
+    // The tables axis — the schema, and how broadly each table is referenced.
+    // Ranked by breadth (files, then languages) because a table named by a
+    // migration, a changelog and application code is the interesting one.
+    if !tables.is_empty() {
+        out.push_str(&format!(
+            "\n## Tables{}\n\n",
+            cap_suffix(shape.tables_total, tables.len(), "tables")
+        ));
+        for t in tables {
+            let origin = if t.internal { "" } else { " · external" };
+            out.push_str(&format!(
+                "- [{}](/{}.md) — {} references across {} files{origin}\n",
+                t.title, t.id, t.total_refs, t.file_span,
+            ));
+        }
+    }
+}
+
 /// Render the reserved `index.md`: a frontmatter-free shape/status header, then
 /// one section per [`Role`] (foundation-first), a `## Documents` section, and
-/// the cross-package `## Domains` axis last.
+/// the cross-package `## Domains`, `## Contracts` and `## Tables` axes last.
 #[must_use]
 #[expect(
     clippy::format_push_string,
@@ -500,6 +595,7 @@ pub fn render_index(
     concepts: &[Concept],
     domains: &[DomainConcept],
     contracts: &[ContractConcept],
+    tables: &[TableConcept],
 ) -> String {
     let langs = if shape.languages.is_empty() {
         "—".to_string()
@@ -615,6 +711,8 @@ pub fn render_index(
             ));
         }
     }
+
+    push_tables_axis(&mut out, shape, tables);
     out
 }
 
@@ -959,10 +1057,11 @@ mod tests {
             test_ratio_pct: 18,
             domains_total: 0,
             contracts_total: 0,
+            tables_total: 0,
             freshness: "HEAD abc123".into(),
             timestamp: "2026-07-13T00:00:00Z".into(),
         };
-        let idx = render_index(&shape, std::slice::from_ref(&concept()), &[], &[]);
+        let idx = render_index(&shape, std::slice::from_ref(&concept()), &[], &[], &[]);
         assert!(!idx.starts_with("---"), "index.md carries no frontmatter");
         assert!(idx.contains("# code_with_me atlas"));
         assert!(idx.contains("1 packages · 0 domains · 1240 symbols · 18% test · rust, ts"));
@@ -992,6 +1091,7 @@ mod tests {
             test_ratio_pct: 0,
             domains_total: 0,
             contracts_total: 0,
+            tables_total: 0,
             freshness: "HEAD abc".into(),
             timestamp: "2026-07-13T00:00:00Z".into(),
         };
@@ -1010,6 +1110,7 @@ mod tests {
                 mk("util", Role::Provider, 40),
                 mk("core", Role::Provider, 90),
             ],
+            &[],
             &[],
             &[],
         );
@@ -1192,6 +1293,7 @@ mod tests {
             test_ratio_pct: 18,
             domains_total: 1,
             contracts_total: 0,
+            tables_total: 0,
             freshness: "HEAD abc123".into(),
             timestamp: "2026-07-13T00:00:00Z".into(),
         };
@@ -1199,6 +1301,7 @@ mod tests {
             &shape,
             std::slice::from_ref(&concept()),
             std::slice::from_ref(&domain()),
+            &[],
             &[],
         );
         assert!(idx.contains("1 packages · 1 domains · 1240 symbols"));
@@ -1228,6 +1331,7 @@ mod tests {
             test_ratio_pct: 19,
             domains_total: 78,
             contracts_total: 40,
+            tables_total: 0,
             freshness: "HEAD abc123".into(),
             timestamp: "2026-07-13T00:00:00Z".into(),
         };
@@ -1236,6 +1340,7 @@ mod tests {
             std::slice::from_ref(&concept()),
             std::slice::from_ref(&domain()),
             std::slice::from_ref(&contract()),
+            &[],
         );
         // The header states the repo's shape, not the bundle's contents.
         assert!(
@@ -1271,6 +1376,7 @@ mod tests {
             test_ratio_pct: 0,
             domains_total: 0,
             contracts_total: 0,
+            tables_total: 0,
             freshness: "HEAD abc".into(),
             timestamp: "2026-07-13T00:00:00Z".into(),
         };
@@ -1286,7 +1392,7 @@ mod tests {
         doc.title = "docs".into();
         doc.role = None;
 
-        let md = render_index(&shape, &[pkg, comp, doc], &[], &[]);
+        let md = render_index(&shape, &[pkg, comp, doc], &[], &[], &[]);
         let comp_head = md.find("## Components").expect("a Components heading");
         let doc_head = md.find("## Documents").expect("a Documents heading");
         let comp_at = md.find("pkg / parsing").expect("the component is listed");

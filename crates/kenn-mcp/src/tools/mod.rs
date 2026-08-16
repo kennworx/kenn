@@ -27,6 +27,7 @@ mod query;
 mod semantic;
 mod state;
 mod support;
+mod tables;
 
 #[cfg(test)]
 mod tests;
@@ -63,6 +64,7 @@ pub use query::{
 };
 pub use semantic::{get_source, semantic_search, GetSourceArgs, SearchScope, SemanticSearchArgs};
 pub use state::{ServerState, WatchStartResult};
+pub use tables::{list_tables, ListTablesArgs, TableRefView, TableView};
 
 pub(crate) use state::ReadyView;
 #[cfg(test)]
