@@ -55,15 +55,35 @@
 - [x] 4.1 Self-index: `kenn tables` must report `symbols`, `defs`, `edges`,
   `packages`, `aggregate_*`, and `analysis_*` as **declared in-repo**. Today 14 of
   49 tables are internal. → verify: record the before/after internal count here.
-- [ ] 4.2 A multi-language corpus (C# + Liquibase XML + SQL): record tables,
-  references, and per-language site counts before and after. The XML arm carries
-  919 of 1014 sites today, so a regression there would be the expensive one. →
-  verify: no table loses references, and any table that gains a declaration gains
-  it from a real `CREATE`.
-- [ ] 4.3 Size the D6 risk rather than asserting it is small: count references
-  admitted by the relaxation whose statement came from a literal with
-  `unparsed > 0`, and read a sample. → verify: state the count and what the sample
-  showed, including any name that is not a real table.
+- [x] 4.2 A multi-language corpus (C# + Liquibase XML + SQL): record tables,
+  references, and per-language site counts before and after.
+
+  **This gate failed on the first attempt and is what found `one-table-one-identity`.**
+  Against a controlled baseline, one table moved from `sql:dealer_users`
+  (internal, `declares`) to `sql:users.dealer_users` (external, `modifies`) — a
+  visible lost declaration. The cause was not in this change, which can only add
+  references, but in a mint guard keyed on a table's bare name while references
+  carried the whole key; this change's one new reference merely exposed it.
+
+  With that fixed, the gate passes: no table name loses references, `dealer_users`
+  carries **both** its declaration and its `ALTER` (2 references, where the
+  pre-change baseline had 1), and the run reports zero dropped references.
+- [x] 4.3 Size the D6 risk rather than asserting it is small.
+
+  Answerable exactly, because this change was measured alone before the identity
+  fix landed. References admitted by the relaxation:
+
+  | corpus | admitted | what they were |
+  |---|---|---|
+  | multi-language (1014 refs) | **1** | `ALTER TABLE users.dealer_users RENAME TO dealer_assignments`, in a `<sql>` body whose second statement (`SET SCHEMA`) no dialect reads |
+  | self-index (281 refs) | **26** | every statement of `GRAPH_DDL` — 14 `CREATE TABLE` + 12 `CREATE INDEX` |
+
+  **Zero names that are not real tables**, across both. The sample is small
+  enough to have been read in full rather than sampled: 27 references, all of
+  them DDL naming a schema object in its target slot, which is exactly what the
+  verb rule predicts. The D6 hazard — dynamic DDL such as
+  `CREATE TABLE tenant_{id}_orders` producing a template name — did not occur in
+  either corpus, and remains a real possibility rather than an observed one.
 
 ## 5. Gates
 
@@ -74,10 +94,12 @@
 
 ## 6. Close the loop
 
-- [ ] 6.1 Resolve the finding this change came from
-  (`fnd_37c61ac0-be0c-4f40-832c-c6ada89c16cc`), which currently records the defect
-  as open. → verify: superseded with a pointer to this change, not deleted — the
-  measurement in it is still the reason the rule is what it is.
+- [x] 6.1 Resolve the finding this change came from
+  (`fnd_37c61ac0-be0c-4f40-832c-c6ada89c16cc`). Superseded by
+  `fnd_b4baf13d-adcc-4df0-a5d8-7a41f88874a1`, not deleted: the original
+  measurement — `sqlparser` rejecting `USING fts5(…, tokenize='unicode61')` in all
+  14 dialects — is still the reason the rule is what it is, and the next person to
+  touch `refs_of_literal` needs it.
 
 ## 7. What changed during implementation
 
@@ -151,6 +173,6 @@ declaration. Open questions before archiving:
   `fnd_601a3fe6-3fe2-4f5b-a3c1-c9339022a481`, and promptly violated: the §4.2
   diff was keyed by name. Re-checked afterwards and it happened to be sound
   (no two identities share a name on that corpus), but that was luck, not method.
-- [ ] 8.3 `4.2`, `4.3` and `6.1` stay open until `one-table-one-identity` lands.
-  The change is committed and gated but SHOULD NOT be archived: a user would see
-  one table lose its declaration.
+- [x] 8.3 `4.2`, `4.3` and `6.1` stayed open until `one-table-one-identity`
+  landed. It has: the reference loss is fixed, the corpus gate passes, and this
+  change is archivable.
