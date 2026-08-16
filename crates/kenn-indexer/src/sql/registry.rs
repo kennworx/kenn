@@ -174,12 +174,20 @@ pub struct Resolved {
     pub grade: LinkGrade,
 }
 
-/// Resolve a reference against a registry.
+/// Resolve a reference to the one identity it names.
 ///
-/// Returns every candidate: exactly one graded `Exact` when the reference is
-/// unambiguous, or one `Ambiguous` per candidate when an unqualified name
-/// matches several. A name the registry does not know still resolves — to
-/// itself, `Exact` — because the reference is what mints the table.
+/// Always exactly one candidate, always graded `Exact`. A name the registry
+/// does not know still resolves — to itself — because the reference is what
+/// mints the table.
+///
+/// The `Vec` and the grade are both vestigial and deliberately kept: this
+/// returned one `Ambiguous` candidate *per* match when an unqualified name
+/// matched several identities, and that rule was removed for inventing
+/// references (one reference became one edge per schema, so a count against
+/// `wallets.transfers` included references belonging to `public.transfers`).
+/// Collapsing the signature now would be a wider change than the rule that
+/// replaced it warrants; the shape is worth keeping while the identity model
+/// is still settling.
 #[must_use]
 pub fn resolve(reg: &dyn TableRegistry, schema: Option<&str>, name: &str) -> Vec<Resolved> {
     // A qualified reference names its schema, so it matches only that identity.

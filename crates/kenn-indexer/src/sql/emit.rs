@@ -130,4 +130,46 @@ mod tests {
         assert_eq!(edge_kind(RefRole::Alters), EdgeKind::AltersTable);
         assert_eq!(edge_kind(RefRole::Accesses), EdgeKind::AccessesTable);
     }
+
+    /// A reference with no target node is counted, not just skipped.
+    ///
+    /// The skip itself is right — one missing edge should not fail an index —
+    /// but a *silent* skip hid a lost `createTable` declaration through a full
+    /// corpus run, every unit test, and a green gate, and was found only by
+    /// diffing two indexes by hand. The count is what makes the next occurrence
+    /// a one-line report.
+    ///
+    /// Added on review: the counter shipped with its zero case verified on a
+    /// corpus and its non-zero case verified nowhere, so deleting the
+    /// `dropped += 1` would have failed nothing.
+    #[test]
+    fn a_reference_with_no_target_node_is_counted() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let writer = rt
+            .block_on(kenn_store::open_writer(
+                dir.path(),
+                kenn_store::WriterOptions::default(),
+            ))
+            .expect("open_writer");
+        let mut sink = crate::sink::BatchSink::new(writer, rt.handle().clone(), 16);
+
+        let present = TableKey::new(None, "orders".into());
+        let absent = TableKey::new(Some("archive".into()), "orders".into());
+        let mut ids = BTreeMap::new();
+        ids.insert(present.clone(), 1u32);
+
+        let refs = [
+            (10u32, &present, RefRole::Defines, LinkGrade::Exact),
+            (11u32, &absent, RefRole::Accesses, LinkGrade::Exact),
+            (12u32, &absent, RefRole::Accesses, LinkGrade::Exact),
+        ];
+        let dropped =
+            emit_table_edges(&mut sink, &ids, refs.into_iter()).expect("emit_table_edges");
+
+        assert_eq!(
+            dropped, 2,
+            "both references to the unminted identity are counted"
+        );
+    }
 }
